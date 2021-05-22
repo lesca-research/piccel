@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   width="83.92263mm"
+   height="72.162781mm"
+   viewBox="0 0 83.92263 72.162781"
+   version="1.1"
+   id="svg8"
+   inkscape:version="0.92.5 (2060ec1f9f, 2020-04-08)"
+   sodipodi:docname="sheeter_icon.svg">
+  <defs
+     id="defs2" />
+  <sodipodi:namedview
+     id="base"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:pageopacity="0.0"
+     inkscape:pageshadow="2"
+     inkscape:zoom="0.98994949"
+     inkscape:cx="253.67994"
+     inkscape:cy="68.68092"
+     inkscape:document-units="mm"
+     inkscape:current-layer="layer1"
+     showgrid="false"
+     inkscape:window-width="1920"
+     inkscape:window-height="999"
+     inkscape:window-x="0"
+     inkscape:window-y="29"
+     inkscape:window-maximized="1"
+     fit-margin-top="0"
+     fit-margin-left="0"
+     fit-margin-right="0"
+     fit-margin-bottom="0" />
+  <metadata
+     id="metadata5">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <dc:title></dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1"
+     transform="translate(-98.087921,-111.78221)">
+    <g
+       id="g950"
+       transform="matrix(0.95325899,0,0,1.1086047,4.5847285,-19.977296)">
+      <rect
+         ry="2.0319445"
+         y="147.8636"
+         x="113.58955"
+         height="36.081387"
+         width="52.919369"
+         id="rect826"
+         style="opacity:1;fill:#0088aa;fill-opacity:1;stroke:none;stroke-width:13;stroke-linecap:round;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;paint-order:fill markers stroke" />
+      <rect
+         style="opacity:1;fill:#a33e41;fill-opacity:1;stroke:none;stroke-width:13;stroke-linecap:round;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;paint-order:fill markers stroke"
+         id="rect866"
+         width="52.919369"
+         height="36.081387"
+         x="113.58955"
+         y="111.78221"
+         ry="2.0319445" />
+      <rect
+         ry="2.0319445"
+         y="111.78221"
+         x="166.50891"
+         height="36.08139"
+         width="15.501638"
+         id="rect868"
+         style="opacity:1;fill:#0088aa;fill-opacity:1;stroke:none;stroke-width:13;stroke-linecap:round;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;paint-order:fill markers stroke" />
+      <rect
+         style="opacity:1;fill:#a33e41;fill-opacity:1;stroke:none;stroke-width:13;stroke-linecap:round;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;paint-order:fill markers stroke"
+         id="rect870"
+         width="15.501638"
+         height="36.08139"
+         x="166.50891"
+         y="147.8636"
+         ry="2.0319445" />
+      <rect
+         ry="2.0319445"
+         y="147.8636"
+         x="98.087921"
+         height="36.08139"
+         width="15.501638"
+         id="rect872"
+         style="opacity:1;fill:#a33e41;fill-opacity:1;stroke:none;stroke-width:13;stroke-linecap:round;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;paint-order:fill markers stroke" />
+      <rect
+         style="opacity:1;fill:#5686ae;fill-opacity:1;stroke:none;stroke-width:13;stroke-linecap:round;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;paint-order:fill markers stroke"
+         id="rect874"
+         width="15.501638"
+         height="36.08139"
+         x="98.087929"
+         y="111.78221"
+         ry="2.0319445" />
+    </g>
+  </g>
+</svg>

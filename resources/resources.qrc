@@ -1,0 +1,7 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="icons">
+        <file alias="main_icon">piccel_icon.svg</file>
+    </qresource>
+</RCC>
+

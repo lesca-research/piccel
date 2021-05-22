@@ -1,0 +1,50 @@
+#! /usr/bin/env python3
+# -*- coding: utf-8 -*-
+import os.path as op
+from glob import glob
+from setuptools import setup, find_packages
+import subprocess
+
+version = {}
+with open("piccel/version.py") as fp:
+    exec(fp.read(), version)
+
+here = op.abspath(op.dirname(__file__))
+
+short_description = 'Collaborative data collection tool'
+long_description = short_description
+
+def make_resources():
+    ui_module_path = op.join('piccel', 'ui')
+    for ui_fn in glob(op.join('resources', '*.ui')):
+        dest_py_fn = op.join(ui_module_path,
+                             '%s_ui.py' % op.splitext(op.basename(ui_fn))[0])
+        cmd = ['pyuic5', '-x', ui_fn, '-o', dest_py_fn]
+        subprocess.run(cmd)
+    dest_py_fn = op.join(ui_module_path, 'resources.py')
+    cmd = ['pyrcc5', op.join('resources', 'resources.qrc'), '-o', dest_py_fn]
+    subprocess.run(cmd)
+
+make_resources()
+
+setup(name='piccel', version=version['__version__'],
+      description=short_description,
+      long_description=long_description,
+      author='Thomas Vincent', license='MIT',
+      classifiers=['Development Status :: 3 - Alpha',
+                   'Intended Audience :: Science/Research',
+                   'Intended Audience :: Information Technology',
+                   'Intended Audience :: End Users/Desktop',
+                   'License :: OSI Approved :: MIT License',
+                   'Environment :: Console',
+                   'Natural Language :: English',
+                   'Operating System :: OS Independent',
+                   'Programming Language :: Python :: 3.8',],
+      keywords='piccel spreadsheet data collection encryption',
+      packages=find_packages(exclude=['test']),
+      install_requires=['numpy', 'pandas', 'cryptography'],
+      entry_points={
+          'console_scripts': [
+              'piccel = piccel.commands.piccel:main',
+          ],
+      })
