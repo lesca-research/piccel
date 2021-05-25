@@ -201,7 +201,7 @@
   <customwidget>
    <class>FreezeTableWidget</class>
    <extends>QTableView</extends>
-   <header>.widgets</header>
+   <header>..widgets</header>
   </customwidget>
  </customwidgets>
  <resources/>
