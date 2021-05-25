@@ -1491,7 +1491,12 @@ class DataSheet:
         entry_df = pd.DataFrame([entry_dict], index=index)
         if self.df is not None:
             ordered_columns = None
-        entry_df.fillna(pd.NA, inplace=True)
+
+        dkeys = self.form_master.datetime_keys
+        datetime_cols = list(set(entry_df.columns).intersection(dkeys))
+        other_cols =  list(set(entry_df.columns).difference(dkeys))
+        entry_df[other_cols].fillna(pd.NA, inplace=True)
+        entry_df[datetime_cols].fillna(pd.NaT, inplace=True)
 
         if self.df is not None:
             process_entry_df(entry_df)
