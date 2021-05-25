@@ -1,5 +1,7 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
+import sys
+import os
 import os.path as op
 from glob import glob
 from setuptools import setup, find_packages
@@ -15,15 +17,21 @@ short_description = 'Collaborative data collection tool'
 long_description = short_description
 
 def make_resources():
-    ui_module_path = op.join('piccel', 'ui')
-    for ui_fn in glob(op.join('resources', '*.ui')):
-        dest_py_fn = op.join(ui_module_path,
-                             '%s_ui.py' % op.splitext(op.basename(ui_fn))[0])
-        cmd = ['pyuic5', '-x', ui_fn, '-o', dest_py_fn]
+    ui_module_path = op.join('piccel', 'ui', 'generated')
+    if not op.exists(ui_module_path):
+        os.makedirs(ui_module_path)
+    try:
+        for ui_fn in glob(op.join('resources', '*.ui')):
+            dest_py_fn = op.join(ui_module_path,
+                                 '%s_ui.py' % op.splitext(op.basename(ui_fn))[0])
+            cmd = ['pyuic5', '-x', ui_fn, '-o', dest_py_fn]
+            subprocess.run(cmd)
+        dest_py_fn = op.join(ui_module_path, 'resources.py')
+        cmd = ['pyrcc5', op.join('resources', 'resources.qrc'), '-o', dest_py_fn]
         subprocess.run(cmd)
-    dest_py_fn = op.join(ui_module_path, 'resources.py')
-    cmd = ['pyrcc5', op.join('resources', 'resources.qrc'), '-o', dest_py_fn]
-    subprocess.run(cmd)
+    except FileNotFoundError:
+        print('PyQT5 not found')
+        sys.exit(1)
 
 make_resources()
 
@@ -42,6 +50,7 @@ setup(name='piccel', version=version['__version__'],
                    'Programming Language :: Python :: 3.8',],
       keywords='piccel spreadsheet data collection encryption',
       packages=find_packages(exclude=['test']),
+      python_requires='>=3',
       install_requires=['numpy', 'pandas', 'cryptography'],
       entry_points={
           'console_scripts': [
