@@ -916,11 +916,12 @@ class NoPluginFileError(Exception): pass
 class UndefinedUser(Exception): pass
 
 class Unformatter:
-    def __init__(self, form, key):
+    def __init__(self, form, key, na_value=pd.NA):
         self.form = form
         self.key = key
+        self.na_value = na_value
     def __call__(self, v):
-        return self.form.unformat(self.key, v) if v!='' else pd.NA
+        return self.form.unformat(self.key, v) if v!='' else self.na_value 
 
 def protect_fn(fn):
     return ''.join(c if c.isalnum() else "_" for c in fn)
@@ -1784,7 +1785,7 @@ class TestDataSheet(unittest.TestCase):
         self.assertEqual(df_latest.loc[mask, 'Age'].values[0], 50)
         validity = self.sheet_ts.view_validity('latest')
         self.assertEqual(validity.shape, df_latest.shape)
-        self.assertTrue((validity.dtypes == np.bool).all())
+        self.assertTrue((validity.dtypes == bool).all())
 
     def test_plugin_validate(self):
         # TODO: Marshal should check for duplicate entry_id
@@ -1829,7 +1830,7 @@ class TestDataSheet(unittest.TestCase):
                 return 'latest'
             def view_validity(self, df, view):
                 validity = pd.DataFrame(index=df.index, columns=df.columns,
-                                        dtype=np.bool)
+                                        dtype=bool)
                 if view == 'latest':
                     col = 'Taille'
                     validity[col] = ~df[col].duplicated(keep=False).to_numpy()
@@ -1852,7 +1853,7 @@ class TestDataSheet(unittest.TestCase):
         view = self.sheet_ts.get_df_view('latest')
         validity = self.sheet_ts.view_validity('latest')
         expected_validity = pd.DataFrame(index=view.index, columns=view.columns,
-                                         dtype=np.bool)
+                                         dtype=bool)
         assert_frame_equal(validity, expected_validity)
 
     def test_data_io(self):
