@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 # TODO: add lock system for admin/marshall operations
+# TODO: reload view qitemlist after plugin update
 
 import io
 import base64
@@ -52,7 +53,7 @@ from hashlib import scrypt
 import logging
 import sys
 
-from PyQt5 import QtCore, QtGui, QtWidgets, Qsci
+from PyQt5 import QtCore, QtGui, QtWidgets
 from . import ui
 
 from appdirs import user_data_dir
@@ -4899,9 +4900,6 @@ class PiccelApp(QtWidgets.QApplication):
         self._login_ui.other_password_field.hide()
         self._login_ui.progressBar.hide()
 
-        # TODO:
-        # self._login_ui.editor_password_label.hide()
-        # self._login_ui.editor_password_field.hide()
         if user is not None and user != '':
             role = self.logic.workbook.get_user_role(user)
             logger.debug('Role of user %s: %s', user, role.name)
@@ -5003,19 +5001,19 @@ class PiccelApp(QtWidgets.QApplication):
         _text_editor_ui = ui.text_editor_ui.Ui_Form()
         _text_editor_ui.setupUi(text_editor_widget)
 
-        #_text_editor_ui.textBrowser.setText(text)
+        _text_editor_ui.textBrowser.setText(text)
 
-        __editor = Qsci.QsciScintilla()
-        __editor.setText(text)
-        __editor.setUtf8(True)
-        lexer = {
-            'json' : lambda : Qsci.QsciLexerJSON(),
-            'python' : lambda : Qsci.QsciLexerPython(),
-        }[language]()
-        __editor.setLexer(lexer)
-        vlayout = QtWidgets.QVBoxLayout(_text_editor_ui.frame_editor)
-        vlayout.setObjectName("vlayout_editor_frame")
-        vlayout.addWidget(__editor)
+        # __editor = Qsci.QsciScintilla()
+        # __editor.setText(text)
+        # __editor.setUtf8(True)
+        # lexer = {
+        #     'json' : lambda : Qsci.QsciLexerJSON(),
+        #     'python' : lambda : Qsci.QsciLexerPython(),
+        # }[language]()
+        # __editor.setLexer(lexer)
+        # vlayout = QtWidgets.QVBoxLayout(_text_editor_ui.frame_editor)
+        # vlayout.setObjectName("vlayout_editor_frame")
+        # vlayout.addWidget(__editor)
 
         tab_idx = tab_widget.addTab(text_editor_widget, tab_label)
         icon_style = QtWidgets.QStyle.SP_ArrowRight
@@ -5024,7 +5022,7 @@ class PiccelApp(QtWidgets.QApplication):
         tab_widget.setCurrentIndex(tab_idx)
 
         def _apply():
-            submit(__editor.text())
+            submit(_text_editor_ui.textBrowser.toPlainText())
 
         def cancel():
             tab_widget.removeTab(tab_idx)
