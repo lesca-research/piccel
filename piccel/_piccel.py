@@ -1902,7 +1902,7 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
-        time.sleep(0.01)
+        time.sleep(0.1)
         form.submit()
         self.assertTrue(self.sheet_ts.df.index.unique)
         entry_id = form['section1']['__entry_id__'].get_value()
@@ -1951,7 +1951,7 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
-        time.sleep(0.01)
+        time.sleep(0.1)
         logger.debug('-----------------')
         logger.debug('utest: submit form')
         form.submit()
@@ -1996,7 +1996,7 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
-        time.sleep(0.01)
+        time.sleep(0.1)
         logger.debug('-----------------')
         logger.debug('utest: submit form')
         form.submit()
@@ -2028,7 +2028,7 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
-        time.sleep(0.01)
+        time.sleep(0.1)
         form.submit()
 
         self.sheet_ts.reload_all_data()
@@ -4394,25 +4394,25 @@ class TestFormItem(unittest.TestCase):
                         vtype='datetime', generator='timestamp_creation',
                         supported_languages={'English'},
                         default_language='English')
-        end = datetime.now()
-        sleep_time_sec = 0.2
+        ts_after_init = datetime.now()
+        sleep_time_sec = 0.1
         time.sleep(sleep_time_sec)
         result = next(iter(item.submit().values()))
         self.assertGreaterEqual(result, start)
-        self.assertLess(result, end)
+        self.assertLess(result, ts_after_init+timedelta(seconds=sleep_time_sec/2))
 
     def test_form_item_ts_submission(self):
         item = FormItem(keys={'Entry_ts':None},
                         vtype='datetime', generator='timestamp_submission',
                         supported_languages={'English'},
                         default_language='English')
-        end = datetime.now()
-        sleep_time_sec = 0.2
+        ts_after_init = datetime.now()
+        sleep_time_sec = 0.1
         time.sleep(sleep_time_sec)
         result = next(iter(item.submit().values()))
         end_submit = datetime.now()
-        self.assertGreaterEqual(result, end+timedelta(seconds=sleep_time_sec))
-        self.assertLess(result, end_submit)
+        self.assertGreater(result, ts_after_init+timedelta(seconds=sleep_time_sec/2))
+        self.assertGreater(end_submit, result-timedelta(milliseconds=0.1))
 
     def test_notifications(self):
 
