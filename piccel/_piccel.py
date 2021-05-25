@@ -1902,6 +1902,7 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
+        time.sleep(0.01)
         form.submit()
         self.assertTrue(self.sheet_ts.df.index.unique)
         entry_id = form['section1']['__entry_id__'].get_value()
@@ -1950,6 +1951,7 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
+        time.sleep(0.01)
         logger.debug('-----------------')
         logger.debug('utest: submit form')
         form.submit()
@@ -2026,6 +2028,7 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
+        time.sleep(0.01)
         form.submit()
 
         self.sheet_ts.reload_all_data()
@@ -3281,8 +3284,8 @@ class FormItem:
             for key in self.keys:
                 if self.generator is not None and \
                    not self.generator.endswith('submission'):
-                    #logger.debug('%s: Use generator %s for key %s',
-                    # self, self.generator, key)
+                    logger.debug('%s: Use generator %s for key %s',
+                                 self, self.generator, key)
                     self.set_input_str(FormItem.GENERATORS[self.generator](), key)
                     # TODO utest that value is generated even if
                     # init value is given
