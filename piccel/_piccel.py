@@ -28,8 +28,6 @@ from enum import Enum
 import importlib
 from importlib import import_module
 import inspect
-
-from numpy.testing import assert_array_equal
 import csv
 
 from . import sheet_plugin_template
@@ -39,6 +37,8 @@ import unittest
 import tempfile
 
 import numpy as np
+from numpy.testing import assert_array_equal
+
 import pandas as pd
 from pandas.testing import assert_frame_equal, assert_series_equal
 
@@ -888,12 +888,6 @@ class LocalFileSystem:
         logger.debug('Remove file %s', fn)
         os.remove(op.join(self.root_folder, fn))
 
-    # def finalize_fn(self, fn):
-    #     """ Append encryption extension if necessary """
-    #     if self.encrypter is not None and not self.encrypter.has_crypt_ext(fn):
-    #         fn = self.encrypter.append_crypt_ext(fn)
-    #     return fn
-
     def save(self, fn, content_str, overwrite=False):
         afn = op.join(self.root_folder, fn)
         if self.encrypter is not None:
@@ -915,24 +909,11 @@ class LocalFileSystem:
             content_str = self.encrypter.decrypt_to_str(content_str)
         return content_str
 
-class DropboxFileSystem:
-    """ Fully remote (no local copy) """
-
-    def __init__(self, token, remote_folder='/'):
-        pass
-
-    def save(self, fn, content_str, overwrite=False):
-        """ Upload content """
-        pass
-
-    def load(self, fn):
-        """ Fetch remote content """
-        pass
-
 class InvalidSheetPlugin(Exception): pass
 class InvalidSheetLabel(Exception): pass
 class NoFormMasterError(Exception): pass
 class NoPluginFileError(Exception): pass
+class UndefinedUser(Exception): pass
 
 class Unformatter:
     def __init__(self, form, key):
@@ -1276,33 +1257,13 @@ class DataSheet:
                       for k in self.form_master.key_to_items}
         df = pd.read_csv(io.StringIO(df_str), sep=DataSheet.CSV_SEPARATOR,
                          engine='python', index_col=False, converters=converters)
-        hex_to_int = lambda h : np.uint64(int(h, 16))
-        df['__entry_id__'] = df['__entry_id__'].apply(hex_to_int).astype(np.dtype('uint64'))
-        df.set_index('__entry_id__', inplace=True)
-        if df.index.dtype != np.dtype('uint64'):
-            from IPython import embed; embed() # TODO: remove when utest done
-        if 0:
-            # TODO: Issue with quoted number text being converted to int/float
-            # see https://github.com/pandas-dev/pandas/issues/35713
-            tkeys = self.form_master.text_keys
-            strip_1st_char = lambda x : x[1:]
-            for tkey in tkeys:
-                df[tkey] = df[tkey].apply(strip_1st_char)
+        if '__entry_id__' in df.columns:
 
-            for ikey in self.form_master.int_keys:
-                df[ikey] = df[ikey].astype(str).astype(pd.Int64Dtype())
-
-            dkeys = self.form_master.datetime_keys
-            datetime_cols = list(set(df.columns).intersection(dkeys))
-            parse_datetime = FormItem.VTYPES['datetime']['unformat']
-            pdate = lambda x : parse_datetime(x) if x!='' else None
-            df[datetime_cols] = df[datetime_cols].applymap(parse_datetime)
-
-            dkeys = self.form_master.date_keys
-            date_cols = list(set(df.columns).intersection(dkeys))
-            parse_date = FormItem.VTYPES['date']['unformat']
-            pdate = lambda x : parse_date(x) if x!='' else None
-            df[date_cols] = df[date_cols].applymap(pdate)
+            hex_to_int = lambda h : np.uint64(int(h, 16))
+            df['__entry_id__'] = df['__entry_id__'].apply(hex_to_int).astype(np.dtype('uint64'))
+            df.set_index('__entry_id__', inplace=True)
+        else:
+            logger.warning('Df converted from csv str has no __entry_id__')
         return df
 
     def df_to_str(self, df=None):
@@ -1311,6 +1272,7 @@ class DataSheet:
             return ''
         df = df.copy()
         for col in df.columns:
+            logger.debug('df_to_str: format column %s', col)
             if col != '__entry_id__':
                 f = lambda v: self.form_master.format(col,v) \
                     if not pd.isna(v) else ''
@@ -2063,40 +2025,11 @@ class TestDataSheet(unittest.TestCase):
         self.assertTrue(self.sheet_ts.df.index.is_unique)
         self.assertEqual(self.sheet_ts.df.loc[entry_to_modify, 'Age'], 77)
 
-
-class UserDataKivy:
-    def __init__(self, store_label='sheeter.json'):
-        from kivy.storage.jsonstore import JsonStore
-
-        self.store = JsonStore('sheeter.json')
-        self.store_label = store_label
-        if not self.store.exists('recent_files'):
-            self.store.put('recent_files', files={})
-
-    def clear(self):
-        self.store.clear()
-
-    def get_recent_files(self):
-        sorted_fns = sorted(self.store.get('recent_files')['files'].items(),
-                           key=lambda e: e[1])
-        return [fn for fn, ts in sorted_fns][::-1]
-
-    def record_recent_file(self, fn):
-        ts = datetime.now().timestamp()
-        recent_files = self.store.get('recent_files')['files']
-        recent_files[fn] = ts
-        self.store.put('recent_files', files=recent_files)
-
-    def get_last_user(self):
-        pass
-
-    def set_last_user(self, user):
-        pass
-
 class UserData:
 
-    def __init__(self, store_file='sheeter.json'):
-        store_dir = op.join(user_data_dir('sheeter', 'lesca'))
+    def __init__(self, store_file='piccel.json'):
+        store_dir = op.join(user_data_dir('piccel', 'lesca'))
+        logger.info('User data folder: %s', store_dir)
         if not op.exists(store_dir):
             os.makedirs(store_dir)
         self.store_fn = op.join(store_dir, store_file)
@@ -2415,9 +2348,13 @@ class check_role(object):
 
     def __call__(self, func, *args, **kwargs):
         def _check(*args, **kwargs):
+            if args[0].user_role is None:
+                raise UndefinedUser('User not associated with sheet %s. '
+                                    'Cannot call role-protected method %s.' % \
+                                    (args[0].label, func.__name__))
             if args[0].user_role.value < self.role.value:
                 raise UnauthorizedRole('User %s has role %s but '\
-                                       '%s is required at least' % \
+                                       '%s requires at least' % \
                                        (args[0].user, args[0].user_role,
                                         self.role))
             else:
@@ -2638,6 +2575,10 @@ class WorkBook:
     def get_users(self):
         assert(self.decrypted)
         return self.user_roles.keys()
+
+    def get_user_role(self, user):
+        assert(self.decrypted)
+        return self.user_roles[user]
 
     def set_users(self, user_roles):
         for u,r in user_roles.items():
@@ -4714,7 +4655,7 @@ def make_item_input_widget(item_widget, item, key, key_label,
     elif item.vtype == 'text' and item.choices is None and \
          item.nb_lines>1:
         # Multi line input field
-        _input_ui = item_text_multi_line_ui.Ui_Form()
+        _input_ui = ui.item_text_multi_line_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
         _input_ui.label_key.setText(item.tr[key])
         _input_ui.value_field.setPlainText(init_value)
@@ -4825,9 +4766,13 @@ class PiccelApp(QtWidgets.QApplication):
     USER_FILE = 'piccel.json'
 
     def __init__(self, argv, cfg_fn=None, user=None, access_pwd=None,
-                 role_pwd=None):
+                 role_pwd=None, cfg_fns=None):
         super(PiccelApp, self).__init__(argv)
 
+        if cfg_fns is None:
+            cfg_fns = []
+
+        logger.debug('Available cfg fn: %s', cfg_fns)
         # icon_style = QtWidgets.QStyle.SP_ComputerIcon
         # self.setWindowIcon(self.style().standardIcon(icon_style))
         self.setWindowIcon(QtGui.QIcon(':/icons/main_icon'))
@@ -4840,9 +4785,25 @@ class PiccelApp(QtWidgets.QApplication):
         button_icon = self.style().standardIcon(icon_style)
         _selector_ui.button_open_file.setIcon(button_icon)
         _selector_ui.button_open_file.clicked.connect(self.select_file)
-        self.recent_files = self.logic.get_recent_files()
-        _selector_ui.recent_list.addItems(self.recent_files)
-        on_double_click = lambda i: self.open_configuration_file(i.text())
+        recent_files = self.logic.get_recent_files()
+        self.recent_files = recent_files[0:1] + cfg_fns + \
+            [fn for fn in recent_files[1:] if fn not in cfg_fns]
+
+        def load_workbook_title(wb_fn):
+            try:
+                with open(wb_fn, 'r') as fin:
+                    return json.load(fin)['workbook_label']
+            except e:
+                logger.warning('Error loading workbook file %s:\n %s',
+                               wb_fn, repr(e))
+            return wb_fn
+        # TODO add file path as tooltip
+        _selector_ui.recent_list.addItems([load_workbook_title(fn) \
+                                           for fn in self.recent_files])
+
+        def _cfg_fn():
+            return self.recent_files[_selector_ui.recent_list.currentRow()]
+        on_double_click = lambda i: self.open_configuration_file(_cfg_fn())
         _selector_ui.recent_list.itemDoubleClicked.connect(on_double_click)
 
         self.access_screen = QtWidgets.QWidget()
@@ -4932,7 +4893,7 @@ class PiccelApp(QtWidgets.QApplication):
         # self._login_ui.editor_password_label.hide()
         # self._login_ui.editor_password_field.hide()
         if user is not None and user != '':
-            role = self.logic.get_user_role(user)
+            role = self.logic.workbook.get_user_role(user)
             logger.debug('Role of user %s: %s', user, role.name)
             if role == UserRole.ADMIN or \
                role == UserRole.EDITOR:
@@ -5002,6 +4963,7 @@ class PiccelApp(QtWidgets.QApplication):
         self.refresh()
 
     def show_access_screen(self):
+        self._access_ui.workbook_label.setText(self.logic.workbook.label)
         self._access_ui.access_password_field.clear()
         if self.access_pwd is not None:
             self._access_ui.access_password_field.setText(self.access_pwd)
