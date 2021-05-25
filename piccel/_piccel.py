@@ -1994,6 +1994,7 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
+        time.sleep(0.01)
         logger.debug('-----------------')
         logger.debug('utest: submit form')
         form.submit()
