@@ -11,7 +11,7 @@ def main():
     max_args = 1
 
     usage = 'usage: %prog [options] [CONFIG_FILE]'
-    description = 'Run sheeter data input client.'
+    description = 'Run piccel data input client.'
 
     parser = OptionParser(usage=usage, description=description)
 

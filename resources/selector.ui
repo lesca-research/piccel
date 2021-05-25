@@ -121,7 +121,7 @@
          <item>
           <widget class="QLabel" name="label_recently_used">
            <property name="text">
-            <string>Recently used:</string>
+            <string>Available workbooks:</string>
            </property>
           </widget>
          </item>
