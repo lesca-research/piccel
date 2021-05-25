@@ -51,7 +51,7 @@ setup(name='piccel', version=version['__version__'],
       keywords='piccel spreadsheet data collection encryption',
       packages=find_packages(exclude=['test']),
       python_requires='>=3',
-      install_requires=['numpy', 'pandas', 'cryptography'],
+      install_requires=['numpy', 'pandas', 'cryptography', 'qscintilla'],
       entry_points={
           'console_scripts': [
               'piccel = piccel.commands.piccel:main',
