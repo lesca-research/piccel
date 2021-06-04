@@ -1,10 +1,7 @@
 import pandas as pd
 import numpy as np
 
-from piccel.plugin_tools import conditional_set
-from piccel.sheet_plugin import SheetPlugin
-
-class CustomSheetPlugin(SheetPlugin):
+class SheetPlugin:
 
     def __init__(self, data_sheet, workbook=None):
         """
@@ -28,6 +25,16 @@ class CustomSheetPlugin(SheetPlugin):
         """
         self.sheet = data_sheet
         self.workbook = workbook
+
+    def sheet_index(self):
+        """ Return index in the sheet list, for display order """
+        return -1
+
+    def compute(self):
+        """
+        Generate a DataFrame. Called only if sheet.dynamic_only == True
+        """
+        self.sheet.df = pd.DataFrame()
 
     def views(self):
         """
@@ -58,18 +65,35 @@ class CustomSheetPlugin(SheetPlugin):
         Indicate if the given view is valid.
         Return a DataFrame with boolean values and the same shape as df
         """
-        df_validity = pd.DataFrame(np.zeros(df.shape, dtype=np.bool))
+        df_validity = pd.DataFrame(np.ones(df.shape, dtype=bool))
         df_validity.index = df.index
         df_validity.columns = df.columns
         return df_validity
 
-    def hints():
+    def update(self, sheet_source, changed_entry):
+        """ Called when another sheet has been modified """
         pass
-    # def style(self)
+
+    def action(self, entry_df, selected_column):
+        """
+        Called after clicking on a cell.
+        By default, return a form to update the selected entry.
+
+        Return: None | Form | html str | Plotter | svg str
+        """
+        return self.sheet.form_update_entry(entry_df.index.values[0])
+
+    def hints(self, df, view):
+        """
+        Return hints to display as icon and tooltips.
+        Return a tuple of DataFrame (decorations, tooltip)
+        *decorations* values are in:
+            - Hint.NONE
+            - Hint.WARNING
+            - Hint.ERROR
+        *tooltip* values are str
+        """
+        pass
 
     # def request_new_entry(self, column, row_df)
     #  Action = None | (sheet_label, {key:values}) # Important! form item key must be valid identifier!
-
-
-class DynamicSheetPlugin:
-    pass

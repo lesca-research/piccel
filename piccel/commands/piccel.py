@@ -10,7 +10,7 @@ def main():
     min_args = 0
     max_args = 1
 
-    usage = 'usage: %prog [options] [CONFIG_FILE]'
+    usage = 'usage: %prog [options] [WORKBOOK_FILE]'
     description = 'Run piccel data input client.'
 
     parser = OptionParser(usage=usage, description=description)
@@ -31,6 +31,9 @@ def main():
     parser.add_option('-r', '--role-password',
                       help='Role-specific password for workbook login')
 
+    parser.add_option('-f', '--refresh-rate', type='int', default=10000,
+                      help='Refresh rate in milliseconds')
+
     (options, args) = parser.parse_args()
     logger.setLevel(options.verbose)
 
@@ -42,6 +45,7 @@ def main():
     cfg_fn = args[0] if nba > 0 else None
 
     app = piccel.PiccelApp(sys.argv, cfg_fn, options.user,
-                           options.access_password, options.role_password)
+                           options.access_password, options.role_password,
+                           refresh_rate_ms=options.refresh_rate)
     app.show()
     sys.exit(app.exec_())

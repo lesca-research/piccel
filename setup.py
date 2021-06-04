@@ -55,5 +55,9 @@ setup(name='piccel', version=version['__version__'],
       entry_points={
           'console_scripts': [
               'piccel = piccel.commands.piccel:main',
+              'piccel_extract_logic = piccel.commands.piccel_extract_logic:main',
+              'piccel_import_logic = piccel.commands.piccel_import_logic:main',
+              'piccel_decrypt = piccel.commands.piccel_crypt:decrypt_cmd',
+              'piccel_encrypt = piccel.commands.piccel_crypt:encrypt_cmd'
           ],
       })

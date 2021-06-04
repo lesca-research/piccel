@@ -25,14 +25,16 @@ import shutil
 from pathlib import PurePath
 from collections.abc import Mapping
 from itertools import chain
-from enum import Enum
+from enum import IntEnum
 import importlib
 from importlib import import_module
 import inspect
 import csv
 
 from . import sheet_plugin_template
-from .sheet_plugin_template import DataSheetPlugin
+from . import workbook_plugin_template
+from .sheet_plugin_template import CustomSheetPlugin
+from .plugin_tools import conditional_set
 
 import unittest
 import tempfile
@@ -58,11 +60,10 @@ from . import ui
 
 from appdirs import user_data_dir
 
-logger = logging.getLogger('Piccel')
+logger = logging.getLogger('piccel')
 logging.basicConfig(stream=sys.stdout,
                     format='%(asctime)s %(levelname)-8s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
-logger.setLevel(logging.DEBUG)
 
 def derive_key_pbkdf2(password_str, salt_bytes):
     kdf = PBKDF2HMAC(
@@ -90,7 +91,6 @@ class Encrypter:
 
     def decrypt_to_str(self, crypted_str):
         return self.fernet.decrypt(crypted_str.encode()).decode()
-
 
 class UnknownUser(Exception): pass
 class InvalidPassword(Exception): pass
@@ -309,7 +309,7 @@ class Form:
         section0 = next(iter(self.sections.values()))
         item = FormItem({key:None}, section0.tr.language,
                         section0.tr.supported_languages, vtype=vtype, hidden=hidden,
-                        values={key:value_str})
+                        init_values={key:value_str})
         section0._prepend(item)
         # TODO: self.register_item
         self.key_to_items[key].append(item)
@@ -348,7 +348,7 @@ class Form:
                 'supported_languages' : list(self.tr.supported_languages)}
 
     def to_json(self):
-        return json.dumps(self.to_dict())
+        return json.dumps(self.to_dict(), indent=4)
 
     def set_input_callback(self, callback):
         """ callback(section, key, input_string) """
@@ -626,7 +626,7 @@ class FormSection:
         self.tr.register('title', title)
 
         self.transitions = transitions
-        print('!!!!!! %s:, transitions: %s' % (self, transitions))
+        # print('!!!!!! %s:, transitions: %s' % (self, transitions))
         self.check_validity()
 
     def _prepend(self, item):
@@ -672,8 +672,8 @@ class FormSection:
         if not self.validity:
             for i in self.items:
                 if not i.is_valid():
-                    logger.warning('item %s is invalid', i)
-                    logger.warning('!!!!!!!!!!!!!!!!!!!!!!!!')
+                    logger.debug('item %s is invalid', i)
+                    logger.debug('!!!!!!!!!!!!!!!!!!!!!!!!')
         signal = ['section_invalid', 'section_valid'][self.validity]
         logger.debug('%s notifies %s', self, signal)
         self.notifier.notify(signal)
@@ -826,14 +826,55 @@ def module_from_code_str(code):
      return module
 
 class LocalFileSystem:
-
+    """
+    Keep track of all modifications made to be able to notice external
+    modifications.
+    """
     def __init__(self, root_folder, encrypter=None):
         self.root_folder = root_folder
         self.encrypter = encrypter
+        self.current_stats = self.file_stats()
+
+    def file_stats(self):
+        stats = {}
+        for wroot, dirs, files in os.walk(self.root_folder):
+            for bfn in files:
+                rdir = op.relpath(wroot, self.root_folder)
+                fn = op.normpath(op.join(rdir, bfn))
+                stats[fn] = self.file_size(fn)
+        return stats
+
+    def external_changes(self):
+        modifications = []
+        additions = []
+        for wroot, dirs, files in os.walk(self.root_folder):
+            for bfn in files:
+                rdir = op.relpath(wroot, self.root_folder)
+                fn = op.normpath(op.join(rdir, bfn))
+                if fn not in self.current_stats:
+                    additions.append(fn)
+                elif self.current_stats[fn] != self.file_size(fn):
+                    modifications.append(fn)
+        deletions = [fn for fn in self.current_stats if not self.exists(fn)]
+        return modifications, additions, deletions
+
+    def accept_changes(self, modifications=None, additions=None, deletions=None):
+        modifications = modifications if modifications is not None else []
+        additions = additions if additions is not None else []
+        deletions = deletions if deletions is not None else []
+        for fn in modifications+additions:
+            self.current_stats[fn] = self.file_size(fn)
+        for fn in deletions:
+            self.current_stats.pop(fn)
+
+    def accept_all_changes(self):
+        self.current_stats = self.file_stats()
 
     def change_dir(self, folder):
+        """ Note: change tracking will be reset """
         assert(self.exists(folder))
-        return LocalFileSystem(op.join(self.root_folder, folder), self.encrypter)
+        return LocalFileSystem(op.join(self.root_folder, folder),
+                               self.encrypter)
 
     def set_encrypter(self, encrypter):
         self.encrypter = encrypter
@@ -844,6 +885,12 @@ class LocalFileSystem:
     def exists(self, fn):
         return op.exists(op.join(self.root_folder, fn))
 
+    def is_file(self, fn):
+        return op.isfile(op.join(self.root_folder, fn))
+
+    def file_size(self, fn):
+        return op.getsize(op.join(self.root_folder, fn))
+
     def makedirs(self, folder):
         full_folder = op.join(self.root_folder, folder)
         if op.exists(full_folder):
@@ -852,7 +899,7 @@ class LocalFileSystem:
         logger.debug('Create folder %s', full_folder)
         os.makedirs(full_folder)
 
-    def get_full_path(self, fn):
+    def full_path(self, fn):
         return op.join(self.root_folder, fn)
 
     def listdir(self, folder):
@@ -870,26 +917,43 @@ class LocalFileSystem:
         if not op.exists(full_folder):
             logger.debug('rmtree: Folder %s does not exist', full_folder)
             return
+
+        for wroot, dirs, files in os.walk(op.join(self.root_folder, folder)):
+            for bfn in files:
+                rdir = op.relpath(wroot, self.root_folder)
+                fn = op.normpath(op.join(rdir, bfn))
+                self.current_stats.pop(fn)
+
         logger.debug('Remove folder %s', full_folder)
         shutil.rmtree(full_folder)
 
-    def copy_to_tmp(self, fn, decrypt=False):
+    def copy_to_tmp(self, fn, decrypt=False, tmp_dir=None):
         """ Return destination temporary file """
-        tmp_fn = op.join(tempfile.mkdtemp(), op.basename(fn))
-        if not decrypt or self.encrypter is None:
+        if tmp_dir is None:
+            tmp_dir = tempfile.mkdtemp()
+        tmp_fn = op.join(tmp_dir, op.basename(fn))
+        if not decrypt:
             shutil.copy(op.join(self.root_folder, fn), tmp_fn)
         else:
+            assert(self.encrypter is not None)
             logger.warning('Copying UNCRYPTED %s to %s', fn, tmp_fn)
             content_str = self.load(fn)
             with open(tmp_fn, 'w') as fout:
                 fout.write(content_str)
         return tmp_fn
 
+    def import_file(self, src_fn, dest_rfn, overwrite=False):
+        with open(src_fn, 'r') as fin:
+            content = fin.read()
+        self.save(dest_rfn, content, overwrite=overwrite)
+
     def remove(self, fn):
         logger.debug('Remove file %s', fn)
         os.remove(op.join(self.root_folder, fn))
+        self.current_stats.pop(fn)
 
     def save(self, fn, content_str, overwrite=False):
+        fn = op.normpath(fn)
         afn = op.join(self.root_folder, fn)
         if self.encrypter is not None:
             content_str = self.encrypter.encrypt_str(content_str)
@@ -899,6 +963,8 @@ class LocalFileSystem:
 
         with open(afn, 'w') as fout:
             fout.write(content_str)
+
+        self.current_stats[fn] = self.file_size(fn)
 
     def load(self, fn):
         afn = op.join(self.root_folder, fn)
@@ -927,6 +993,139 @@ class Unformatter:
 def protect_fn(fn):
     return ''.join(c if c.isalnum() else "_" for c in fn)
 
+class Hint:
+
+    # Decorations
+    WARNING = 0
+    ERROR = 1
+    QUESTION = 2
+
+    def __init__(self, decoration, message, is_link):
+        self.decoration = decoration
+        self.message = message
+        self.is_link = is_link
+
+from .sheet_plugin import SheetPlugin
+
+"""
+class FolderContentWatcher:
+
+    def __init__(self, filesystem):
+        self.filesystem = filesystem
+        self.reset()
+
+    def reset(self):
+        self.stats = self.file_stats()
+
+    def file_stats(self):
+        return {fn : self.filesystem.file_size(fn) \
+                for fn in self.filesystem.listdir('.')\
+                if self.filesystem.is_file(fn)}
+
+    def modified_files(self):
+        new_stats = self.file_stats()
+        common_files = set(self.stats).intersection(new_stats)
+        return [fn for fn in common_files if self.stats[fn] != new_stats[fn]]
+
+    def deleted_files(self):
+        return set(self.stats).difference(self.file_stats())
+
+    def new_files(self):
+        return set(self.file_stats()).difference(self.stats)
+
+    def ignore_file_changes(self, fns):
+        for fn in fns:
+            self.stats[fn] = self.filesystem.file_size(fn)
+
+    def ignore_file_deletions(self, fns):
+        for fn in fns:
+            self.stats.pop(fn)
+
+"""
+
+class TestLocalFileSystem(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def touch_file(self, fn, content=''):
+        with open(op.join(self.tmp_dir, fn), 'w') as fin:
+            fin.write(content)
+
+    def test_track_new_files(self):
+        self.touch_file('yy.cc')
+        self.touch_file('xx.cc')
+        filesystem = LocalFileSystem(self.tmp_dir)
+
+        self.touch_file('new.cc')
+        mods, adds, dels = filesystem.external_changes()
+        self.assertEqual(adds, ['new.cc'])
+        self.assertEqual(len(mods), 0)
+        self.assertEqual(len(dels), 0)
+
+        filesystem.accept_changes(additions=['new.cc'])
+        mods, adds, dels = filesystem.external_changes()
+        self.assertEqual(len(mods), 0)
+        self.assertEqual(len(adds), 0)
+        self.assertEqual(len(dels), 0)
+
+    def test_track_modified_files(self):
+        self.touch_file('yy.cc')
+        self.touch_file('xx.cc')
+        filesystem = LocalFileSystem(self.tmp_dir)
+        self.touch_file('yy.cc', 'hey')
+
+        mods, adds, dels = filesystem.external_changes()
+        self.assertEqual(mods, ['yy.cc'])
+        self.assertEqual(len(adds), 0)
+        self.assertEqual(len(dels), 0)
+
+        filesystem.accept_changes(modifications=['yy.cc'])
+        mods, adds, dels = filesystem.external_changes()
+        self.assertEqual(len(mods), 0)
+        self.assertEqual(len(adds), 0)
+        self.assertEqual(len(dels), 0)
+
+    def test_track_deleted_files(self):
+        self.touch_file('yy.cc')
+        self.touch_file('xx.cc')
+        filesystem = LocalFileSystem(self.tmp_dir)
+        os.remove(op.join(self.tmp_dir, 'yy.cc'))
+
+        mods, adds, dels = filesystem.external_changes()
+        self.assertEqual(len(mods), 0)
+        self.assertEqual(len(adds), 0)
+        self.assertEqual(dels, ['yy.cc'])
+
+        filesystem.accept_changes(deletions=['yy.cc'])
+        mods, adds, dels = filesystem.external_changes()
+        self.assertEqual(len(mods), 0)
+        self.assertEqual(len(adds), 0)
+        self.assertEqual(len(dels), 0)
+
+    def test_internal_tracking(self):
+        self.touch_file('yy.cc')
+        self.touch_file('xx.cc')
+        filesystem = LocalFileSystem(self.tmp_dir)
+        filesystem.remove('xx.cc')
+
+        mods, adds, dels = filesystem.external_changes()
+        self.assertEqual(len(mods), 0)
+        self.assertEqual(len(adds), 0)
+        self.assertEqual(len(adds), 0)
+
+        filesystem.save('gg.cc', 'yep')
+        mods, adds, dels = filesystem.external_changes()
+        self.assertEqual(len(mods), 0)
+        self.assertEqual(len(adds), 0)
+        self.assertEqual(len(adds), 0)
+
+        filesystem.save('yy.cc', 'yep', overwrite=True)
+        mods, adds, dels = filesystem.external_changes()
+        self.assertEqual(len(mods), 0)
+        self.assertEqual(len(adds), 0)
+        self.assertEqual(len(adds), 0)
+
 class DataSheet:
     """
     Table data where entries where input is done with an associated form.
@@ -938,14 +1137,23 @@ class DataSheet:
 
     SHEET_LABEL_RE = re.compile('[A-Za-z._-]+')
 
-    def __init__(self, label, form_master, df=None, user=None,
+    def __init__(self, label, form_master=None, df=None, user=None,
                  filesystem=None, plugin=None, live_forms=None,
-                 watchers=None):
+                 watchers=None, dynamic_only=False):
         """
         filesystem.root is the sheet-specific folder where to save all data
         and pending forms
         """
+        self.dynamic_only = dynamic_only
         self.label = self.validate_sheet_label(label)
+        if dynamic_only:
+            assert(form_master is None)
+            assert(df is None)
+
+        if df is not None and form_master is None:
+            # TODO: also check that all columns in df can be formatted using form
+            raise Exception('Cannot set df without defining form master')
+
         self.form_master = form_master
         self.live_forms = live_forms if live_forms is not None else {}
         self.user = user
@@ -971,7 +1179,14 @@ class DataSheet:
         if df is not None:
             self.import_df(df)
 
-        if self.filesystem is not None:
+        if dynamic_only and plugin is not None:
+            logger.debug('Init sheet %s: Call plugin.compute to set df',
+                         self.label)
+            plugin.compute()
+
+        if not dynamic_only and self.filesystem is not None:
+            if not self.filesystem.exists('data'):
+                self.filesystem.makedirs('data')
             self.reload_all_data()
 
         self.plugin = None
@@ -981,8 +1196,9 @@ class DataSheet:
             if self.filesystem is not None:
                 self.load_plugin()
             if self.plugin is None:
-                self.set_plugin(DataSheetPlugin(self))
-        if self.filesystem is not None:
+                self.set_plugin(SheetPlugin(self))
+
+        if not dynamic_only and self.filesystem is not None:
             self.load_live_forms()
          # TODO: update_data_from_files -> load only entries that were not loaded
 
@@ -995,12 +1211,13 @@ class DataSheet:
         label = DataSheet.get_sheet_label_from_filesystem(filesystem)
         logger.debug('Load form master for sheet %s', label)
         form_master = DataSheet.load_form_master(filesystem)
+        dynamic_only = filesystem.exists('dynamic_only')
         logger.debug('Create sheet %s', label)
         return DataSheet(label, form_master, None, user, filesystem,
-                         watchers=watchers)
+                         dynamic_only=dynamic_only, watchers=watchers)
 
     #@check_role(UserRole.ADMIN)
-    def dump_plugin_code(self, plugin_code=None):
+    def dump_plugin_code(self, plugin_code=None, overwrite=False):
         if self.filesystem is None:
             raise IOError('Cannot save plugin for sheet %s (no associated '\
                           'filesystem)')
@@ -1009,7 +1226,7 @@ class DataSheet:
             plugin_code = inspect.getsource(sheet_plugin_template)
         plugin_module = 'plugin_%s' % self.label
         plugin_fn = '%s.py' % plugin_module
-        self.filesystem.save(plugin_fn, plugin_code, overwrite=True)
+        self.filesystem.save(plugin_fn, plugin_code, overwrite=overwrite)
         return plugin_fn
 
     def load_plugin(self):
@@ -1017,13 +1234,13 @@ class DataSheet:
         plugin_fn = '%s.py' % plugin_module
         if self.filesystem.exists(plugin_fn):
             logger.info('Load plugin of sheet %s from %s',
-                        self.label, self.filesystem.get_full_path(plugin_fn))
+                        self.label, self.filesystem.full_path(plugin_fn))
             tmp_folder = op.dirname(self.filesystem.copy_to_tmp(plugin_fn,
                                                                 decrypt=True))
             sys.path.insert(0, tmp_folder)
             plugin_module = import_module(plugin_module)
             sys.path.pop(0)
-            self.set_plugin(plugin_module.DataSheetPlugin(self, workbook=None))
+            self.set_plugin(plugin_module.CustomSheetPlugin(self, workbook=None))
         else:
             logger.info('No plugin to load for sheet %s', self.label)
 
@@ -1042,7 +1259,8 @@ class DataSheet:
             content = filesystem.load(form_fn)
             return Form.from_json(content)
         else:
-            logger.debug('No form master to load from %s', filesystem.root_folder)
+            logger.debug('No form master to load from %s',
+                         filesystem.root_folder)
         return None
 
     def reload_all_data(self):
@@ -1063,9 +1281,36 @@ class DataSheet:
                 self.invalidate_cached_views()
             else:
                 logger.debug('No sheet data to load in %s', data_folder)
+            self.filesystem.accept_all_changes()
         else:
             self.filesystem.makedirs(data_folder)
             logger.debug('Data folder %s is empty', data_folder)
+
+    def watch_other_sheet_changes(self, other_sheet):
+        f = lambda : self.plugin.update(other_sheet, other_sheet.df.tail(1))
+        other_sheet.notifier.add_watcher('appended_entry', f)
+        # TODO: watch set_entry
+        # TODO: watch remove_entry
+
+    def refresh_data(self):
+        """
+        Refresh data based on external file changes.
+        Note: a dynamical sheet is not refreshed here.
+        """
+        logger.debug('Refresh data for sheet %s', self.label)
+        if not self.dynamic_only and self.filesystem is not None:
+            modified_files, new_files, deleted_files = \
+                self.filesystem.external_changes()
+            logger.debug('Files externally added: %s', new_files)
+            logger.debug('Files externally modified: %s', modified_files)
+            logger.debug('Files externally deleted: %s', deleted_files)
+            if len(modified_files) > 0 or len(deleted_files) > 0:
+                self.reload_all_data()
+            else:
+                for data_fn in new_files:
+                    df_content = self.filesystem.load(data_fn)
+                    self._append_df(self.df_from_str(df_content))
+                self.filesystem.accept_all_changes()
 
     def set_form_master(self, form):
         # TODO: utest and check consistency with already loaded forms
@@ -1075,6 +1320,12 @@ class DataSheet:
         if self.filesystem is None:
             raise IOError('Cannot save data of sheet %s (no associated '\
                           'filesystem)')
+        if self.dynamic_only:
+            self.filesystem.save('dynamic_only', '', overwrite=True)
+
+        if not self.filesystem.exists('data'):
+            self.filesystem.makedirs('data')
+
         self.save_form_master()
         self.save_all_data()
         for form_id, form in self.live_forms.items():
@@ -1087,20 +1338,23 @@ class DataSheet:
     def save_all_data(self, *args, **kwargs):
         # TODO: better API, without ignoring input args
         # TODO: admin role + lock !
-        main_data_fn = 'main.csv'
-        if not self.filesystem.exists('data'):
-            logger.info('Sheet %s: Create data folder', self.label)
-            self.filesystem.makedirs('data')
-        logger.info('Sheet %s: Save all data of sheet', self.label)
-        self.filesystem.save(op.join('data', main_data_fn),
-                             self.df_to_str(self.df),
-                             overwrite=True)
-        logger.info('Remove all single data entries of sheet %s',
-                    self.label)
-        for data_fn in self.filesystem.listdir('data'):
-            if data_fn != main_data_fn:
-                logger.info('Delete entry file %s', data_fn)
-                self.filesystem.remove(op.join('data', data_fn))
+        if not self.dynamic_only and self.df is not None:
+            main_data_fn = 'main.csv'
+            if not self.filesystem.exists('data'):
+                logger.info('Sheet %s: Create data folder', self.label)
+                self.filesystem.makedirs('data')
+            logger.info('Sheet %s: Save all data of sheet', self.label)
+            self.filesystem.save(op.join('data', main_data_fn),
+                                 self.df_to_str(self.df),
+                                 overwrite=True)
+
+            logger.info('Remove all single data entries of sheet %s',
+                        self.label)
+            deleted_fns = []
+            for data_fn in self.filesystem.listdir('data'):
+                if data_fn != main_data_fn:
+                    logger.info('Delete entry file %s', data_fn)
+                    self.filesystem.remove(data_fn)
 
     def load_live_forms(self):
         # TODO: handle consistency with form master, + ustests
@@ -1138,7 +1392,7 @@ class DataSheet:
         else:
             logger.debug('Live form folder %s is empty', top_folder)
 
-    def save_form_master(self):
+    def save_form_master(self, overwrite=False):
         if self.filesystem is None:
             raise Exception('No filesystem available to save form master '\
                             'for sheet %s', self.label)
@@ -1146,7 +1400,8 @@ class DataSheet:
         if self.form_master is not None:
             form_content = self.form_master.to_json()
             logger.info('Save form master of sheet %s' % self.label)
-            self.filesystem.save('master.form', form_content)
+            self.filesystem.save('master.form', form_content,
+                                 overwrite=overwrite)
         else:
             logger.info('No form master to save for sheet %s' % self.label)
 
@@ -1177,53 +1432,63 @@ class DataSheet:
                         'in available views: %s' % \
                           (default_view, ', '.join(chain(views, self.views)))
 
-                for view_label, view_func in views.items():
-                    try:
-                        view_df = view_func(self.df)
-                    except Exception as e:
-                        msg = 'Error while getting view %s:\n%s'%\
-                            (view_label, e)
-                    else:
-                        if view_df is None:
-                            msg = 'view "%s" is None. It should be a '\
-                                'panda.DataFrame object.' %  view_label
+                if self.df is None:
+                    logger.warning('Cannot check plugin views because data '\
+                                   'is empty')
+                else:
+                    for view_label, view_func in views.items():
+                        try:
+                            view_df = view_func(self.df)
+                        except Exception as e:
+                            msg = 'Error while getting view "%s":\n%s'%\
+                                (view_label, e)
                         else:
-                            try:
-                                validity = plugin.view_validity(view_df,
-                                                                view_label)
-                            except Exception as e:
-                                msg = 'Error while getting view validity %s:\n%s'%\
-                                    (view_label, e)
+                            if view_df is None:
+                                msg = 'view "%s" is None. It should be a '\
+                                    'panda.DataFrame object.' %  view_label
                             else:
-                                if validity is None:
-                                    msg = 'view validity "%s" is None. It '\
-                                        'should be a panda.DataFrame object.' %\
-                                        view_label
-                                elif validity.shape != view_df.shape:
-                                    msg = 'Shape of view validity for "%s" %s '\
-                                        'not consistent with view shape %s' % \
-                                        (view_label, validity.shape,
-                                         view_df.shape)
+                                try:
+                                    validity = plugin.view_validity(view_df,
+                                                                    view_label)
+                                except Exception as e:
+                                    msg = 'Error while getting view validity %s:\n%s'%\
+                                        (view_label, e)
+                                else:
+                                    if validity is None:
+                                        msg = 'view validity "%s" is None. It '\
+                                            'should be a panda.DataFrame object.' %\
+                                            view_label
+                                    elif validity.shape != view_df.shape:
+                                        msg = 'Shape of view validity for "%s" %s '\
+                                            'not consistent with view shape %s' % \
+                                            (view_label, validity.shape,
+                                             view_df.shape)
         except AttributeError as e:
             func_name = e.args[0].split('attribute')[1].strip().strip("'")
             msg = 'Function %s not found in plugin' % func_name
 
         return msg if msg != '' else 'ok'
 
-    def set_plugin(self, plugin, workbook=None):
+    def set_plugin(self, plugin, workbook=None, overwrite=False):
         plugin_str = None
         if isinstance(plugin, str):
             plugin_str = plugin
-            plugin = module_from_code_str(plugin).DataSheetPlugin(self, workbook)
+            plugin = module_from_code_str(plugin).CustomSheetPlugin(self,
+                                                                    workbook)
+        # TODO: plugin is not validated yet-> fix while cleaning whole plugin design
+        if self.dynamic_only:
+            plugin.compute()
         validation_msg = self.validate_plugin(plugin)
         if validation_msg == 'ok':
             self.plugin = plugin
+            logger.debug('Sheet %s, load plugin views: %s',
+                         self.label, ','.join(plugin.views()))
             self.add_views(plugin.views()) # cached views invalidated there
             default_view = plugin.default_view()
             if default_view is not None:
                 self.set_default_view(default_view)
             if plugin_str is not None:
-                self.dump_plugin_code(plugin_str)
+                self.dump_plugin_code(plugin_str, overwrite=overwrite)
         else:
             raise InvalidSheetPlugin(validation_msg)
 
@@ -1292,6 +1557,9 @@ class DataSheet:
             self.cached_validity[view] = None
 
     def get_df_view(self, view_label=None):
+
+        if self.df is None:
+            return None
         if view_label is None:
             view_label = self.default_view
         if self.cached_views[view_label] is None:
@@ -1352,12 +1620,15 @@ class DataSheet:
         Create a form and fill it with content of an existing entry.
         Some item are disabled according to item.freeze_on_update
         """
-        entry_dict = self.df.loc[[entry_id]].to_dict('record')[0]
-        form = self._new_form('update', entry_dict=entry_dict, form_id=form_id,
-                              entry_id=entry_id)
-        for item in form.to_freeze_on_update:
-            item.set_editable(False)
-        return form
+        if self.form_master is not None:
+            entry_dict = self.df.loc[[entry_id]].to_dict('record')[0]
+            form = self._new_form('update', entry_dict=entry_dict,
+                                  form_id=form_id, entry_id=entry_id)
+            for item in form.to_freeze_on_update:
+                item.set_editable(False)
+            return form
+        else:
+            return None
 
     def form_new_entry(self, entry_id=None, form_id=None):
         return self._new_form('append', form_id=form_id)
@@ -1488,6 +1759,8 @@ class DataSheet:
             logger.debug('Sheet %s: Add entry %d (%s), (keys: %s)',
                          self.label, entry_id, type(entry_id),
                          ','.join(entry_dict.keys()))
+
+        # Convert entry dict to pandas.DataFrame and fix types
         index = pd.UInt64Index(np.array([entry_id], dtype=np.uint64),
                                name='__entry_id__')
         entry_df = pd.DataFrame([entry_dict], index=index)
@@ -1497,14 +1770,16 @@ class DataSheet:
         dkeys = self.form_master.datetime_keys
         datetime_cols = list(set(entry_df.columns).intersection(dkeys))
         other_cols =  list(set(entry_df.columns).difference(dkeys))
-        entry_df[other_cols].fillna(pd.NA, inplace=True)
-        entry_df[datetime_cols].fillna(pd.NaT, inplace=True)
+        entry_df[other_cols] = entry_df[other_cols].fillna(pd.NA)
+        entry_df[datetime_cols] = entry_df[datetime_cols].fillna(pd.NaT)
 
-        if self.df is not None:
-            process_entry_df(entry_df)
-        else:
-            self.df = entry_df.copy()
+        # Inject entry in current dataframe
+        #if self.df is not None:
+        process_entry_df(entry_df)
+        #else:
+        #    self.df = entry_df.copy()
 
+        # Save to file if needed
         save_func(entry_id, entry_df)
 
         self.invalidate_cached_views()
@@ -1512,18 +1787,38 @@ class DataSheet:
 
     def save_single_entry(self, entry_id, entry_df):
         if self.filesystem is not None:
-            entry_fn = op.join('data', '%d.csv' % entry_id)
+            entry_rfn = '%d.csv' % entry_id
+            entry_fn = op.join('data', entry_rfn)
             logger.debug('Sheet %s: save entry %d to %s',
                          self.label, entry_id, entry_fn)
             self.filesystem.save(entry_fn, self.df_to_str(entry_df))
+            return [entry_rfn], []
         else:
             logger.debug('Sheet %s: entry %d not saved (no associated filesystem)',
                          self.label, entry_id)
+        return [], []
 
     def append_entry(self, entry_dict, entry_id=None):
         if entry_id is None:
             entry_id = self.new_entry_id()
         self.add_entry(entry_dict, entry_id, self._append_df)
+
+
+    # TODO: admin feature!
+    def delete_entry(self, entry_id):
+        self.df.drop(entry_id, inplace=True)
+        if self.filesystem is not None:
+            entry_bfn = '%d.csv' % entry_id
+            entry_fn = op.join('data', entry_bfn)
+            if self.filesystem.exists(entry_fn):
+                self.filesystem.remove(entry_fn)
+            else:
+                main_data_fn = 'main.csv'
+                self.filesystem.save(op.join('data', main_data_fn),
+                                     self.df_to_str(self.df),
+                                     overwrite=True)
+
+        self.notifier.notify('deleted_entry') # TODO
 
     def set_entry(self, entry_dict, entry_id):
         """ WARNING: this is an admin feature, not conflict-free! """
@@ -1549,7 +1844,7 @@ class DataSheet:
                      entry_df.index.values[0], self.label, entry_df.index.name,
                      ','.join(entry_df.columns))
         self.df.update(entry_df)
-        self.notifier.notify('entry_set')
+        self.notifier.notify('entry_set', entry_df.index[0])
         self.invalidate_cached_views()
 
     def import_df(self, imported_df):
@@ -1603,6 +1898,7 @@ def df_weak_equal(df1, df2):
 class TestDataSheet(unittest.TestCase):
 
     def setUp(self):
+        logger.setLevel(logging.DEBUG)
         self.tmp_dir = tempfile.mkdtemp()
 
         self.form_def_ts_data = {
@@ -1651,7 +1947,7 @@ class TestDataSheet(unittest.TestCase):
                            datetime(2020,1,5,13,37)]),
         ]))
 
-        sheet_id = 'Participant_info'
+        self.sheet_id = 'Participant_info'
         items = [FormItem({'Participant_ID' :
                    {'French':'Code Participant'}},
                           default_language='French',
@@ -1670,17 +1966,18 @@ class TestDataSheet(unittest.TestCase):
                     title={'French':'Titre de formulaire'})
 
         self.user = 'me'
-        self.sheet_folder = op.join(self.tmp_dir, sheet_id)
+        self.sheet_folder = op.join(self.tmp_dir, self.sheet_id)
         self.filesystem = LocalFileSystem(self.sheet_folder)
-        self.sheet = DataSheet(sheet_id, form, None,
+        self.sheet = DataSheet(self.sheet_id, form, None,
                                self.user, self.filesystem)
 
-        self.sheet_ts = DataSheet(sheet_id,
+        self.sheet_ts = DataSheet(self.sheet_id,
                                   Form.from_dict(self.form_def_ts_data),
                                   self.data_df_ts_data,
                                   self.user, self.filesystem)
         self.sheet_ts.save_all_data()
-        logger.setLevel(logging.DEBUG)
+        logger.debug('--------------------')
+        logger.debug('utest setUp finished')
 
     @staticmethod
     def ts_data_latest(df):
@@ -1771,7 +2068,7 @@ class TestDataSheet(unittest.TestCase):
     def test_plugin_views(self):
         # TODO: test against all versions of plugin API (may change overtime)
 
-        class Plugin:
+        class Plugin(SheetPlugin):
             def views(self):
                 return {'latest' : TestDataSheet.ts_data_latest}
             def default_view(self):
@@ -1780,7 +2077,7 @@ class TestDataSheet(unittest.TestCase):
                 return pd.DataFrame(index=df.index, columns=df.columns,
                                     data=np.ones(df.shape, dtype=bool))
 
-        self.sheet_ts.set_plugin(Plugin())
+        self.sheet_ts.set_plugin(Plugin(self))
         df_latest = self.sheet_ts.get_df_view()
         mask = df_latest.Participant_ID=='CE0004'
         self.assertEqual(df_latest.loc[mask, 'Age'].values[0], 50)
@@ -1791,7 +2088,7 @@ class TestDataSheet(unittest.TestCase):
     def test_plugin_validate(self):
         # TODO: Marshal should check for duplicate entry_id
         # TODO: do not import data when there are duplicate entry ids
-        class SheetPluginOk:
+        class SheetPluginOk(SheetPlugin):
             def views(self):
                 return {'latest' : TestDataSheet.ts_data_latest}
             def default_view(self):
@@ -1800,9 +2097,10 @@ class TestDataSheet(unittest.TestCase):
                 return pd.DataFrame(index=df.index, columns=df.columns,
                                     data=np.ones(df.shape, dtype=bool))
 
-        self.assertEqual(self.sheet_ts.validate_plugin(SheetPluginOk()), 'ok')
+        self.assertEqual(self.sheet_ts.validate_plugin(SheetPluginOk(self)),
+                         'ok')
 
-        class SheetPluginBadViews:
+        class SheetPluginBadViews(SheetPlugin):
             def views(self):
                 return {'latest' : lambda df: np.ones(5)}
             def default_view(self):
@@ -1811,7 +2109,7 @@ class TestDataSheet(unittest.TestCase):
                 return pd.DataFrame(index=df.index, columns=df.columns,
                                     data=np.ones(df.shape, dtype=bool))
 
-        class SheetPluginBadDefaultView:
+        class SheetPluginBadDefaultView(SheetPlugin):
             def views(self):
                 return {'latest' : TestDataSheet.ts_data_latest}
             def default_view(self):
@@ -1821,10 +2119,11 @@ class TestDataSheet(unittest.TestCase):
                                     data=np.ones(df.shape, dtype=bool))
 
         for PluginBad in [SheetPluginBadViews, SheetPluginBadDefaultView]:
-            self.assertNotEqual(self.sheet.validate_plugin(PluginBad()), 'ok')
+            self.assertNotEqual(self.sheet.validate_plugin(PluginBad(self)),
+                                'ok')
 
     def test_validity(self):
-        class SheetPlugin:
+        class Plugin(SheetPlugin):
             def views(self):
                 return {'latest' : TestDataSheet.ts_data_latest}
             def default_view(self):
@@ -1837,7 +2136,7 @@ class TestDataSheet(unittest.TestCase):
                     validity[col] = ~df[col].duplicated(keep=False).to_numpy()
                 return validity
 
-        self.sheet_ts.set_plugin(SheetPlugin())
+        self.sheet_ts.set_plugin(Plugin(self))
         # Check view validity
         view = self.sheet_ts.get_df_view('latest')
         validity = self.sheet_ts.view_validity('latest')
@@ -1856,6 +2155,31 @@ class TestDataSheet(unittest.TestCase):
         expected_validity = pd.DataFrame(index=view.index, columns=view.columns,
                                          dtype=bool)
         assert_frame_equal(validity, expected_validity)
+
+
+    def test_plugin_compute(self):
+        class Plugin(SheetPlugin):
+            def views(self):
+                return {'base' :
+                        lambda df: df[~df.Participant_ID.str.startswith('CE9')]}
+            def default_view(self):
+                return 'base'
+
+            def compute(self):
+                self.sheet.df = pd.DataFrame(OrderedDict([
+                    ('Participant_ID', ['CE0004', 'CE0004', 'CE9006']),
+                    ('Age', pd.array([22, 50, None], dtype=pd.Int64Dtype()))]))
+
+        sheet = DataSheet(self.sheet_id, dynamic_only=True)
+        sheet.set_plugin(Plugin(sheet))
+        self.assertEqual(sheet.df.shape, (3,2))
+        sheet.df.iloc[2,0] == 'CE9006'
+        sheet.df.iloc[2,1] == pd.NA
+
+        base_df = sheet.get_df_view()
+        self.assertEqual(base_df.shape, (2,2))
+        base_df.iloc[0,0] == 'CE0004'
+        base_df.iloc[1,0] == 'CE0004'
 
     def test_data_io(self):
         self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
@@ -1969,6 +2293,25 @@ class TestDataSheet(unittest.TestCase):
         self.assertEqual(watched_entry[0].to_dict('record')[0]['Age'],
                          entry['Age'])
 
+    def test_entry_update_from_plugin_action(self):
+        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+
+        entry_to_update = self.sheet_ts.df.iloc[1].name
+
+        logger.debug('-------------------------')
+        logger.debug('utest: create update form')
+        form = self.sheet_ts.plugin.action(self.sheet_ts.df.iloc[[1]],
+                                           'Participant_ID')
+        self.assertEqual(form['section1']['__submission__'].get_value(),
+                         'append')
+        self.assertNotEqual(form['section1']['__entry_id__'].get_value(),
+                            entry_to_update)
+        # Check that Participant_ID is frozen (not editable)
+        self.assertFalse(form['section1']['Participant_ID'].editable)
+        self.assertRaises(NotEditableError,
+                          form['section1']['Participant_ID'].set_input_str,
+                          'CE0000')
+
     def test_form_entry_set(self):
         # Change the content of an entry
         # All values can change
@@ -1976,8 +2319,8 @@ class TestDataSheet(unittest.TestCase):
         entry_to_modify = self.sheet_ts.df.iloc[1].name
 
         watched_entry = []
-        def watch_entry():
-            watched_entry.append(self.sheet_ts.df.loc[[entry_to_modify]])
+        def watch_entry(entry_id):
+            watched_entry.append(self.sheet_ts.df.loc[[entry_id]])
         self.sheet_ts.notifier.add_watcher('entry_set', watch_entry)
 
         logger.debug('-------------------------')
@@ -2005,7 +2348,7 @@ class TestDataSheet(unittest.TestCase):
 
         entry_id = form['section1']['__entry_id__'].get_value()
         self.assertEqual(entry_id, entry_to_modify)
-        self.assertEqual(watched_entry[0].loc[entry_to_modify, 'Age'],
+        self.assertEqual(watched_entry[0].iloc[0]['Age'],
                          entry['Age'])
 
         self.assertEqual(watched_entry[0].loc[entry_to_modify, 'Participant_ID'],
@@ -2036,6 +2379,28 @@ class TestDataSheet(unittest.TestCase):
         self.assertTrue(self.sheet_ts.df.index.is_unique)
         self.assertEqual(self.sheet_ts.df.loc[entry_to_modify, 'Age'], 77)
 
+    def test_plugin_action(self):
+        pass
+
+    def test_refresh_sheet(self):
+        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+        sheet_ts2 = DataSheet(self.sheet_id,
+                              Form.from_dict(self.form_def_ts_data),
+                              self.data_df_ts_data,
+                              self.user, self.filesystem.change_dir('.'))
+        form = self.sheet_ts.form_new_entry()
+        entry = {'Participant_ID' : 'CE0000', 'Age' : 43,
+                 'Phone_Number' : '555'}
+        for k,v in entry.items():
+            form['section1'][k].set_input_str(str(v))
+        form.submit()
+
+        sheet_ts2.refresh_data()
+        last_entry = sheet_ts2.df.tail(1)
+        last_entry_dict = last_entry.to_dict('record')[0]
+        self.assertEqual(last_entry_dict['Age'], entry['Age'])
+        self.assertEqual(last_entry_dict['Participant_ID'],
+                         entry['Participant_ID'])
 class UserData:
 
     def __init__(self, store_file='piccel.json'):
@@ -2172,13 +2537,14 @@ class PiccelLogic:
         message = 'ok'
         try:
             self.workbook = WorkBook.from_configuration_file(cfg_fn, filesystem)
-            f_cfg_fn = filesystem.get_full_path(cfg_fn)
+            f_cfg_fn = filesystem.full_path(cfg_fn)
             self.system_data.record_recent_file(f_cfg_fn)
             self.state = PiccelLogic.STATE_ACCESS
         except Exception as e:
             logger.error('Error loading file %s: %s', cfg_fn, e)
             message = 'Error loading file %s' % cfg_fn
             self.state = PiccelLogic.STATE_SELECTOR
+            from IPython import embed; embed()
         return message
 
     def decrypt(self, access_pwd):
@@ -2235,8 +2601,8 @@ class PiccelLogic:
 
     def close_workbook(self):
         assert(self.state == PiccelLogic.STATE_WORKBOOK)
-        self.workbook = None
         self.encrypter = None
+        self.state = PiccelLogic.STATE_LOGIN
         self.cancel_login()
 
 class TestPiccelLogic(unittest.TestCase):
@@ -2373,7 +2739,7 @@ class check_role(object):
         return _check
 
 
-class UserRole(Enum):
+class UserRole(IntEnum):
     ADMIN = 2
     EDITOR = 1
     VIEWER = 0
@@ -2412,7 +2778,7 @@ class WorkBook:
         # TODO helper with more natural path definition:
         wb = WorkBook.create('my_wb', 'data_path', 'cfg_fn')
         # Set access password (saved to data_path/encryption.json):
-        wb.set_access_password('access_pwd') # TODO check that no previous data exists
+        wb.set_access_password('access_pwd')
 
         # Add user with role:
         wb.set_users({'me': UserRole.ADMIN,
@@ -2441,7 +2807,7 @@ class WorkBook:
         if password_vault is None:
             logger.info('WorkBook %s: Create password vault', self.label)
             pwd_rfn = op.join(data_folder, WorkBook.ENCRYPTION_FN)
-            pwd_fn = self.filesystem.get_full_path(pwd_rfn)
+            pwd_fn = self.filesystem.full_path(pwd_rfn)
             password_vault = PasswordVault.from_file(pwd_fn)
             logger.info('WorkBook %s: Save password vault to %s',
                         self.label, pwd_fn)
@@ -2457,13 +2823,9 @@ class WorkBook:
         # TODO: user role retrieval can only be done while decrypting!
         self.linked_books = []
         # TODO: utest linked workbook!
-        for linked_workbook_fn, sheet_filters in self.linked_book_fns.items():
+        for linked_workbook_fn in self.linked_book_fns.keys():
+            self.preload_linked_workbook(linked_workbook_fn)
             # TODO: warning: prevent circular linkage!
-            logger.info('Workbook %s: Preload linked workbook %s',
-                        self.label, linked_workbook_fn)
-            linked_wb = WorkBook.from_configuration_file(linked_workbook_fn,
-                                                         filesystem)
-            self.linked_books.append((linked_wb, combine_regexps(sheet_filters)))
 
         logger.debug('WorkBook %s init: root folder: %s',
                      self.label, self.filesystem.root_folder)
@@ -2474,6 +2836,21 @@ class WorkBook:
 
         self.sheets = {}
         self.decrypted = False
+
+    def add_linked_workbook(self, cfg_fn, sheet_filters):
+        self.linked_book_fns[cfg_fn] = sheet_filters
+        self.preload_linked_workbook(cfg_fn)
+
+    def preload_linked_workbook(self, linked_workbook_fn):
+        logger.info('Workbook %s: Preload linked workbook %s',
+                    self.label, linked_workbook_fn)
+        sheet_filters = self.linked_book_fns[linked_workbook_fn]
+        linked_wb = WorkBook.from_configuration_file(linked_workbook_fn,
+                                                     self.filesystem)
+        self.linked_books.append((linked_wb, combine_regexps(sheet_filters)))
+
+    def __getitem__(self, sheet_label):
+        return self.sheets[sheet_label]
 
     def save_configuration_file(self, workbook_fn):
         cfg = {
@@ -2500,9 +2877,13 @@ class WorkBook:
         """
 
         cfg = json.loads(filesystem.load(workbook_fn))
+        wb_cfg_folder = op.normpath(op.dirname(workbook_fn))
+        logger.debug('Create WorkBook %s: Change root folder to %s:',
+                     cfg['workbook_label'], wb_cfg_folder)
+        filesystem = filesystem.change_dir(wb_cfg_folder)
         if filesystem.exists(cfg['data_folder']):
             crypt_cfg_rel_fn = op.join(cfg['data_folder'], WorkBook.ENCRYPTION_FN)
-            crypt_cfg_full_fn = filesystem.get_full_path(crypt_cfg_rel_fn)
+            crypt_cfg_full_fn = filesystem.full_path(crypt_cfg_rel_fn)
             # TODO: PasswordVauld should work from file system, not full path
             password_vault = PasswordVault.from_file(crypt_cfg_full_fn)
         else:
@@ -2552,13 +2933,16 @@ class WorkBook:
         self.user_roles = self._load_user_roles()
         logger.info('WorkBook %s: Loaded users:\n %s', self.label,
                      pformat(self.user_roles))
+
         for linked_wb, sheet_filter in self.linked_books:
+            linked_wb.decrypt(access_pwd)
             linked_user_roles = linked_wb._load_user_roles()
-            for user, role in self.user_roles.items:
+            for user, role in self.user_roles.items():
                 if user in linked_user_roles:
                     if linked_user_roles[user] > role:
                         logger.info('Use higher role %s from linked workbook %s'\
-                                    'instead of role %s for user %s', linked_role,
+                                    'instead of role %s for user %s',
+                                    linked_role,
                                     linked_workbook_fn, role, user)
                         self.user_roles[user] = linked_role
                 else:
@@ -2566,12 +2950,20 @@ class WorkBook:
         return True
 
     def _load_user_roles(self):
+        assert(self.decrypted)
         users_fn = op.join(self.data_folder, 'users.json')
+        logger.info('WorkBook %s: Load users from %s',
+                    self.label, users_fn)
         user_roles = json.loads(self.filesystem.load(users_fn))
         for role in set(user_roles.values()):
             if not self.password_vault.has_password_key(role):
                 logger.warning('No password set for role %s.' % role)
         return {u:UserRole[r] for u,r in user_roles.items()}
+
+    def refresh_all_data(self):
+        logger.debug('Workbook %s: Refresh data', self.label)
+        for sheet in self.sheets.values():
+            sheet.refresh_data()
 
     def set_user(self, user, role):
         if not self.decrypted:
@@ -2616,7 +3008,7 @@ class WorkBook:
         assert(role in UserRole)
         return self.password_vault.password_is_valid(role.name, pwd)
 
-    def user_login(self, user, pwd, progress_callback=None):
+    def user_login(self, user, pwd, progress_callback=None, load_sheets=True):
         """
         Note: The role password only protects access to certain methods of the
         WorkBook class.
@@ -2634,16 +3026,17 @@ class WorkBook:
         except KeyError:
             logger.error('Unknown user %s while login in %s', user, self.label)
             raise UnknownUser(user)
-
+        logger.info('Logging as user %s with role %s', user, self.user_role)
         if self.user_role!= UserRole.VIEWER and \
            not self.password_vault.password_is_valid(self.user_role.name, pwd):
             logger.error('Invalid password for role %s' % self.user_role.name)
             raise InvalidPassword('role %s' % self.user_role.name)
 
         for linked_book, sheet_filter in self.linked_books:
-            linked_book.user_login(user, pwd)
+            linked_book.user_login(user, pwd, load_sheets=load_sheets)
 
-        self.reload(progress_callback)
+        if load_sheets:
+            self.reload(progress_callback)
 
     def get_sheet(self, sheet_label):
         return self.sheets[sheet_label]
@@ -2655,6 +3048,11 @@ class WorkBook:
         return sum(1 for sh in self.filesystem.listdir(sheet_folder) \
                    if sheet_re.match(sh))
 
+    def dump_default_plugin(self, plugin_fn):
+        logger.debug('Dump default workbook plugin')
+        plugin_code = inspect.getsource(workbook_plugin_template)
+        self.filesystem.save(plugin_fn, plugin_code, overwrite=True)
+
     def reload(self, progress_callback=None):
         if not self.decrypted:
             logger.error('WorkBook %s: decryption not setup, cannot reload.')
@@ -2663,6 +3061,11 @@ class WorkBook:
         if self.user is None:
             logger.error('WorkBook %s: user not logged in, cannot reload.')
             return
+
+        plugin_fn = op.join(self.data_folder, 'plugin_common.py')
+        if not self.filesystem.exists(plugin_fn):
+            self.dump_default_plugin(plugin_fn)
+        self.load_plugin()
 
         sheet_folder = op.join(self.data_folder, WorkBook.SHEET_FOLDER)
         # TODO: sort out sheet filtering
@@ -2680,8 +3083,19 @@ class WorkBook:
         self.sheets = self.load_sheets()
         logger.debug('WorkBook %s: Load linked workbooks', self.label)
         for linked_book, sheet_regexp in self.linked_books:
-            self.sheets.update(linked_books.load_sheets(sheet_regexp,
-                                                        progress_callback))
+            self.sheets.update(linked_book.load_sheets(sheet_regexp,
+                                                       progress_callback))
+
+    def load_plugin(self):
+        plugin_module = 'plugin_common'
+        plugin_fn = op.join(self.data_folder, '%s.py' % plugin_module)
+        tmp_folder = op.dirname(self.filesystem.copy_to_tmp(plugin_fn,
+                                                            decrypt=True))
+        logger.debug('Workbook %s: load plugin', self.label)
+        sys.path.insert(0, tmp_folder)
+        plugin_module = import_module(plugin_module)
+        self.plugin = plugin_module.CustomWorkBookPlugin(self)
+        sys.path.pop(0)
 
     def load_sheets(self, sheet_regexp=None, progress_callback=None):
         # TODO. improve progress callback to avoid handling logic of increment
@@ -2724,6 +3138,12 @@ class WorkBook:
                              (self.label, sheet_label))
             if progress_callback is not None:
                 progress_callback(100)
+
+        for sheet in sheets.values():
+            if sheet.dynamic_only:
+                for other_sheet in sheets.values():
+                    if not other_sheet.dynamic_only:
+                        sheet.watch_other_sheet_changes(other_sheet)
         return sheets
 
     def __eq__(self, other):
@@ -2750,6 +3170,12 @@ class WorkBook:
             self.filesystem.makedirs(sheet_folder)
         sheet.set_filesystem(self.filesystem.change_dir(sheet_folder))
         sheet.save()
+
+        if sheet.dynamic_only:
+            for other_sheet in self.sheets.values():
+                if not other_sheet.dynamic_only:
+                    sheet.watch_other_sheet_changes(other_sheet)
+
         self.sheets[sheet.label] = sheet
 
     @check_role(UserRole.EDITOR)
@@ -2879,7 +3305,7 @@ class TestWorkBook(unittest.TestCase):
         wb1.save_configuration_file(cfg_fn)
         self.assertEqual(wb1, WorkBook.from_configuration_file(cfg_fn, fs))
 
-    def test_main_usage(self):
+    def test_data_persistence(self):
 
         fs = LocalFileSystem(self.tmp_dir)
 
@@ -2979,6 +3405,146 @@ class TestWorkBook(unittest.TestCase):
 
         wb1.reload()
         self.assertEqual(wb1, wb2)
+
+    def test_dashboard(self):
+        # Create empty workbook
+        fs = LocalFileSystem(self.tmp_dir)
+
+        # Create new workbook from scratch
+        wb_id = 'Participant_info'
+        user = 'me'
+        user_roles = {user : UserRole.ADMIN}
+        data_folder = 'pinfo_files'
+        wb = WorkBook(wb_id, data_folder, fs)
+        wb.set_access_password(self.access_pwd)
+        wb.set_password(UserRole.ADMIN, self.admin_pwd)
+        wb.set_password(UserRole.EDITOR, self.editor_pwd)
+        wb.decrypt(self.access_pwd)
+        wb.set_user(user, UserRole.ADMIN)
+        wb.user_login(user, self.admin_pwd)
+
+        # Create data sheet participant info (no form)
+        sheet_id = 'Participant'
+        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE90001'],
+                              'Secure_ID' : ['452164532', '5R32141']})
+        items = [FormItem({'Participant_ID' :
+                   {'French':'Code Participant'}},
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Secure_ID':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=False)
+        ]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Participant Information'})
+        sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
+
+        # Create data sheet evaluation with outcome = OK or FAIL
+        sheet_id = 'Evaluation'
+        items = [FormItem({'Participant_ID' :
+                   {'French':'Code Participant'}},
+                          default_language='French',
+                          supported_languages={'French'}),
+                 FormItem(keys={'Outcome':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=False),
+                 FormItem(keys={'timestamp':None},
+                          vtype='datetime', generator='timestamp_submission',
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Evaluation'})
+        sh_eval = DataSheet(sheet_id, form, user=user)
+
+        def ts_data_latest(df):
+            max_ts = lambda x: x.loc[x['timestamp']==x['timestamp'].max()]
+            df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
+            df.set_index('Participant_ID', inplace=True)
+            return df
+        sh_eval.add_views({'latest' : ts_data_latest})
+
+        wb.add_sheet(sh_eval)
+        wb.add_sheet(sh_pp)
+
+        # Create dashboard sheet that gets list of participants from p_info
+        # and compute evaluation status. Action is a string report.
+        class Dashboard(SheetPlugin):
+            def __init__(self, sheet, workbook=None):
+                super(Dashboard, self).__init__(sheet, workbook)
+                self.pp = workbook['Participant']
+                self.eval = workbook['Evaluation']
+                sheet.df = pd.DataFrame(columns=['Participant_ID', 'Eval'])
+
+            def sheet_index(self):
+                return 0
+
+            def compute(self):
+                if self.pp.df is not None:
+                    self.sheet.df = self.pp.df[['Participant_ID']].sort_values(by='Participant_ID').reset_index(drop=True)
+                    self.sheet.df.set_index('Participant_ID', inplace=True)
+                self.refresh_entries(self.sheet.df.index)
+
+            def refresh_entries(self, pids):
+                # Add latest function in common plugin
+                self.sheet.df.loc[pids, 'Eval'] = 'eval_todo'
+                eval_df = self.eval.get_df_view('latest')
+                if eval_df is not None:
+                    conditional_set(self.sheet.df, 'Eval', 'eval_ok',
+                                    eval_df, 'Outcome', ['OK'],
+                                    indexes=pids)
+                    conditional_set(self.sheet.df, 'Eval', 'eval_FAIL',
+                                    eval_df, 'Outcome', ['FAIL'],
+                                    indexes=pids)
+
+            def update(self, sheet_source, entry):
+                entry = entry.set_index('Participant_ID')
+                if sheet_source.label == self.pp.label:
+                    empty_df = pd.DataFrame([], index=entry.index)
+                    self.sheet.df = self.sheet.df.append(empty_df)
+                self.refresh_entries(entry.index)
+            # TODO action
+
+        sh_dashboard = DataSheet('Dashboard', dynamic_only=True)
+        sh_dashboard.set_plugin(Dashboard(sh_dashboard, wb))
+        wb.add_sheet(sh_dashboard)
+
+        self.assertEqual(set(wb['Dashboard'].df.index.values),
+                         set(pp_df['Participant_ID']))
+        self.assertTrue((wb['Dashboard'].df['Eval'] == 'eval_todo').all())
+
+        # Add new pp
+        sh_pp.append_entry({'Participant_ID' : 'CE4444',
+                            'Secure_ID' : '5432524'})
+        # TODO: dispatch new entry to dynamical sheet!
+        last_dashboard_entry = wb['Dashboard'].df.tail(1)
+        self.assertEqual(last_dashboard_entry.index[0],
+                         'CE4444')
+        self.assertEqual(last_dashboard_entry['Eval'].iat[0],
+                         'eval_todo')
+
+        # Add new eval
+        sh_eval.append_entry({'Participant_ID' : 'CE4444',
+                              'Outcome' : 'FAIL',
+                              'timestamp' : datetime.now()})
+        self.assertEqual( wb['Dashboard'].df.tail(1)['Eval'].iat[0],
+                         'eval_FAIL')
+
+        #TODO Delete pp
+        if 0:
+            sh_pp.delete_entry(sh_pp.df.iloc[1].name)
+            self.assertEqual(wb['Dashboard'].df.shape, (2,2))
+
+    def test_view_on_dynamic_sheet(self):
+        pass
 
     def test_workbook_version(self):
         # TODO: enable version tracking while loading a workbook
@@ -3101,7 +3667,7 @@ class FormItem:
     }
 
     def __init__(self, keys, default_language, supported_languages,
-                 vtype='text', title=None, description='', values=None,
+                 vtype='text', title=None, description='', init_values=None,
                  regexp='[\s\S]*', regexp_invalid_message='',
                  allow_empty=True, choices=None, other_choice_label=None,
                  unique=False, unique_view=None, generator=None,
@@ -3171,7 +3737,7 @@ class FormItem:
         self.hidden = hidden
         self.nb_lines = nb_lines
 
-        self.init_values = values # TODO: utest
+        self.init_values = init_values
         self.values_str = {}
         self.generator = generator
 
@@ -3266,6 +3832,7 @@ class FormItem:
                 'allow_empty' : self.allow_None,
                 'choices' : self.choices,
                 'other_choice_label' : self.tr.trs.get('other_choice', None),
+                'init_values' : self.init_values,
                 'unique' : self.unique,
                 'unique_view' : self.unique_view,
                 'generator' : self.generator,
@@ -3308,8 +3875,8 @@ class FormItem:
     def _set_validity(self, validity, message, key=None):
 
         if not validity:
-            logger.warning(message + (' for key: '+key \
-                                      if key is not None else ''))
+            logger.debug(message + (' for key: '+key \
+                                    if key is not None else ''))
         # logger.debug('%s - validity: %s', self, validity)
 
         self.validity = validity
@@ -3417,6 +3984,8 @@ class FormItem:
         try:
             date = self.get_value(key)
         except InvalidValue:
+            return None, None, None, None
+        if date is None:
             return None, None, None, None
         hour_str = None
         min_str = None
@@ -4121,9 +4690,6 @@ class TestFormItem(unittest.TestCase):
 
         logger.setLevel(logging.DEBUG)
 
-    def get_df_view(self, view_label=None):
-        return self.df
-
     def test_no_key(self):
         item = FormItem(None, supported_languages={'English'},
                         default_language='English')
@@ -4203,6 +4769,37 @@ class TestFormItem(unittest.TestCase):
         self.assertTrue(item.is_valid())
         item.set_input_str('CE005')
         self.assertFalse(item.is_valid())
+
+
+    def test_init_default_value(self):
+        item = FormItem({'exclude':None},
+                        vtype='boolean',
+                        choices={'False':{'English':'Nope'},
+                                 'True':{'English':'Yep'}},
+                        supported_languages={'English'},
+                        default_language='English',
+                        init_values={'exclude' : 'False'})
+        self.assertEqual(item.get_value(), False)
+        item = FormItem(**item.to_dict())
+        self.assertEqual(item.get_value(), False)
+
+        item = FormItem({'Status':None},
+                        supported_languages={'English'},
+                        default_language='English',
+                        init_values={'Status' : 'ongoing'})
+        self.assertEqual(item.get_value(), 'ongoing')
+        item = FormItem(**item.to_dict())
+        self.assertEqual(item.get_value(), 'ongoing')
+
+        item = FormItem({'a_choice':None},
+                        supported_languages={'English'},
+                        default_language='English',
+                        choices={'c1':{'English':'Choice 1'},
+                                 'c2':{'English':'Choice 2'}},
+                        init_values={'a_choice' : 'c2'})
+        self.assertEqual(item.get_value(), 'c2')
+        item = FormItem(**item.to_dict())
+        self.assertEqual(item.get_value(), 'c2')
 
     def test_get_value_error_when_invalid(self):
         item = FormItem({'Participant_ID':None},
@@ -4591,10 +5188,18 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.sheet = data_sheet
 
     def rowCount(self, parent=None):
-        return self.sheet.get_df_view().shape[0]
+        view_df = self.sheet.get_df_view()
+        if view_df is not None:
+            return view_df.shape[0]
+        else:
+            return 0
 
     def columnCount(self, parnet=None):
-        return self.sheet.get_df_view().shape[1]
+        view_df = self.sheet.get_df_view()
+        if view_df is not None:
+            return view_df.shape[1]
+        else:
+            return 0
 
     def data(self, index, role=QtCore.Qt.DisplayRole):
         if index.isValid():
@@ -4676,7 +5281,7 @@ def make_item_input_widget(item_widget, item, key, key_label,
         _input_ui = ui.item_boolean_checkboxes_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
         _input_ui.check_box.setText(item.tr[key])
-        _input_ui.check_box.stateChanged.connect(lambda b: item.set_input_str('%s'%b))
+        _input_ui.check_box.toggled.connect(lambda b: item.set_input_str('%s'%b))
         if init_value != '':
             _input_ui.check_box.setChecked(item.get_value())
     elif (item.vtype == 'text' and item.choices is not None) or\
@@ -4699,12 +5304,19 @@ def make_item_input_widget(item_widget, item, key, key_label,
             radio_button.setObjectName("radio_button_"+choice)
             _input_ui.radio_layout.addWidget(radio_button, idx)
             radio_group.addButton(radio_button, idx)
-            radio_button.clicked.connect(LazyFunc(item.set_input_str, choice))
+            class ChoiceProcess:
+                def __init__(self, item, choice):
+                    self.item = item
+                    self.choice = choice
+                def __call__(self, state):
+                    if state:
+                        self.item.set_input_str(self.choice)
+            radio_button.toggled.connect(ChoiceProcess(item, choice))
         if item.allow_other_choice:
             radio_group.addButton(_input_ui.radio_button_other, idx+1)
 
-            def toggle_other_field():
-                flag = _input_ui.radio_button_other.ischecked()
+            def toggle_other_field(flag):
+                # flag = _input_ui.radio_button_other.ischecked()
                 _input_ui.other_field.setEnabled(flag)
             _input_ui.radio_button_other.toggled.connect(toggle_other_field)
 
@@ -4777,12 +5389,13 @@ class PiccelApp(QtWidgets.QApplication):
     USER_FILE = 'piccel.json'
 
     def __init__(self, argv, cfg_fn=None, user=None, access_pwd=None,
-                 role_pwd=None, cfg_fns=None):
+                 role_pwd=None, cfg_fns=None, refresh_rate_ms=0):
         super(PiccelApp, self).__init__(argv)
 
         if cfg_fns is None:
             cfg_fns = []
 
+        self.refresh_rate_ms = refresh_rate_ms
         logger.debug('Available cfg fn: %s', cfg_fns)
         # icon_style = QtWidgets.QStyle.SP_ComputerIcon
         # self.setWindowIcon(self.style().standardIcon(icon_style))
@@ -4957,6 +5570,13 @@ class PiccelApp(QtWidgets.QApplication):
         error_message = None
         try:
             self.logic.login(user, role_pwd, progression_callback=progress)
+            if self.refresh_rate_ms > 0:
+                self.timer = QtCore.QTimer(self)
+                logger.debug('Start data refresh timer with an interval of %d ms',
+                             self.refresh_rate_ms)
+                self.timer.setInterval(self.refresh_rate_ms)
+                self.timer.timeout.connect(self.logic.workbook.refresh_all_data)
+                self.timer.start()
         except UnknownUser:
             error_message = 'Unknown user: %s' %user
         except InvalidPassword:
@@ -4971,6 +5591,9 @@ class PiccelApp(QtWidgets.QApplication):
         self.refresh()
 
     def show_access_screen(self):
+        self._access_ui.button_ok.setEnabled(True)
+        self._access_ui.button_cancel.setEnabled(True)
+
         self._access_ui.workbook_label.setText(self.logic.workbook.label)
         self._access_ui.access_password_field.clear()
         if self.access_pwd is not None:
@@ -4980,6 +5603,9 @@ class PiccelApp(QtWidgets.QApplication):
 
     def show_login_screen(self):
         # TODO: Add option to save debug log output in workbook
+        self._login_ui.button_ok.setEnabled(True)
+        self._login_ui.button_cancel.setEnabled(True)
+
         self._login_ui.user_list.clear()
         user_names = self.logic.get_user_names()
         if self.default_user in user_names:
@@ -5016,8 +5642,8 @@ class PiccelApp(QtWidgets.QApplication):
         # vlayout.addWidget(__editor)
 
         tab_idx = tab_widget.addTab(text_editor_widget, tab_label)
-        icon_style = QtWidgets.QStyle.SP_ArrowRight
-        tab_icon = self.style().standardIcon(icon_style)
+        icon_style = QtWidgets.QStyle.SP_FileDialogListView
+        tab_icon = QtGui.QIcon(':/icons/editor_icon')
         tab_widget.setTabIcon(tab_idx, tab_icon)
         tab_widget.setCurrentIndex(tab_idx)
 
@@ -5090,8 +5716,7 @@ class PiccelApp(QtWidgets.QApplication):
 
         set_section_ui(form.current_section_name, form.current_section)
         tab_idx = tab_widget.addTab(form_widget, sheet_name)
-        icon_style = QtWidgets.QStyle.SP_ArrowRight
-        tab_icon = self.style().standardIcon(icon_style)
+        tab_icon = QtGui.QIcon(':/icons/form_input_icon')
         tab_widget.setTabIcon(tab_idx, tab_icon)
         tab_widget.setCurrentIndex(tab_idx)
 
@@ -5138,8 +5763,14 @@ class PiccelApp(QtWidgets.QApplication):
                 form.submit()
                 tab_widget.removeTab(tab_idx)
             except Exception as e:
-                logger.error('Exception occured while submitting:\n%s', str(e))
+                logger.error('Exception occured while submitting:\n%s', repr(e))
+                from IPython import embed; embed()
         _form_ui.button_submit.clicked.connect(submit)
+
+
+    def close_workbook(self):
+        self.logic.close_workbook()
+        self.refresh()
 
     def show_workbook_screen(self):
         self._workbook_ui.tabWidget.clear()
@@ -5152,20 +5783,43 @@ class PiccelApp(QtWidgets.QApplication):
             if self.logic.workbook.user_role != UserRole.ADMIN:
                 _data_sheet_ui.button_edit_entry.hide()
 
+            button_icon = QtGui.QIcon(':/icons/close_icon')
+            _data_sheet_ui.button_close.setIcon(button_icon)
+            _data_sheet_ui.button_close.clicked.connect(self.close_workbook)
+
+            view_icon = QtGui.QIcon(':/icons/view_icon').pixmap(QtCore.QSize(24,24))
+            _data_sheet_ui.label_view.setPixmap(view_icon)
+
+            button_icon = QtGui.QIcon(':/icons/refresh_icon')
+            _data_sheet_ui.button_refresh.setIcon(button_icon)
+            _data_sheet_ui.button_refresh.clicked.connect(sh.refresh_data)
+
             model = DataSheetModel(sh)
             sh.notifier.add_watcher('appended_entry', model.update_after_append)
+            # TODO: watch entry modification
             _data_sheet_ui.tableView.setModel(model)
             _data_sheet_ui.tableView.horizontalHeader().setMaximumSectionSize(500) # TODO expose param
             _data_sheet_ui.tableView.resizeColumnsToContents()
 
-            def f_update_entry(idx):
-                entry_id = model.entry_id(idx)
-                logger.debug('update_entry: idx.row=%s, entry_id=%s',
-                             idx.row(), entry_id)
-                self.make_form_tab(sh_name, model, _data_sheet_ui,
-                                   self._workbook_ui.tabWidget,
-                                   form=sh.form_update_entry(entry_id))
-            _data_sheet_ui.tableView.doubleClicked.connect(f_update_entry)
+            # def f_update_entry(idx):
+            #     entry_id = model.entry_id(idx)
+            #     logger.debug('update_entry: idx.row=%s, entry_id=%s',
+            #                  idx.row(), entry_id)
+            #     self.make_form_tab(sh_name, model, _data_sheet_ui,
+            #                        self._workbook_ui.tabWidget,
+            #                        form=sh.form_update_entry(entry_id))
+            def f_cell_action(idx):
+                row_df = sh.get_df_view().iloc[[idx.row()]]
+                action_result = sh.plugin.action(row_df,
+                                                 row_df.columns[idx.column()])
+                if isinstance(action_result, Form):
+                    self.make_form_tab(sh_name, model, _data_sheet_ui,
+                                       self._workbook_ui.tabWidget,
+                                       form=action_result)
+                else:
+                    print('action result:', action_result)
+
+            _data_sheet_ui.tableView.doubleClicked.connect(f_cell_action)
 
             def show_details(idx):
                 _data_sheet_ui.cell_value.setText(model.data(idx))
@@ -5181,16 +5835,21 @@ class PiccelApp(QtWidgets.QApplication):
                 self.make_form_tab(sh_name, model, _data_sheet_ui,
                                    self._workbook_ui.tabWidget,
                                    form=sh.form_set_entry(entry_id))
-            _data_sheet_ui.button_edit_entry.clicked.connect(f_edit_entry)
+            if not sh.dynamic_only: #TODO: and user is admin
+                _data_sheet_ui.button_edit_entry.clicked.connect(f_edit_entry)
+            else:
+                _data_sheet_ui.button_edit_entry.hide()
 
             f_new_entry = lambda : self.make_form_tab(sh_name, model, _data_sheet_ui,
                                                       self._workbook_ui.tabWidget,
                                                       form=sh.form_new_entry())
-            _data_sheet_ui.button_new_entry.clicked.connect(f_new_entry)
-
-            new_entry_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("N"),
+            if not sh.dynamic_only: #TODO: and user is admin
+                _data_sheet_ui.button_new_entry.clicked.connect(f_new_entry)
+                new_entry_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("N"),
                                                      sheet_widget)
-            new_entry_shortcut.activated.connect(f_new_entry)
+                new_entry_shortcut.activated.connect(f_new_entry)
+            else:
+                _data_sheet_ui.button_new_entry.hide()
 
             _data_sheet_ui.comboBox_view.addItems(list(sh.views.keys()))
             _data_sheet_ui.comboBox_view.setCurrentText(sh.default_view)
@@ -5198,7 +5857,6 @@ class PiccelApp(QtWidgets.QApplication):
             _data_sheet_ui.comboBox_view.currentIndexChanged.connect(f)
 
             self._workbook_ui.tabWidget.addTab(sheet_widget, sh_name)
-
 
             _data_sheet_ui.button_edit_form.clicked.connect(
                 lambda: self.make_text_editor(self._workbook_ui.tabWidget,
@@ -5212,7 +5870,7 @@ class PiccelApp(QtWidgets.QApplication):
                                               sh_name,
                                               sh.get_plugin_code(),
                                               'python',
-                                              lambda s : sh.set_plugin(s, self.logic.workbook)))
+                                              lambda s : sh.set_plugin(s, self.logic.workbook, overwrite=True)))
 
             for form_id, form in sh.live_forms.items():
                 logger.info('Load pending form "%s" (%s)',
