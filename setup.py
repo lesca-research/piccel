@@ -58,6 +58,7 @@ setup(name='piccel', version=version['__version__'],
               'piccel_extract_logic = piccel.commands.piccel_extract_logic:main',
               'piccel_import_logic = piccel.commands.piccel_import_logic:main',
               'piccel_decrypt = piccel.commands.piccel_crypt:decrypt_cmd',
-              'piccel_encrypt = piccel.commands.piccel_crypt:encrypt_cmd'
+              'piccel_encrypt = piccel.commands.piccel_crypt:encrypt_cmd',
+              'piccel_dump_access_key = piccel.commands.piccel_dump_access_key:main'
           ],
       })

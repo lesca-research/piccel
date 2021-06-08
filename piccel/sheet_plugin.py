@@ -91,9 +91,8 @@ class SheetPlugin:
             - Hint.NONE
             - Hint.WARNING
             - Hint.ERROR
+            - Hint.OK
+            - Hint.NOT_OK
         *tooltip* values are str
         """
         pass
-
-    # def request_new_entry(self, column, row_df)
-    #  Action = None | (sheet_label, {key:values}) # Important! form item key must be valid identifier!

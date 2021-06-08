@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 
+# TODO: DataSheet with no form, fed by external data
 # TODO: add lock system for admin/marshall operations
+
 # TODO: reload view qitemlist after plugin update
 
 import io
@@ -55,6 +57,10 @@ from hashlib import scrypt
 import logging
 import sys
 
+import weasyprint # TODO as dep
+import PyPDF2 # TODO as dep
+from io import BytesIO
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 from . import ui
 
@@ -64,6 +70,50 @@ logger = logging.getLogger('piccel')
 logging.basicConfig(stream=sys.stdout,
                     format='%(asctime)s %(levelname)-8s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
+
+
+# For DataSheet export to pdf:
+HTML_TOP = '''
+<html>
+<head>
+<style>
+  h2 {
+    text-align: center;
+    font-family: Helvetica, Arial, sans-serif;
+  }
+  table {
+    margin-left: auto;
+    margin-right: auto;
+  }
+  table, th, td {
+    border: 1px solid black;
+    border-collapse: collapse;
+  }
+  th, td {
+    padding: 5px;
+    text-align: center;
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 90%;
+  }
+  table tbody tr:hover {
+    background-color: #dddddd;
+  }
+  tr:nth-child(even) {
+    background-color: Silver;
+  }
+  .wide {
+    width: 90%;
+  }
+</style>
+</head>
+<body>
+'''
+
+HTML_BOTTOM = '''
+</body>
+</html>
+'''
+
 
 def derive_key_pbkdf2(password_str, salt_bytes):
     kdf = PBKDF2HMAC(
@@ -83,8 +133,21 @@ def derive_key(password_str, salt_bytes):
 
 class Encrypter:
 
-    def __init__(self, password, salt_bytes):
-        self.fernet = Fernet(derive_key(password, salt_bytes))
+    # TODO: init from key instead of pwd/salt and
+    # create other constructor for pwd/salt
+    def __init__(self, password, salt_bytes, key=None):
+        if key is None:
+            self.key = derive_key(password, salt_bytes)
+        else:
+            self.key = key
+        self.fernet = Fernet(self.key)
+
+    def get_key(self):
+        return self.key.decode()
+
+    @staticmethod
+    def from_key(key_str):
+        return Encrypter(None, None, key_str.encode())
 
     def encrypt_str(self, content_str):
         return self.fernet.encrypt(content_str.encode()).decode()
@@ -114,7 +177,7 @@ class PasswordVault:
         if self.vault is None:
             self.vault = {PasswordVault.SALT_HEX_KEY : os.urandom(32).hex(),
                           'passwords' : {}}
-        self.pwd_fn = pwd_fn
+        self.pwd_fn = op.normpath(pwd_fn)
 
     def __eq__(self, other):
         return set(self.vault.keys())  == set(other.vault.keys()) and \
@@ -180,10 +243,14 @@ class PasswordVault:
         except KeyError:
             raise UnknownUser(user)
 
-    def get_encrypter(self, user, password_str):
-        self.check(user, password_str)
-        salt = bytes.fromhex(self.vault[PasswordVault.SALT_HEX_KEY])
-        return Encrypter(password_str, salt)
+    def get_encrypter(self, user, password_str, key=None):
+        if key is None:
+            self.check(user, password_str)
+            salt = bytes.fromhex(self.vault[PasswordVault.SALT_HEX_KEY])
+            encrypter = Encrypter(password_str, salt)
+        else:
+            encrypter = Encrypter.from_key(key)
+        return encrypter
 
 class InvalidFormItemType(Exception): pass
 class InvalidFormItemKey(Exception): pass
@@ -1313,7 +1380,7 @@ class DataSheet:
                 self.filesystem.accept_all_changes()
 
     def set_form_master(self, form):
-        # TODO: utest and check consistency with already loaded forms
+        # TODO: utest and check consistency with pending live forms
         self.form_master = form
 
     def save(self):
@@ -1407,6 +1474,46 @@ class DataSheet:
 
     def get_live_forms_folder(self):
         return op.join('live_forms', protect_fn(self.user))
+
+    def export_to_pdf(self, output_pdf_abs_fn, password, view=None,
+                      columns=None):
+        assert(self.filesystem is not None)
+
+        output_pdf_fn = op.normpath(output_pdf_abs_fn)
+        if self.df is None:
+            logger.warning('No data to export')
+            return
+
+        df = self.get_df_view(view).reset_index(drop=True) # get rid of __entry_id__
+        if columns is not None:
+            df = df[columns]
+
+        # todo add jinja2 dep
+        css_fit = weasyprint.CSS(string=(
+            "@page scaled {\n"
+            "    size: 400mm 300mm;\n"
+            "}"
+            "body {\n"
+            "   page: scaled;\n"
+            "}\n"
+        ))
+
+        df_html = df.style.render() # self.df.to_html(classes='wide', escape=False)
+        html_page = HTML_TOP + df_html + HTML_BOTTOM
+
+        fpdf = BytesIO()
+        weasyprint.HTML(string=html_page).write_pdf(fpdf, stylesheets=[css_fit])
+
+        output = PyPDF2.PdfFileWriter()
+        input_pdf = PyPDF2.PdfFileReader(fpdf)
+
+        for i in range(0, input_pdf.getNumPages()):
+            output.addPage(input_pdf.getPage(i))
+
+        with open(output_pdf_fn, 'wb') as fout:
+            if password is not None:
+                output.encrypt(password, use_128bit=True)
+            output.write(fout)
 
     @staticmethod
     def get_sheet_label_from_filesystem(fs):
@@ -2020,6 +2127,11 @@ class TestDataSheet(unittest.TestCase):
         self.assertFalse(sheet.is_valid())
         assert_array_equal(sheet.row_validity(), [False, False, True])
 
+    def test_to_pdf(self):
+        pdf_fn = op.join(self.tmp_dir, 'sheet.pdf')
+        self.sheet_ts.export_to_pdf(pdf_fn, 'pwd')
+        self.assertTrue(self.filesystem.exists(pdf_fn))
+
     def test_views(self):
         sheet = DataSheet('Participant_info',
                           Form.from_dict(self.form_def_ts_data),
@@ -2119,7 +2231,8 @@ class TestDataSheet(unittest.TestCase):
                                     data=np.ones(df.shape, dtype=bool))
 
         for PluginBad in [SheetPluginBadViews, SheetPluginBadDefaultView]:
-            self.assertNotEqual(self.sheet.validate_plugin(PluginBad(self)),
+            logger.debug('utest %s', PluginBad)
+            self.assertNotEqual(self.sheet_ts.validate_plugin(PluginBad(self)),
                                 'ok')
 
     def test_validity(self):
@@ -2912,17 +3025,23 @@ class WorkBook:
         self.password_vault.set_password(UserRole.VIEWER.name, pwd)
         self.password_vault.save()
 
-    def decrypt(self, access_pwd):
+    def decrypt(self, access_pwd, key_afn=None):
         """
         Load user list and resolve linked books
         Must be called before user login.
         """
-        if not self.access_password_is_valid(access_pwd):
-            logger.error('Invalid password for data access')
-            raise InvalidPassword('Data access')
-        logger.info('WorkBook %s: decrypt', self.label)
-        encrypter = self.password_vault.get_encrypter(WorkBook.ACCESS_KEY,
-                                                      access_pwd)
+        # TODO improve API with key input
+        if key_afn is None:
+            if not self.access_password_is_valid(access_pwd):
+                logger.error('Invalid password for data access')
+                raise InvalidPassword('Data access')
+            logger.info('WorkBook %s: decrypt', self.label)
+            encrypter = self.password_vault.get_encrypter(WorkBook.ACCESS_KEY,
+                                                          access_pwd)
+        else:
+            with open(key_afn, 'r') as fin:
+                key = fin.read()
+            encrypter = self.password_vault.get_encrypter(None, None, key)
         self.filesystem.set_encrypter(encrypter)
         self.decrypted = True
 
@@ -2948,6 +3067,12 @@ class WorkBook:
                 else:
                     raise UnknownUser('%s in %s', linked_wb.label)
         return True
+
+
+    def dump_access_key(self, key_afn):
+        assert(self.decrypted)
+        with open(key_afn, 'w') as fout:
+            fout.write(self.filesystem.encrypter.get_key())
 
     def _load_user_roles(self):
         assert(self.decrypted)
@@ -3305,6 +3430,35 @@ class TestWorkBook(unittest.TestCase):
         wb1.save_configuration_file(cfg_fn)
         self.assertEqual(wb1, WorkBook.from_configuration_file(cfg_fn, fs))
 
+    def test_decrypt_from_key_file(self):
+        fs = LocalFileSystem(self.tmp_dir)
+
+        # Create new workbook from scratch
+        logger.debug('-----------------------')
+        logger.debug('utest: create workbook1')
+        wb_id = 'Participant_info'
+        user = 'me'
+        user_roles = {user : UserRole.ADMIN}
+        data_folder = 'pinfo_files'
+        wb1 = WorkBook(wb_id, data_folder, fs)
+        wb1.set_access_password(self.access_pwd)
+        wb1.set_password(UserRole.ADMIN, self.admin_pwd)
+        wb1.set_password(UserRole.EDITOR, self.editor_pwd)
+
+        wb1.decrypt(self.access_pwd)
+
+        key_fn = op.join(self.tmp_dir, 'key')
+        logger.debug('utest: dump key from workbook1')
+        wb1.dump_access_key(key_fn)
+
+        logger.debug('-----------------------')
+        logger.debug('utest: create workbook1')
+
+        wb2 = WorkBook(wb_id, data_folder, fs)
+        wb2.decrypt(None, key_afn=key_fn)
+
+        self.assertEqual(wb1, wb2)
+
     def test_data_persistence(self):
 
         fs = LocalFileSystem(self.tmp_dir)
@@ -3590,6 +3744,30 @@ class TestWorkBook(unittest.TestCase):
         # Saving is user-dependent so must be handled at WorkBook level
         pass
 
+import html5lib
+import html
+from bs4 import BeautifulSoup # TODO: add dep
+
+def is_valid_html(html):
+    html_ok = True
+    html5parser = html5lib.HTMLParser(strict=True)
+    try:
+        html5parser.parse(html)
+    except html5lib.html5parser.ParseError as e:
+        soup = BeautifulSoup(html, 'html5lib')
+        if len(soup('iframe')) > 0:
+            for iframe in soup('iframe'):
+                iframe.decompose()
+            logger.warning('Ignored some faulty iframe during html check')
+            try:
+                html5parser.parse(soup.prettify())
+            except Exception as e:
+                logger.error('Invalid html: %s', e)
+                html_ok = False
+        else:
+            html_ok = False
+    return html_ok
+
 class FormItem:
     """
     Validate and process and input entries, all having the same type.
@@ -3607,6 +3785,13 @@ class FormItem:
             'format' : lambda v : v,
             'message invalid format' : 'Enter a text',
             'validate value type' : lambda v : isinstance(v, str),
+            },
+        'html' : {
+            'dtype_pd' : 'string',
+            'unformat' : lambda s : s,
+            'format' : lambda v : v,
+            'message invalid format' : 'Enter a text',
+            'validate value type' : is_valid_html,
             },
          'int' : {
              'dtype_pd' : 'int',
@@ -3897,7 +4082,7 @@ class FormItem:
         value_str = self.values_str[key]
 
         if len(value_str)==0 and not self.allow_None:
-            logger.warning('%s cannot be empty', self)
+            logger.debug('%s cannot be empty', self)
             self._set_validity(False, 'A value is required', key)
             return
 
@@ -5179,7 +5364,15 @@ class TestEncryption(unittest.TestCase):
         self.assertEqual(crypter.decrypt_to_str(crypter.encrypt_str(message)),
                          message)
 
+    def test_key_access(self):
+        password = "password"
+        salt = os.urandom(16)
+        crypter = Encrypter(password, salt)
 
+        message = 'This is secret'
+        crypted_message = crypter.encrypt_str(message)
+        crypter2 = Encrypter.from_key(crypter.get_key())
+        self.assertEqual(message, crypter2.decrypt_to_str(crypted_message))
 
 class DataSheetModel(QtCore.QAbstractTableModel):
 

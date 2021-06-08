@@ -15,8 +15,14 @@ def encrypt_cmd():
 
     encrypt(*parse_cmd(usage, description))
 
+def shorten_fn(fn):
+    if len(op.dirname(op.normpath(fn))):
+        fn = op.join('...', op.basename(fn))
+    return fn
+
 def encrypt(in_file, out_file, pwd):
-    pwd = ask_pwd(pwd)
+    pwd = ask_pwd(pwd,
+                  prompt='Password to encrypt %s:' % shorten_fn(in_file))
     salt_bytes = os.urandom(32)
     encrypter = Encrypter(pwd, salt_bytes)
 
@@ -42,7 +48,8 @@ def decrypt_to_tmp(in_file, pwd=None):
     return tmp_fn, decrypt(in_file, tmp_fn, pwd)
 
 def decrypt(in_file, out_file, pwd):
-    pwd = ask_pwd(pwd)
+    pwd = ask_pwd(pwd,
+                  prompt='Password to decrypt %s:' % shorten_fn(in_file))
     with open(in_file, 'r') as fin:
         json_content = json.load(fin)
         salt_bytes = bytes.fromhex(json_content['salt'])
@@ -54,9 +61,9 @@ def decrypt(in_file, out_file, pwd):
         fout.write(decrypted_content_str)
     return pwd
 
-def ask_pwd(pwd):
+def ask_pwd(pwd, prompt='password:'):
     if pwd is None:
-        pwd = getpass.getpass()
+        pwd = getpass.getpass(prompt)
     return pwd
 
 def parse_cmd(usage, description):
