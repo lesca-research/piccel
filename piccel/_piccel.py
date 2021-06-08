@@ -1478,7 +1478,8 @@ class DataSheet:
     def export_to_pdf(self, output_pdf_abs_fn, password, view=None,
                       columns=None):
         assert(self.filesystem is not None)
-
+        import weasyprint
+        import PyPDF2
         output_pdf_fn = op.normpath(output_pdf_abs_fn)
         if self.df is None:
             logger.warning('No data to export')
