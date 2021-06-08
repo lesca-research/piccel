@@ -57,8 +57,6 @@ from hashlib import scrypt
 import logging
 import sys
 
-import weasyprint # TODO as dep
-import PyPDF2 # TODO as dep
 from io import BytesIO
 
 from PyQt5 import QtCore, QtGui, QtWidgets
