@@ -3745,9 +3745,9 @@ class TestWorkBook(unittest.TestCase):
 
 import html5lib
 import html
-from bs4 import BeautifulSoup # TODO: add dep
 
 def is_valid_html(html):
+    from bs4 import BeautifulSoup # TODO: add dep
     html_ok = True
     html5parser = html5lib.HTMLParser(strict=True)
     try:
