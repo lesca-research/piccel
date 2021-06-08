@@ -52,7 +52,7 @@ setup(name='piccel', version=version['__version__'],
       packages=find_packages(exclude=['test']),
       python_requires='>=3',
       install_requires=['numpy', 'pandas', 'cryptography', 'appdirs'],
-      extras_require={"PDF":  ['weasyprint', 'PyPDF2']},
+      extras_require={"PDF":  ['weasyprint', 'PyPDF2', 'beautifulsoup4']},
       entry_points={
           'console_scripts': [
               'piccel = piccel.commands.piccel:main',
