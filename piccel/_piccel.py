@@ -370,10 +370,11 @@ class Form:
     #         df.set_index(index, inplace=True)
     #     return df
 
-    def _prepend(self, key, value_str, vtype, hidden=True):
+    def _prepend(self, key, value_str, vtype, hidden=True, editable=False):
         section0 = next(iter(self.sections.values()))
         item = FormItem({key:None}, section0.tr.language,
-                        section0.tr.supported_languages, vtype=vtype, hidden=hidden,
+                        section0.tr.supported_languages, vtype=vtype,
+                        hidden=hidden, editable=editable,
                         init_values={key:value_str})
         section0._prepend(item)
         # TODO: self.register_item
@@ -895,51 +896,59 @@ class LocalFileSystem:
     Keep track of all modifications made to be able to notice external
     modifications.
     """
-    def __init__(self, root_folder, encrypter=None):
+    def __init__(self, root_folder, encrypter=None, track_changes=False):
         self.root_folder = root_folder
         self.encrypter = encrypter
+        self.track_changes = track_changes
+        self.enable_track_changes(track_changes)
+
+    def enable_track_changes(self, state=True):
+        self.track_changes = state
         self.current_stats = self.file_stats()
 
     def file_stats(self):
         stats = {}
-        for wroot, dirs, files in os.walk(self.root_folder):
-            for bfn in files:
-                rdir = op.relpath(wroot, self.root_folder)
-                fn = op.normpath(op.join(rdir, bfn))
-                stats[fn] = self.file_size(fn)
+        if self.track_changes:
+            for wroot, dirs, files in os.walk(self.root_folder):
+                for bfn in files:
+                    rdir = op.relpath(wroot, self.root_folder)
+                    fn = op.normpath(op.join(rdir, bfn))
+                    stats[fn] = self.file_size(fn)
         return stats
 
     def external_changes(self):
         modifications = []
         additions = []
-        for wroot, dirs, files in os.walk(self.root_folder):
-            for bfn in files:
-                rdir = op.relpath(wroot, self.root_folder)
-                fn = op.normpath(op.join(rdir, bfn))
-                if fn not in self.current_stats:
-                    additions.append(fn)
-                elif self.current_stats[fn] != self.file_size(fn):
-                    modifications.append(fn)
+        if self.track_changes:
+            for wroot, dirs, files in os.walk(self.root_folder):
+                for bfn in files:
+                    rdir = op.relpath(wroot, self.root_folder)
+                    fn = op.normpath(op.join(rdir, bfn))
+                    if fn not in self.current_stats:
+                        additions.append(fn)
+                    elif self.current_stats[fn] != self.file_size(fn):
+                        modifications.append(fn)
         deletions = [fn for fn in self.current_stats if not self.exists(fn)]
         return modifications, additions, deletions
 
     def accept_changes(self, modifications=None, additions=None, deletions=None):
-        modifications = modifications if modifications is not None else []
-        additions = additions if additions is not None else []
-        deletions = deletions if deletions is not None else []
-        for fn in modifications+additions:
-            self.current_stats[fn] = self.file_size(fn)
-        for fn in deletions:
-            self.current_stats.pop(fn)
+        if self.track_changes:
+            modifications = modifications if modifications is not None else []
+            additions = additions if additions is not None else []
+            deletions = deletions if deletions is not None else []
+            for fn in modifications+additions:
+                self.current_stats[fn] = self.file_size(fn)
+            for fn in deletions:
+                self.current_stats.pop(fn)
 
     def accept_all_changes(self):
         self.current_stats = self.file_stats()
 
-    def change_dir(self, folder):
+    def change_dir(self, folder, track_changes=False):
         """ Note: change tracking will be reset """
         assert(self.exists(folder))
         return LocalFileSystem(op.join(self.root_folder, folder),
-                               self.encrypter)
+                               self.encrypter, track_changes)
 
     def set_encrypter(self, encrypter):
         self.encrypter = encrypter
@@ -1120,7 +1129,7 @@ class TestLocalFileSystem(unittest.TestCase):
     def test_track_new_files(self):
         self.touch_file('yy.cc')
         self.touch_file('xx.cc')
-        filesystem = LocalFileSystem(self.tmp_dir)
+        filesystem = LocalFileSystem(self.tmp_dir, track_changes=True)
 
         self.touch_file('new.cc')
         mods, adds, dels = filesystem.external_changes()
@@ -1137,7 +1146,7 @@ class TestLocalFileSystem(unittest.TestCase):
     def test_track_modified_files(self):
         self.touch_file('yy.cc')
         self.touch_file('xx.cc')
-        filesystem = LocalFileSystem(self.tmp_dir)
+        filesystem = LocalFileSystem(self.tmp_dir, track_changes=True)
         self.touch_file('yy.cc', 'hey')
 
         mods, adds, dels = filesystem.external_changes()
@@ -1154,7 +1163,7 @@ class TestLocalFileSystem(unittest.TestCase):
     def test_track_deleted_files(self):
         self.touch_file('yy.cc')
         self.touch_file('xx.cc')
-        filesystem = LocalFileSystem(self.tmp_dir)
+        filesystem = LocalFileSystem(self.tmp_dir, track_changes=True)
         os.remove(op.join(self.tmp_dir, 'yy.cc'))
 
         mods, adds, dels = filesystem.external_changes()
@@ -1171,7 +1180,7 @@ class TestLocalFileSystem(unittest.TestCase):
     def test_internal_tracking(self):
         self.touch_file('yy.cc')
         self.touch_file('xx.cc')
-        filesystem = LocalFileSystem(self.tmp_dir)
+        filesystem = LocalFileSystem(self.tmp_dir, track_changes=True)
         filesystem.remove('xx.cc')
 
         mods, adds, dels = filesystem.external_changes()
@@ -1227,6 +1236,7 @@ class DataSheet:
         if self.filesystem is not None and self.user is None:
             raise Exception('User required when file saving is used')
         if self.filesystem is not None:
+            self.filesystem.enable_track_changes()
             fs_label = DataSheet.get_sheet_label_from_filesystem(self.filesystem)
             if fs_label != self.label:
                 raise InvalidSheetLabel('Sheet label (%s) is not the same as '\
@@ -1270,6 +1280,7 @@ class DataSheet:
     def set_filesystem(self, fs):
         # TODO: check if really needed? Should be set only once at __init__
         self.filesystem = fs
+        self.filesystem.enable_track_changes()
 
     @staticmethod
     def from_files(user, filesystem, watchers=None):
@@ -1477,7 +1488,7 @@ class DataSheet:
                       columns=None):
         assert(self.filesystem is not None)
         weasyprint = import_module('weasyprint')
-        weasyprint = import_module('PyPDF2')
+        PyPDF2 = import_module('PyPDF2')
         output_pdf_fn = op.normpath(output_pdf_abs_fn)
         if self.df is None:
             logger.warning('No data to export')
@@ -2688,8 +2699,10 @@ class PiccelLogic:
         role = self.workbook.user_roles[user]
         return self.workbook.role_password_is_valid(role, password_str)
 
+    def cancel_access(self):
+        self.cancel_login()
+
     def cancel_login(self):
-        assert(self.state == PiccelLogic.STATE_LOGIN)
         self.filesystem = None
         self.cfg = None
         self.workbook = None
@@ -2729,14 +2742,17 @@ class TestPiccelLogic(unittest.TestCase):
         self.access_pwd = '1234'
         self.editor_pwd = 'FVEZ'
         self.admin_pwd = '5425'
+        self.manager_pwd = 'a542fezf5'
 
         workbook.set_access_password(self.access_pwd)
         workbook.decrypt(self.access_pwd)
         workbook.set_password(UserRole.EDITOR, self.editor_pwd)
         workbook.set_password(UserRole.ADMIN, self.admin_pwd)
+        workbook.set_password(UserRole.MANAGER, self.manager_pwd)
         workbook.set_users({
             'thomas' : UserRole.ADMIN,
             'simon' : UserRole.EDITOR,
+            'catherine' : UserRole.MANAGER,
             'guest' : UserRole.VIEWER,
         })
 
@@ -2786,9 +2802,11 @@ class TestPiccelLogic(unittest.TestCase):
         self.assertTrue(logic.check_role_password('thomas', self.admin_pwd))
         self.assertTrue(logic.check_role_password('simon', self.editor_pwd))
         self.assertTrue(logic.check_role_password('guest', self.access_pwd))
+        self.assertTrue(logic.check_role_password('catherine', self.manager_pwd))
 
         self.assertFalse(logic.check_role_password('thomas', 'nope'))
         self.assertFalse(logic.check_role_password('simon', 'nope'))
+        self.assertFalse(logic.check_role_password('catherine', 'nope'))
         self.assertFalse(logic.check_role_password('guest', 'nope'))
 
     def test_last_user_first(self):
@@ -2852,7 +2870,8 @@ class check_role(object):
 
 
 class UserRole(IntEnum):
-    ADMIN = 2
+    ADMIN = 3
+    MANAGER = 2
     EDITOR = 1
     VIEWER = 0
 
@@ -4038,16 +4057,17 @@ class FormItem:
                    not self.generator.endswith('submission'):
                     logger.debug('%s: Use generator %s for key %s',
                                  self, self.generator, key)
-                    self.set_input_str(FormItem.GENERATORS[self.generator](), key)
+                    self.set_input_str(FormItem.GENERATORS[self.generator](),
+                                       key, force=force)
                     # TODO utest that value is generated even if
                     # init value is given
                 elif self.init_values is not None:
                     # logger.debug('%s: Use init value for key %s', self, key)
-                    self.set_input_str(self.init_values[key])
+                    self.set_input_str(self.init_values[key], force=force)
                 else:
                     # empty string maps to None
                     # logger.debug('%s: Set empty string for key %s', self, key)
-                    self.set_input_str('', key)
+                    self.set_input_str('', key, force=force)
 
     def __str__(self):
         return 'item(%s)' % ','.join(self.keys)
@@ -4190,7 +4210,8 @@ class FormItem:
                 self.set_input_str(FormItem.GENERATORS[self.generator](), key)
         return self.get_items()
 
-    def set_input_str(self, s, key=None, use_callback=True):
+    def set_input_str(self, s, key=None, use_callback=True,
+                      force=False):
         logger.debug('%s: set input str of key %s', self, key)
 
         if key is None:
@@ -4198,7 +4219,7 @@ class FormItem:
             key = next(iter(self.keys))
         assert(key in self.keys)
 
-        if not self.editable:
+        if not self.editable and not force:
             raise NotEditableError()
 
         self.values_str[key] = s
@@ -5450,9 +5471,10 @@ def make_item_input_widget(item_widget, item, key, key_label,
                            item_is_single=False):
     input_widget = QtWidgets.QWidget(item_widget)
     init_value = item.values_str[key]
+    _input_ui = None
     if (item.vtype == 'text' and item.choices is None and \
         item.nb_lines<=1) or item.vtype == 'int' or \
-        item.vtype == 'number':
+        item.vtype == 'number' or item.vtype == 'uint64':
         # Single line input field
         _input_ui = ui.item_single_line_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
@@ -5532,10 +5554,11 @@ def make_item_input_widget(item_widget, item, key, key_label,
         if item.vtype == 'date':
             _input_ui.frame_hour.hide()
     else:
-        logger.error('Cannot make UI for item %s', item)
+        logger.error('Cannot make UI for item %s (vtype: %s)', item, item.vtype)
 
-    if item_is_single:
+    if _input_ui is not None and item_is_single:
         _input_ui.label_key.hide()
+
     return input_widget
 
 def make_item_widget(section_widget, item):
@@ -5562,6 +5585,8 @@ def make_item_widget(section_widget, item):
         input_widget = make_item_input_widget(item_widget, item, key, key_label,
                                               item_is_single=len(item.keys)==1)
         _item_ui.input_layout.addWidget(input_widget)
+        if not item.editable:
+            input_widget.setEnabled(False)
     return item_widget
 
 
@@ -5709,6 +5734,7 @@ class PiccelApp(QtWidgets.QApplication):
             role = self.logic.workbook.get_user_role(user)
             logger.debug('Role of user %s: %s', user, role.name)
             if role == UserRole.ADMIN or \
+               role == UserRole.MANAGER or \
                role == UserRole.EDITOR:
                 self._login_ui.other_password_label.show()
                 self._login_ui.other_password_field.show()
@@ -5716,9 +5742,11 @@ class PiccelApp(QtWidgets.QApplication):
                 self._login_ui.other_password_label.setText('Admin password')
             elif role == UserRole.EDITOR:
                 self._login_ui.other_password_label.setText('Editor password')
+            elif role == UserRole.MANAGER:
+                self._login_ui.other_password_label.setText('Manager password')
 
     def access_cancel(self):
-        self.logic.cancel_access() # TODO
+        self.logic.cancel_access()
         self.refresh()
 
     def access_process(self):
@@ -5896,7 +5924,8 @@ class PiccelApp(QtWidgets.QApplication):
                 else:
                     _section_ui.frame_title.hide()
                 for item in section.items:
-                    if not item.hidden:
+                    if not item.hidden or \
+                       self.logic.workbook.user_role >= UserRole.MANAGER:
                         item_widget = make_item_widget(section_widget, item)
                         _section_ui.verticalLayout.addWidget(item_widget)
                 section_widgets[section_label] = section_widget
@@ -6037,9 +6066,9 @@ class PiccelApp(QtWidgets.QApplication):
                                                       form=sh.form_new_entry())
             if not sh.dynamic_only: #TODO: and user is admin
                 _data_sheet_ui.button_new_entry.clicked.connect(f_new_entry)
-                new_entry_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("N"),
-                                                     sheet_widget)
-                new_entry_shortcut.activated.connect(f_new_entry)
+                # new_entry_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("N"),
+                #                                      sheet_widget)
+                # new_entry_shortcut.activated.connect(f_new_entry)
             else:
                 _data_sheet_ui.button_new_entry.hide()
 
@@ -6063,6 +6092,11 @@ class PiccelApp(QtWidgets.QApplication):
                                               sh.get_plugin_code(),
                                               'python',
                                               lambda s : sh.set_plugin(s, self.logic.workbook, overwrite=True)))
+
+            if self.logic.workbook.user_role < UserRole.ADMIN:
+                _data_sheet_ui.button_edit_plugin.hide()
+                _data_sheet_ui.button_edit_form.hide()
+                _data_sheet_ui.button_delete_entry.hide()
 
             for form_id, form in sh.live_forms.items():
                 logger.info('Load pending form "%s" (%s)',
