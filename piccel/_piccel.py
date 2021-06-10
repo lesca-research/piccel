@@ -897,9 +897,8 @@ class LocalFileSystem:
     modifications.
     """
     def __init__(self, root_folder, encrypter=None, track_changes=False):
-        self.root_folder = root_folder
+        self.root_folder = op.normpath(root_folder)
         self.encrypter = encrypter
-        self.track_changes = track_changes
         self.enable_track_changes(track_changes)
 
     def enable_track_changes(self, state=True):
