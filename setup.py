@@ -17,9 +17,12 @@ short_description = 'Collaborative data collection tool'
 long_description = short_description
 
 def make_resources():
+    print('Make resources before setup')
     ui_module_path = op.join('piccel', 'ui', 'generated')
     if not op.exists(ui_module_path):
         os.makedirs(ui_module_path)
+        with open(op.join(ui_module_path, '__init__.py'), 'w') as fout:
+            fout.write('')
     try:
         for ui_fn in glob(op.join('resources', '*.ui')):
             dest_py_fn = op.join(ui_module_path,
