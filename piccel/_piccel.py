@@ -279,12 +279,21 @@ def nexts(l):
     n[e] = None
     return n
 
-class Counter:
-    def __init__(self, start=0):
-        self.value = start
+class IndexedPattern:
+    def __init__(self, pattern, index_start=0):
+        self.pattern = pattern
+        self.index = index_start
     def __call__(self):
-        self.value += 1
-        return self.value - 1
+        result = self.pattern % self.index
+        self.index += 1
+        return result
+
+def import_gform_file(gform_fn, form_fn, language, overwrite=False):
+    # TODO: enable language merge (use overwrite)
+    form = Form.from_gform_json_file(gform_fn, language,
+                                     use_item_title_as_key=True)
+    with open(form_fn, 'w') as fout:
+        fout.write(form.to_json())
 
 class Form:
     """
@@ -582,22 +591,37 @@ function snakeCaseToCamelCase(s) {
             'DATE' : 'date',
             'DATETIME' : 'datetime',
         }
-        var_count = Counter()
-        section_count = Counter()
+        var_gen_label = IndexedPattern('var%d') \
+            if not use_item_title_as_key else None
+        section_gen_label = IndexedPattern('section%d') \
+            if not use_item_title_as_key else None
 
         def protect_label(label):
             protected_label = label
-            for spec_char in [' ', ':', ',']:
-                protected_label = protected_label.replace(spec_char, '_')
+            for repl in [(' ', '_'), (':','_'), (',', '_'), ('-', '_'),
+                         ('é', 'e'), ('é', 'e'), ('è', 'e'), ('à', 'a')]:
+                protected_label = protected_label.replace(*repl)
             if not protected_label.isidentifier():
                 raise BadLabelFormat(label)
             return protected_label.lower()
 
-        def get_label(label, pat, counter):
-            if use_item_title_as_key:
-                return protect_label(label)
+        def get_label(label, gen_default=None, protect=True):
+            sep = '::'
+            key_split = label.split(sep)
+            if len(key_split) > 1:
+                label = key_split[0].strip()
+                title = sep.join(key_split[1:]).strip()
             else:
-                return pat % counter()
+                if gen_default is not None:
+                    title = label
+                    label = gen_default()
+                else:
+                    title = label
+
+            if protect:
+                label = protect_label(label)
+
+            return label, title
 
 
         with open(json_fn, 'r') as fin:
@@ -613,40 +637,41 @@ function snakeCaseToCamelCase(s) {
         for item_gdict in gform_dict['items']:
             print('Convert gform item %s' % pformat(item_gdict))
             if item_gdict['type'] == 'PAGE_BREAK':
-                section_dict = {'title' : {language: item_gdict['title']},
+                slabel, stitle = get_label(item_gdict['title'], section_gen_label)
+                section_dict = {'title' : {language: stitle},
                                 'default_language' : language,
                                 'supported_languages' : {language},
                                 'items' : []}
-                section_label = get_label(item_gdict['title'], 'section%d',
-                                          section_count)
-                sections[section_label] = section_dict
+                sections[slabel] = section_dict
             else:
+                item_title = item_gdict['title']
                 item_choices = None
                 other_choice_label = None
                 if item_gdict['type'] == 'SECTION_HEADER':
                     item_keys = None
                 elif item_gdict['type'] != 'CHECKBOX':
-                    key_label = get_label(item_gdict['title'], 'var%d', var_count)
-                    item_keys = {key_label :
-                                 {language : item_gdict['title']}}
+                    key_label, item_title = get_label(item_gdict['title'],
+                                                      var_gen_label)
+                    item_keys = {key_label : {language : item_title}}
                     if item_gdict['type'] in ['MULTIPLE_CHOICE', 'LIST']:
-                        item_choices = {protect_label(c): {language : c} \
-                                        for c in item_gdict['choices']}
+                        item_choices = {}
+                        for c in item_gdict['choices']:
+                            clabel, ctitle = get_label(c, protect=False)
+                            item_choices[clabel] = {language : ctitle}
                         if item_gdict.get('allow_other_choice', False):
                             other_label = {'English':'Other',
                                            'French':'Autre'}.get(language,
                                                                  'Other')
                             other_choice_label = {language : other_label}
                 else:
-                    top_label = get_label(item_gdict['title'], 'var%d', var_count)
-                    item_keys = {'%s_%s' % (top_label, protect_label(c)) : \
-                                 {language : c} \
-                                 for c in item_gdict['choices']}
+                    item_keys = {}
+                    for c in item_gdict['choices']:
+                        clabel, ctitle = get_label(c)
+                        item_keys[clabel] = {language : ctitle}
                 item_type = GTYPES[item_gdict['type']]
                 item_description = {language : item_gdict.get('description', '')}
-                item_title = {language : item_gdict['title']}
                 item_required = item_gdict.get('required', False)
-
+                item_title = {language : item_title}
                 nb_lines = 1
                 if item_gdict['type'] == 'PARAGRAPH_TEXT':
                     nb_lines = paragraph_nb_lines
@@ -4939,8 +4964,8 @@ class TestForm(unittest.TestCase):
                                 dlg : 'description of s1q1'
                             },
                             'choices' : {
-                                'go_to_section_2' : {dlg : 'go to section 2'},
-                                'go_to_section_3' : {dlg : 'go to section 3'}},
+                                'go to section 2' : {dlg : 'go to section 2'},
+                                'go to section 3' : {dlg : 'go to section 3'}},
                             'allow_empty' : False
                         }],
                     },
@@ -4990,11 +5015,13 @@ class TestForm(unittest.TestCase):
 
         form = Form.from_gform_json_file(gform_json_fn, 'English',
                                          use_item_title_as_key=True)
+        if 0 and form != expected_form:
+            self.show_form_diff(form, expected_form)
         self.assertEqual(form, expected_form)
 
     def test_from_gform_items(self):
-        dlg = 'English'
-        slg = {'English'}
+        dlg = 'French'
+        slg = {'French'}
         PARAGRAPH_NB_LINES = 10
         expected_form_def = {
             'title' : {dlg : 'Form title'},
@@ -5023,35 +5050,36 @@ class TestForm(unittest.TestCase):
                          'nb_lines' : PARAGRAPH_NB_LINES
                         },
                         {'keys' : {'multiple_choice' :
-                                   {dlg : 'multiple choice'}},
+                                   {dlg : 'Choix multiple'}},
                          'description' : {
                                 dlg : 'description of multiple choice'
                          },
                          'choices' : {
-                             'choice_1' : {dlg : 'choice 1'},
-                             'choice_2' : {dlg : 'choice 2'}},
-                             'other_choice_label' : {dlg : 'Other'},
+                             'choice 1' : {dlg : 'choice 1'},
+                             'choice 2' : {dlg : 'choice 2'}},
+                             'other_choice_label' : {dlg : 'Autre'},
                         },
                         {
-                            'keys' : {
-                                'checkboxes_check_1' : {dlg : 'check 1'},
-                                'checkboxes_check_2' : {dlg : 'check 2'},
-                            },
-                            'title' : {dlg: 'checkboxes'},
-                            'vtype' : 'boolean',
+                        'keys' : {
+                            'c1' : {dlg : 'check 1'},
+                            'check_2' : {dlg : 'check 2'},
+                        },
+                        'title' : {dlg: 'à cocher'},
+                        'vtype' : 'boolean',
                             'description' : {
-                                dlg : 'description of checkboxes'
+                            dlg : 'description of checkboxes'
                             },
                         },
-                        {'keys' : {'dropdown' : {dlg : 'dropdown'}},
+                        {'keys' : {'dropdown' : {dlg : 'Une liste déroulante'}},
                          'description' : {
                                 dlg : 'description of dropdown'
                          },
                          'choices' : {
-                             'drop_1' : {dlg : 'drop 1'},
-                             'drop_2' : {dlg : 'drop 2'}},
+                             'déroulant 1' : {dlg : 'déroulant 1'},
+                             'déroulant 2' : {dlg : 'déroulant 2'}},
                         },
-                        {'keys' : {'date' : {dlg : 'date'}},
+                        {'keys' : {'interview_date' :
+                                   {dlg : "Date convenue pour l'interview"}},
                          'description' : {
                                 dlg : "description of date"
                          },
@@ -5079,22 +5107,29 @@ class TestForm(unittest.TestCase):
 
         gform_json_fn = op.join(self.tmp_dir, 'gform.json')
         with open(gform_json_fn, 'w') as fout:
-            fout.write('{"metadata":{"title":"Form title","id":"1MNlo_JF0-5G0RAal1R5R5agVjcIs0ohUFlzAQ2-nxg4","description":"Form description","publishedUrl":"https://docs.google.com/forms/d/e/1FAIpQLSd1sV5MVw4jLE0G2suZuiaT03-uJD0Nsz3vWPQCuslKHuB_lQ/viewform","editorEmails":["covepic.research@gmail.com"],"count":8,"confirmationMessage":"","customClosedFormMessage":""},"items":[{"type":"TEXT","title":"required short answer","description":"description of short answer","required":true},{"type":"PARAGRAPH_TEXT","title":"paragraph","description":"description of paragraph","required":false},{"type":"MULTIPLE_CHOICE","title":"multiple choice","description":"description of multiple choice","required":false,"allow_other_choice":true,"choices":["choice 1","choice 2"]},{"type":"CHECKBOX","title":"checkboxes","description":"description of checkboxes","required":false,"choices":["check 1","check 2"]},{"type":"LIST","title":"dropdown","description":"description of dropdown","required":false,"choices":["drop 1","drop 2"]},{"type":"DATE","title":"date","description":"description of date","required":false},{"type":"DATETIME","title":"date and time","description":"description of date and time","required":false},{"type":"SECTION_HEADER","title":"A title item","description":"description of title item"}],"count":8}')
-        form = Form.from_gform_json_file(gform_json_fn, 'English',
+            fout.write('{"metadata":{"title":"Form title","id":"1MNlo_JF0-5G0RAal1R5R5agVjcIs0ohUFlzAQ2-nxg4","description":"Form description","publishedUrl":"https://docs.google.com/forms/d/e/1FAIpQLSd1sV5MVw4jLE0G2suZuiaT03-uJD0Nsz3vWPQCuslKHuB_lQ/viewform","editorEmails":["covepic.research@gmail.com"],"count":8,"confirmationMessage":"","customClosedFormMessage":""},"items":[{"type":"TEXT","title":"required short answer","description":"description of short answer","required":true},{"type":"PARAGRAPH_TEXT","title":"paragraph","description":"description of paragraph","required":false},{"type":"MULTIPLE_CHOICE","title":"multiple_choice:: Choix multiple","description":"description of multiple choice","required":false,"allow_other_choice":true,"choices":["choice 1","choice 2"]},{"type":"CHECKBOX","title":"à cocher","description":"description of checkboxes","required":false,"choices":["c1:: check 1","check 2"]},{"type":"LIST","title":"dropdown:: Une liste déroulante","description":"description of dropdown","required":false,"choices":["déroulant 1","déroulant 2"]},{"type":"DATE","title":"interview_date:: Date convenue pour l\'interview","description":"description of date","required":false},{"type":"DATETIME","title":"date and time","description":"description of date and time","required":false},{"type":"SECTION_HEADER","title":"A title item","description":"description of title item"}],"count":8}')
+        form = Form.from_gform_json_file(gform_json_fn, 'French',
                                          use_item_title_as_key=True,
                                          paragraph_nb_lines=PARAGRAPH_NB_LINES)
 
-        if 1 and form != expected_form:
-            form_fns = []
-            for f, bfn in [(form, 'loaded_form.json'),
-                           (expected_form, 'expected_form.json')]:
-                form_fn = op.join(self.tmp_dir, bfn)
-                form_fns.append(form_fn)
-                with open(form_fn, 'w') as fout:
-                    fout.write(pformat(f.to_dict()))
-            import subprocess
-            subprocess.run(['meld'] + form_fns)
+        if 0 and form != expected_form:
+            self.show_form_diff(form, expected_form)
         self.assertEqual(form, expected_form)
+
+
+    def test_from_gform_language_merge(self):
+        raise NotImplementedError()
+
+    def show_form_diff(self, form, expected_form):
+        form_fns = []
+        for f, bfn in [(form, 'computed_form.json'),
+                       (expected_form, 'expected_form.json')]:
+            form_fn = op.join(self.tmp_dir, bfn)
+            form_fns.append(form_fn)
+            with open(form_fn, 'w') as fout:
+                fout.write(pformat(f.to_dict()))
+        import subprocess
+        subprocess.run(['meld'] + form_fns)
 
 class TestFormSection(unittest.TestCase):
 
@@ -6070,11 +6105,8 @@ class PiccelApp(QtWidgets.QApplication):
                  role_pwd=None, cfg_fns=None, refresh_rate_ms=0):
         super(PiccelApp, self).__init__(argv)
 
-        if cfg_fns is None:
-            cfg_fns = []
-
         self.refresh_rate_ms = refresh_rate_ms
-        logger.debug('Available cfg fn: %s', cfg_fns)
+
         # icon_style = QtWidgets.QStyle.SP_ComputerIcon
         # self.setWindowIcon(self.style().standardIcon(icon_style))
         self.setWindowIcon(QtGui.QIcon(':/icons/main_icon'))
@@ -6087,24 +6119,31 @@ class PiccelApp(QtWidgets.QApplication):
         button_icon = self.style().standardIcon(icon_style)
         _selector_ui.button_open_file.setIcon(button_icon)
         _selector_ui.button_open_file.clicked.connect(self.select_file)
-        recent_files = self.logic.get_recent_files()
-        self.recent_files = recent_files[0:1] + cfg_fns + \
-            [fn for fn in recent_files[1:] if fn not in cfg_fns]
+        if cfg_fns is None:
+            self.recent_files = self.logic.get_recent_files()
+        else:
+            logger.debug('Available cfg fn: %s', cfg_fns)
+            self.recent_files = cfg_fns
 
         def load_workbook_title(wb_fn):
             try:
                 with open(wb_fn, 'r') as fin:
                     return json.load(fin)['workbook_label']
-            except e:
+            except Exception as e:
                 logger.warning('Error loading workbook file %s:\n %s',
                                wb_fn, repr(e))
             return wb_fn
         # TODO add file path as tooltip
-        _selector_ui.recent_list.addItems([load_workbook_title(fn) \
-                                           for fn in self.recent_files])
+        workbook_titles, workbook_fns = [], []
+        for fn in self.recent_files:
+            wb_title = load_workbook_title(fn)
+            if wb_title is not None:
+                workbook_titles.append(wb_title)
+                workbook_fns.append(fn)
+        _selector_ui.recent_list.addItems(workbook_titles)
 
         def _cfg_fn():
-            return self.recent_files[_selector_ui.recent_list.currentRow()]
+            return workbook_fns[_selector_ui.recent_list.currentRow()]
         on_double_click = lambda i: self.open_configuration_file(_cfg_fn())
         _selector_ui.recent_list.itemDoubleClicked.connect(on_double_click)
 
