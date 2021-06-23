@@ -10,7 +10,7 @@ import base64
 import os
 from collections import OrderedDict
 import json
-from pprint import pformat
+from pprint import pformat, pprint
 # UUID1: MAC addr + current timestamp with nanosec precision
 # UUID4: 122 bytes random number
 from uuid import uuid1, uuid4
@@ -264,6 +264,7 @@ class InvalidForm(Exception): pass
 class InvalidSection(Exception): pass
 class SectionNotFound(Exception): pass
 class InvalidSectionMove(Exception): pass
+class BadLabelFormat(Exception): pass
 
 def nexts(l):
     """
@@ -278,8 +279,169 @@ def nexts(l):
     n[e] = None
     return n
 
+class Counter:
+    def __init__(self, start=0):
+        self.value = start
+    def __call__(self):
+        self.value += 1
+        return self.value - 1
 
 class Form:
+    """
+
+Google App script to export a google form to json:
+
+// Steven Schmatz
+// Humanitas Labs
+// 13 October, 2016.
+
+
+// Sample URL. Note that this must be authenticated with the current user.
+var URL = "https://docs.google.com/forms/d/1vNhQN-wM534q-lsNJXkAci2KuRh7xZpdClOyEFJAeWY/edit";
+
+/**
+ * Converts the given form URL into a JSON object.
+ */
+function main() {
+
+  var form = FormApp.openByUrl(URL);
+  var items = form.getItems();
+
+  var result = {
+    "metadata": getFormMetadata(form),
+    "items": items.map(itemToObject),
+    "count": items.length
+  };
+
+  Logger.log(JSON.stringify(result));
+}
+
+/**
+ * Returns the form metadata object for the given Form object.
+ * @param form: Form
+ * @returns (Object) object of form metadata.
+ */
+function getFormMetadata(form) {
+  return {
+    "title": form.getTitle(),
+    "id": form.getId(),
+    "description": form.getDescription(),
+    "publishedUrl": form.getPublishedUrl(),
+    "editorEmails": form.getEditors().map(function(user) {return user.getEmail()}),
+    "count": form.getItems().length,
+    "confirmationMessage": form.getConfirmationMessage(),
+    "customClosedFormMessage": form.getCustomClosedFormMessage()
+  };
+}
+
+/**
+ * Returns an Object for a given Item.
+ * @param item: Item
+ * @returns (Object) object for the given item.
+ */
+function itemToObject(item) {
+  var data = {};
+
+  data.type = item.getType().toString();
+  data.title = item.getTitle();
+  data.description = item.getHelpText();
+
+  // Downcast items to access type-specific properties
+
+  var type_str = item.getType().toString();
+  Logger.log(type_str);
+  if(type_str == "DATETIME") {
+    type_str = "DATE_TIME";
+  }
+  var itemTypeConstructorName = snakeCaseToCamelCase("AS_" + type_str + "_ITEM");
+  var item_constructor = item[itemTypeConstructorName];
+  var typedItem = item_constructor();
+
+  // Keys with a prefix of "get" have "get" stripped
+
+  var getKeysRaw = Object.keys(typedItem).filter(function(s) {return s.indexOf("get") == 0});
+
+  getKeysRaw.map(function(getKey) {
+    var propName = getKey[3].toLowerCase() + getKey.substr(4);
+
+    // Image data, choices, and type come in the form of objects / enums
+    if (["image", "choices", "type", "alignment"].indexOf(propName) != -1) {return};
+
+    // Skip feedback-related keys
+    if ("getFeedbackForIncorrect".equals(getKey) || "getFeedbackForCorrect".equals(getKey)
+      || "getGeneralFeedback".equals(getKey)) {return};
+
+    var propValue = typedItem[getKey]();
+
+    data[propName] = propValue;
+  });
+
+  // Bool keys are included as-is
+
+  var boolKeys = Object.keys(typedItem).filter(function(s) {
+    return (s.indexOf("is") == 0) || (s.indexOf("has") == 0) || (s.indexOf("includes") == 0);
+  });
+
+  boolKeys.map(function(boolKey) {
+    var propName = boolKey;
+    var propValue = typedItem[boolKey]();
+    data[propName] = propValue;
+  });
+
+  // Handle image data and list choices
+
+  switch (item.getType()) {
+    case FormApp.ItemType.LIST:
+    case FormApp.ItemType.CHECKBOX:
+    case FormApp.ItemType.MULTIPLE_CHOICE:
+      data.choices = typedItem.getChoices().map(function(choice) {
+        return choice.getValue();
+      });
+      break;
+
+    case FormApp.ItemType.IMAGE:
+      data.alignment = typedItem.getAlignment().toString();
+
+      if (item.getType() == FormApp.ItemType.VIDEO) {
+        return;
+      }
+
+      var imageBlob = typedItem.getImage();
+
+      data.imageBlob = {
+        "dataAsString": imageBlob.getDataAsString(),
+        "name": imageBlob.getName(),
+        "isGoogleType": imageBlob.isGoogleType()
+      };
+
+      break;
+
+    case FormApp.ItemType.PAGE_BREAK:
+      data.pageNavigationType = typedItem.getPageNavigationType().toString();
+      break;
+
+    default:
+      break;
+  }
+
+  // Have to do this because for some reason Google Scripts API doesn't have a
+  // native VIDEO type
+  if (item.getType().toString() === "VIDEO") {
+    data.alignment = typedItem.getAlignment().toString();
+  }
+
+  return data;
+}
+
+/**
+ * Converts a SNAKE_CASE string to a camelCase string.
+ * @param s: string in snake_case
+ * @returns (string) the camelCase version of that string
+ */
+function snakeCaseToCamelCase(s) {
+  return s.toLowerCase().replace(/(\_\w)/g, function(m) {return m[1].toUpperCase();});
+}
+  """
 
     def __init__(self, sections, default_language, supported_languages,
                  title='', watchers=None):
@@ -347,6 +509,13 @@ class Form:
         return self.key_to_items[key][0].unformat(value)
 
     def __eq__(self, other):
+        sd = self.to_dict()
+        od = other.to_dict()
+        result = isinstance(other, Form) and sd == od
+        if not result:
+            logger.debug('Forms not equal:')
+            logger.debug(' - form: %s', pformat(sd))
+            logger.debug(' - other form: %s', pformat(od))
         return isinstance(other, Form) and self.to_dict()==other.to_dict()
 
     def first_section(self):
@@ -399,6 +568,106 @@ class Form:
                     d['supported_languages'], d.get('title', ''),
                     watchers=watchers)
 
+
+    @staticmethod
+    def from_gform_json_file(json_fn, language, use_item_title_as_key=True,
+                             paragraph_nb_lines=5, watchers=None):
+        GTYPES = {
+            'SECTION_HEADER' : 'text',
+            'TEXT' : 'text',
+            'PARAGRAPH_TEXT' : 'text',
+            'MULTIPLE_CHOICE' : 'text',
+            'LIST' : 'text',
+            'CHECKBOX' : 'boolean',
+            'DATE' : 'date',
+            'DATETIME' : 'datetime',
+        }
+        var_count = Counter()
+        section_count = Counter()
+
+        def protect_label(label):
+            protected_label = label
+            for spec_char in [' ', ':', ',']:
+                protected_label = protected_label.replace(spec_char, '_')
+            if not protected_label.isidentifier():
+                raise BadLabelFormat(label)
+            return protected_label.lower()
+
+        def get_label(label, pat, counter):
+            if use_item_title_as_key:
+                return protect_label(label)
+            else:
+                return pat % counter()
+
+
+        with open(json_fn, 'r') as fin:
+            gform_dict = json.load(fin)
+        print('gform_dict:')
+        pprint(gform_dict)
+
+        section_label = '__section_0__'
+        section_dict = {'items' : [],
+                        'default_language' : language,
+                        'supported_languages' : {language}}
+        sections = {section_label : section_dict}
+        for item_gdict in gform_dict['items']:
+            print('Convert gform item %s' % pformat(item_gdict))
+            if item_gdict['type'] == 'PAGE_BREAK':
+                section_dict = {'title' : {language: item_gdict['title']},
+                                'default_language' : language,
+                                'supported_languages' : {language},
+                                'items' : []}
+                section_label = get_label(item_gdict['title'], 'section%d',
+                                          section_count)
+                sections[section_label] = section_dict
+            else:
+                item_choices = None
+                other_choice_label = None
+                if item_gdict['type'] == 'SECTION_HEADER':
+                    item_keys = None
+                elif item_gdict['type'] != 'CHECKBOX':
+                    key_label = get_label(item_gdict['title'], 'var%d', var_count)
+                    item_keys = {key_label :
+                                 {language : item_gdict['title']}}
+                    if item_gdict['type'] in ['MULTIPLE_CHOICE', 'LIST']:
+                        item_choices = {protect_label(c): {language : c} \
+                                        for c in item_gdict['choices']}
+                        if item_gdict.get('allow_other_choice', False):
+                            other_label = {'English':'Other',
+                                           'French':'Autre'}.get(language,
+                                                                 'Other')
+                            other_choice_label = {language : other_label}
+                else:
+                    top_label = get_label(item_gdict['title'], 'var%d', var_count)
+                    item_keys = {'%s_%s' % (top_label, protect_label(c)) : \
+                                 {language : c} \
+                                 for c in item_gdict['choices']}
+                item_type = GTYPES[item_gdict['type']]
+                item_description = {language : item_gdict.get('description', '')}
+                item_title = {language : item_gdict['title']}
+                item_required = item_gdict.get('required', False)
+
+                nb_lines = 1
+                if item_gdict['type'] == 'PARAGRAPH_TEXT':
+                    nb_lines = paragraph_nb_lines
+
+                section_dict['items'].append({'keys':item_keys,
+                                              'vtype' : item_type,
+                                              'title' : item_title,
+                                              'choices' : item_choices,
+                                              'default_language' : language,
+                                              'supported_languages' : {language},
+                                              'description': item_description,
+                                              'allow_empty' : not item_required,
+                                              'nb_lines' : nb_lines,
+                                              'other_choice_label' : \
+                                              other_choice_label})
+
+        return Form({sn : FormSection.from_dict(sd) \
+                     for sn,sd in sections.items()},
+                    language, {language},
+                    {language: gform_dict['metadata']['title']},
+                    watchers=watchers)
 
     def set_on_submission(self, func):
         """ func(entry_dict) """
@@ -3880,6 +4149,7 @@ class FormItem:
         number_interval : args pass to pandas.Interval
         choices : dict(key:dict(language:showntext))
         """
+        logger.debug('Create FormItem keys: %s, title: %s', keys, title)
         self.notifier = Notifier(watchers if watchers is not None else {})
 
         self.keys = keys if keys is not None else {}
@@ -4050,6 +4320,11 @@ class FormItem:
 
     def reset(self, force=False):
         logger.debug('Reset %s (force=%s)', self, force)
+
+        if len(self.keys) == 0:
+            self.validity = True
+            return
+
         if self.editable or force:
             for key in self.keys:
                 if self.generator is not None and \
@@ -4339,6 +4614,11 @@ class TestForm(unittest.TestCase):
                 } # end of section participant_info_2
             } # end of list of sections
         } # end of form definition
+        logger.setLevel(logging.DEBUG)
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir)
 
     def test_nexts(self):
         ns = nexts(['a', 'b', 'c', 'd'])
@@ -4633,6 +4913,188 @@ class TestForm(unittest.TestCase):
         self.assertEqual(set(received_signals), {'ready_to_submit',
                                                  'previous_section_available',
                                                  'next_section_not_available'})
+
+
+
+    def test_from_gform_sections(self):
+        dlg = 'English'
+        slg = {'English'}
+        PARAGRAPH_NB_LINES = 10
+        expected_form_def = {
+            'title' : {dlg : 'Form title'},
+            'description' : {dlg : 'Form description'},
+            'default_language' : dlg,
+            'supported_languages' : slg,
+            'sections' : {
+                '__section_0__' : {
+                    'title' : '',
+                    'default_language' : dlg,
+                    'supported_languages' : slg,
+                    'default_next_section' : None,
+                    'items' : [
+                        {
+                            'keys' : {'section_1_question_1' :
+                                      {dlg : 'section 1 question 1'}},
+                            'description' : {
+                                dlg : 'description of s1q1'
+                            },
+                            'choices' : {
+                                'go_to_section_2' : {dlg : 'go to section 2'},
+                                'go_to_section_3' : {dlg : 'go to section 3'}},
+                            'allow_empty' : False
+                        }],
+                    },
+                'this_is_section_2' : {
+                    'title' : {dlg : 'This is section 2'},
+                    'description' : {
+                        dlg : 'description of section 2'
+                    },
+                    'default_language' : dlg,
+                    'supported_languages' : slg,
+                    'default_next_section' : None,
+                    'items' : [
+                        {
+                            'keys' : {'section_2_question_1' :
+                                      {dlg : 'section 2 question 1'}},
+                            'description' : {
+                                dlg : 'description of s2q1'
+                            },
+                        }],
+                },
+                'this_is_section_3' : {
+                    'title' : {dlg : 'This is section 3'},
+                    'description' : {
+                        dlg : 'description of section 3'
+                    },
+                    'default_language' : dlg,
+                    'supported_languages' : slg,
+                    'default_next_section' : None,
+                    'items' : [
+                        {
+                            'keys' : {'section_3_question_1' :
+                                      {dlg : 'section 3 question 1'}},
+                            'description' : {
+                                dlg : 'description of s3q1'
+                            },
+                        }],
+                } # end of section
+            } # end of list of sections
+        } # end of form definition
+        expected_form = Form.from_dict(expected_form_def)
+
+        # google form: https://docs.google.com/forms/d/1MNlo_JF0-5G0RAal1R5R5agVjcIs0ohUFlzAQ2-nxg4/edit
+
+        gform_json_fn = op.join(self.tmp_dir, 'gform.json')
+        with open(gform_json_fn, 'w') as fout:
+            fout.write('{"metadata":{"title":"Form title","id":"1dOsPTG7vJVv9vkBKVCsK3M1bl9k6VgggSEPxvEpuhBU","description":"Form description","publishedUrl":"https://docs.google.com/forms/d/e/1FAIpQLSfn1S_fmS9nv6yQ1eZAuFzmxlKkqkYYKVygjv_E18yWAZFqOw/viewform","editorEmails":["covepic.research@gmail.com"],"count":5,"confirmationMessage":"","customClosedFormMessage":""},"items":[{"type":"MULTIPLE_CHOICE","title":"section 1 question 1","description":"description of s1q1","required":true,"choices":["go to section 2","go to section 3"]},{"type":"PAGE_BREAK","title":"This is section 2","description":"description of section 2","pageNavigationType":"CONTINUE"},{"type":"TEXT","title":"section 2 question 1","description":"description of s2q1","required":false},{"type":"PAGE_BREAK","title":"This is section 3","description":"description of section 3","pageNavigationType":"CONTINUE"},{"type":"TEXT","title":"section 3 question 1","description":"description of s3q1","required":false}],"count":5}')
+
+        form = Form.from_gform_json_file(gform_json_fn, 'English',
+                                         use_item_title_as_key=True)
+        self.assertEqual(form, expected_form)
+
+    def test_from_gform_items(self):
+        dlg = 'English'
+        slg = {'English'}
+        PARAGRAPH_NB_LINES = 10
+        expected_form_def = {
+            'title' : {dlg : 'Form title'},
+            'description' : {dlg : 'Form description'},
+            'default_language' : dlg,
+            'supported_languages' : slg,
+            'sections' : {
+                '__section_0__' : {
+                    'title' : '',
+                    'default_language' : dlg,
+                    'supported_languages' : slg,
+                    'default_next_section' : None,
+                    'items' : [
+                        {
+                            'keys' : {'required_short_answer' :
+                                      {dlg : 'required short answer'}},
+                            'description' : {
+                                dlg : 'description of short answer'
+                            },
+                            'allow_empty' : False,
+                        },
+                        {'keys' : {'paragraph' : {dlg : 'paragraph'}},
+                         'description' : {
+                                dlg : 'description of paragraph'
+                         },
+                         'nb_lines' : PARAGRAPH_NB_LINES
+                        },
+                        {'keys' : {'multiple_choice' :
+                                   {dlg : 'multiple choice'}},
+                         'description' : {
+                                dlg : 'description of multiple choice'
+                         },
+                         'choices' : {
+                             'choice_1' : {dlg : 'choice 1'},
+                             'choice_2' : {dlg : 'choice 2'}},
+                             'other_choice_label' : {dlg : 'Other'},
+                        },
+                        {
+                            'keys' : {
+                                'checkboxes_check_1' : {dlg : 'check 1'},
+                                'checkboxes_check_2' : {dlg : 'check 2'},
+                            },
+                            'title' : {dlg: 'checkboxes'},
+                            'vtype' : 'boolean',
+                            'description' : {
+                                dlg : 'description of checkboxes'
+                            },
+                        },
+                        {'keys' : {'dropdown' : {dlg : 'dropdown'}},
+                         'description' : {
+                                dlg : 'description of dropdown'
+                         },
+                         'choices' : {
+                             'drop_1' : {dlg : 'drop 1'},
+                             'drop_2' : {dlg : 'drop 2'}},
+                        },
+                        {'keys' : {'date' : {dlg : 'date'}},
+                         'description' : {
+                                dlg : "description of date"
+                         },
+                         'vtype' : 'date',
+                        },
+                        {'keys' : {'date_and_time' : {dlg : 'date and time'}},
+                         'description' : {
+                                dlg : "description of date and time"
+                         },
+                         'vtype' : 'datetime',
+                        },
+                        {'keys' : None,
+                         'description' : {
+                             dlg : "description of title item"
+                         },
+                         'title' : {dlg : 'A title item'},
+                        },
+                    ] # end of list of items
+                } # end of section
+            } # end of list of sections
+        } # end of form definition
+        expected_form = Form.from_dict(expected_form_def)
+
+        # google form: https://docs.google.com/forms/d/1MNlo_JF0-5G0RAal1R5R5agVjcIs0ohUFlzAQ2-nxg4/edit
+
+        gform_json_fn = op.join(self.tmp_dir, 'gform.json')
+        with open(gform_json_fn, 'w') as fout:
+            fout.write('{"metadata":{"title":"Form title","id":"1MNlo_JF0-5G0RAal1R5R5agVjcIs0ohUFlzAQ2-nxg4","description":"Form description","publishedUrl":"https://docs.google.com/forms/d/e/1FAIpQLSd1sV5MVw4jLE0G2suZuiaT03-uJD0Nsz3vWPQCuslKHuB_lQ/viewform","editorEmails":["covepic.research@gmail.com"],"count":8,"confirmationMessage":"","customClosedFormMessage":""},"items":[{"type":"TEXT","title":"required short answer","description":"description of short answer","required":true},{"type":"PARAGRAPH_TEXT","title":"paragraph","description":"description of paragraph","required":false},{"type":"MULTIPLE_CHOICE","title":"multiple choice","description":"description of multiple choice","required":false,"allow_other_choice":true,"choices":["choice 1","choice 2"]},{"type":"CHECKBOX","title":"checkboxes","description":"description of checkboxes","required":false,"choices":["check 1","check 2"]},{"type":"LIST","title":"dropdown","description":"description of dropdown","required":false,"choices":["drop 1","drop 2"]},{"type":"DATE","title":"date","description":"description of date","required":false},{"type":"DATETIME","title":"date and time","description":"description of date and time","required":false},{"type":"SECTION_HEADER","title":"A title item","description":"description of title item"}],"count":8}')
+        form = Form.from_gform_json_file(gform_json_fn, 'English',
+                                         use_item_title_as_key=True,
+                                         paragraph_nb_lines=PARAGRAPH_NB_LINES)
+
+        if 1 and form != expected_form:
+            form_fns = []
+            for f, bfn in [(form, 'loaded_form.json'),
+                           (expected_form, 'expected_form.json')]:
+                form_fn = op.join(self.tmp_dir, bfn)
+                form_fns.append(form_fn)
+                with open(form_fn, 'w') as fout:
+                    fout.write(pformat(f.to_dict()))
+            import subprocess
+            subprocess.run(['meld'] + form_fns)
+        self.assertEqual(form, expected_form)
 
 class TestFormSection(unittest.TestCase):
 
