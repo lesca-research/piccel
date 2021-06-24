@@ -24,12 +24,11 @@ from collections import defaultdict
 import shutil
 from pathlib import PurePath
 import shutil
-from pathlib import PurePath
 from collections.abc import Mapping
 from itertools import chain
 from enum import IntEnum
 import importlib
-from importlib import import_module
+from importlib import import_module, reload as reload_module
 import inspect
 import csv
 
@@ -1608,6 +1607,7 @@ class DataSheet:
                                                                 decrypt=True))
             sys.path.insert(0, tmp_folder)
             plugin_module = import_module(plugin_module)
+            reload_module(plugin_module)
             sys.path.pop(0)
             self.set_plugin(plugin_module.CustomSheetPlugin(self, workbook=None))
         else:
@@ -3302,7 +3302,7 @@ class WorkBook:
 
         cfg = json.loads(filesystem.load(workbook_fn))
         wb_cfg_folder = op.normpath(op.dirname(workbook_fn))
-        logger.debug('Create WorkBook %s: Change root folder to %s:',
+        logger.debug('Init WorkBook %s: Change root folder to %s:',
                      cfg['workbook_label'], wb_cfg_folder)
         filesystem = filesystem.change_dir(wb_cfg_folder)
         if filesystem.exists(cfg['data_folder']):
@@ -3484,9 +3484,10 @@ class WorkBook:
         return sum(1 for sh in self.filesystem.listdir(sheet_folder) \
                    if sheet_re.match(sh))
 
-    def dump_default_plugin(self, plugin_fn):
+    def dump_default_plugin(self, plugin_fn, plugin_code=None):
         logger.debug('Dump default workbook plugin')
-        plugin_code = inspect.getsource(workbook_plugin_template)
+        if plugin_code is None:
+            plugin_code = inspect.getsource(workbook_plugin_template)
         self.filesystem.save(plugin_fn, plugin_code, overwrite=True)
 
     def reload(self, progress_callback=None):
@@ -3500,6 +3501,8 @@ class WorkBook:
 
         plugin_fn = op.join(self.data_folder, 'plugin_common.py')
         if not self.filesystem.exists(plugin_fn):
+            logger.info('WorkBook %s: plugin file "%s" does not exist. '\
+                        'Dump default one', self.label, plugin_fn)
             self.dump_default_plugin(plugin_fn)
         self.load_plugin()
 
@@ -3530,6 +3533,7 @@ class WorkBook:
         logger.debug('Workbook %s: load plugin', self.label)
         sys.path.insert(0, tmp_folder)
         plugin_module = import_module(plugin_module)
+        reload_module(plugin_module)
         self.plugin = plugin_module.CustomWorkBookPlugin(self)
         sys.path.pop(0)
 
@@ -3554,10 +3558,17 @@ class WorkBook:
             sheet_regexp = AnyMatch()
 
         sheet_folder = op.join(self.data_folder, WorkBook.SHEET_FOLDER)
-        logger.info('WorkBook %s: Load sheets from %s' % \
-                    (self.label, sheet_folder))
+        logger.info('WorkBook %s: Load sheets from %s',
+                    self.label, sheet_folder)
         sheets = {}
+
+        sheet_list = self.plugin.sheet_order()
+        logger.info('WorkBook %s: sheets order from common plugin: %s',
+                     self.label, sheet_list)
         for sheet_label in self.filesystem.listdir(sheet_folder):
+            if sheet_label not in sheet_list:
+                sheet_list.append(sheet_label)
+        for sheet_label in sheet_list:
             if sheet_regexp.match(sheet_label) is not None:
                 logger.info('WorkBook %s: Reload data sheet %s' % \
                             (self.label, sheet_label))
@@ -6286,21 +6297,24 @@ class PiccelApp(QtWidgets.QApplication):
 
         user = self._login_ui.user_list.currentText()
         role_pwd_input = self._login_ui.other_password_field.text()
-        role_pwd = role_pwd_input if len(role_pwd_input) > 0 else None
-        error_message = None
-        try:
-            self.logic.login(user, role_pwd, progression_callback=progress)
-            if self.refresh_rate_ms > 0:
-                self.timer = QtCore.QTimer(self)
-                logger.debug('Start data refresh timer with an interval of %d ms',
-                             self.refresh_rate_ms)
-                self.timer.setInterval(self.refresh_rate_ms)
-                self.timer.timeout.connect(self.logic.workbook.refresh_all_data)
-                self.timer.start()
-        except UnknownUser:
-            error_message = 'Unknown user: %s' %user
-        except InvalidPassword:
-            error_message = 'Invalid user password'
+        if role_pwd_input == '' or role_pwd_input is None:
+            error_message = 'Password required'
+        else:
+            role_pwd = role_pwd_input
+            error_message = None
+            try:
+                self.logic.login(user, role_pwd, progression_callback=progress)
+                if self.refresh_rate_ms > 0:
+                    self.timer = QtCore.QTimer(self)
+                    logger.debug('Start data refresh timer with an interval of %d ms',
+                                 self.refresh_rate_ms)
+                    self.timer.setInterval(self.refresh_rate_ms)
+                    self.timer.timeout.connect(self.logic.workbook.refresh_all_data)
+                    self.timer.start()
+            except UnknownUser:
+                error_message = 'Unknown user: %s' %user
+            except InvalidPassword:
+                error_message = 'Invalid user password'
 
         if error_message is not None:
             message_box = QtWidgets.QErrorMessage()
@@ -6595,6 +6609,8 @@ class PiccelApp(QtWidgets.QApplication):
 
             if self.logic.workbook.user_role < UserRole.ADMIN:
                 _data_sheet_ui.button_edit_plugin.hide()
+            if self.logic.workbook.user_role < UserRole.ADMIN or \
+               sh.dynamic_only:
                 _data_sheet_ui.button_edit_form.hide()
                 _data_sheet_ui.button_delete_entry.hide()
 

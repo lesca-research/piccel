@@ -147,10 +147,10 @@ class FreezeTableWidget(QTableView):
     def moveCursor(self, cursorAction, modifiers):
         current = super(FreezeTableWidget, self).moveCursor(cursorAction,
                                                             modifiers)
-        if (cursorAction == self.MoveLeft and
-                self.current.column() > 0 and
-                self.visualRect(current).topLeft().x() <
-                    self.frozenTableView.columnWidth(0)):
+        if (cursorAction == self.MoveLeft and 
+            current.column() > 0 and
+            self.visualRect(current).topLeft().x() <
+            self.frozenTableView.columnWidth(0)):
             newValue = (self.horizontalScrollBar().value() +
                         self.visualRect(current).topLeft().x() -
                         self.frozenTableView.columnWidth(0))
