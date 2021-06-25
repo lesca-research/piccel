@@ -1733,6 +1733,15 @@ class DataSheet:
             live_form_folders = self.filesystem.listdir(top_folder)
             for form_id_str in live_form_folders:
                 live_form_folder = op.join(top_folder, form_id_str)
+                if self.filesystem.exists(op.join(live_form_folder, 'TO_DELETE')):
+                    # TODO: utest
+                    logger.debug('Live form %s marked as to remove', form_id_str)
+                    try:
+                        self.filesystem.rmtree(live_form_folder)
+                    except Exception as e:
+                        logger.error('Error while deleting live form folder %s',
+                                     live_form_folder)
+                    continue
                 saved_entries = defaultdict(dict)
                 for entry_fn in self.filesystem.listdir(live_form_folder):
                     content = self.filesystem.load(op.join(live_form_folder,
@@ -2153,12 +2162,18 @@ class DataSheet:
             self.set_entry(entry_dict, entry_id)
         else:
             raise Exception('Unknown submission mode "%s"' % submission_mode)
+
+        form_folder = self.get_live_form_folder(form_id)
+        self.filesystem.save(op.join(form_folder, 'TO_DELETE'), '', overwrite=True)
         self.clean_live_form(form_id)
 
     def clean_live_form(self, form_id):
         form_folder = self.get_live_form_folder(form_id)
         logger.info('Remove live form folder %s', form_folder)
-        self.filesystem.rmtree(form_folder)
+        try:
+            self.filesystem.rmtree(form_folder)
+        except Exception as e:
+            logger.error('Error while deleting live form folder %s', form_folder)
         self.live_forms.pop(form_id)
 
     def add_entry(self, entry_dict, entry_id, process_entry_df,
@@ -2672,7 +2687,7 @@ class TestDataSheet(unittest.TestCase):
 
         entry_to_update = self.sheet_ts.df.iloc[1].name
         previous_pid = self.sheet_ts.df.loc[entry_to_update, 'Participant_ID']
-
+ 
         logger.debug('-------------------------')
         logger.debug('utest: create update form')
         form = self.sheet_ts.form_update_entry(entry_to_update)
@@ -2795,8 +2810,68 @@ class TestDataSheet(unittest.TestCase):
         self.assertTrue(self.sheet_ts.df.index.is_unique)
         self.assertEqual(self.sheet_ts.df.loc[entry_to_modify, 'Age'], 77)
 
-    def test_plugin_action(self):
-        pass
+
+
+    def test_form_folder_removal(self):
+        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+
+        form_id = 1
+        form = self.sheet_ts.form_new_entry(form_id=form_id)
+        entry = {'Participant_ID' : 'CE0000', 'Age' : 43,
+                 'Phone_Number' : '555'}
+        for k,v in entry.items():
+            form['section1'][k].set_input_str(str(v))
+
+        form_folder = self.sheet_ts.get_live_form_folder(form_id)
+        fs = self.sheet_ts.filesystem
+        self.assertTrue(fs.exists(form_folder))
+        form.submit()
+        self.assertFalse(fs.exists(form_folder))
+
+    def test_form_folder_delayed_removal(self):
+        class DataSheetFormHook(DataSheet):
+
+            def rename_form_folder(self, form_folder):
+                form_afolder = self.filesystem.full_path(form_folder)
+                dummy_form_folder = op.join(op.dirname(form_afolder),
+                                            'dummy')
+                os.rename(form_afolder, form_afolder + '_dummy')
+
+            def restore_form_folders(self):
+                form_top_folder = self.get_live_forms_folder()
+                for form_folder in self.filesystem.listdir(form_top_folder):
+                    if form_folder.endswith('_dummy'):
+                        form_folder = op.join(form_top_folder, form_folder)
+                        form_afolder = self.filesystem.full_path(form_folder)
+                        os.rename(form_afolder, form_afolder.rstrip('_dummy'))
+
+            def clean_live_form(self, form_id):
+                self.rename_form_folder(self.get_live_form_folder(form_id))
+                super(DataSheetFormHook, self).clean_live_form(form_id)
+
+        sh1 = DataSheetFormHook(self.sheet_id,
+                                Form.from_dict(self.form_def_ts_data),
+                                self.data_df_ts_data,
+                                self.user, self.filesystem)
+        sh1.add_views({'latest' : TestDataSheet.ts_data_latest})
+
+        form_id = 1
+        form = sh1.form_new_entry(form_id=form_id)
+        entry = {'Participant_ID' : 'CE0000', 'Age' : 43,
+                 'Phone_Number' : '555'}
+        for k,v in entry.items():
+            form['section1'][k].set_input_str(str(v))
+        form.submit()
+        sh1.restore_form_folders()
+
+        logger.debug('-------------------------------------------')
+        logger.debug('utest: create new sheet, expect live form '\
+                     'folder to be deleted')
+        sh2 = DataSheet(self.sheet_id,
+                        Form.from_dict(self.form_def_ts_data),
+                        self.data_df_ts_data,
+                        self.user, self.filesystem)
+        self.assertFalse(sh2.filesystem.exists(sh2.get_live_form_folder(form_id)))
 
     def test_refresh_sheet(self):
         self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
