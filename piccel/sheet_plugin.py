@@ -83,16 +83,10 @@ class SheetPlugin:
         """
         return self.sheet.form_update_entry(entry_df.index.values[0])
 
-    def hints(self, df, view):
+    def hint(self, column, value):
         """
-        Return hints to display as icon and tooltips.
-        Return a tuple of DataFrame (decorations, tooltip)
-        *decorations* values are in:
-            - Hint.NONE
-            - Hint.WARNING
-            - Hint.ERROR
-            - Hint.OK
-            - Hint.NOT_OK
-        *tooltip* values are str
+        Return hints to display icon, tooltips, background...
+        Return a Hint object.
+        Default Hint objects available are in piccel.Hints
         """
-        pass
+        return None

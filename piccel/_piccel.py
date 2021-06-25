@@ -26,7 +26,7 @@ from pathlib import PurePath
 import shutil
 from collections.abc import Mapping
 from itertools import chain
-from enum import IntEnum
+from enum import IntEnum, Enum
 import importlib
 from importlib import import_module, reload as reload_module
 import inspect
@@ -1361,15 +1361,30 @@ def protect_fn(fn):
 
 class Hint:
 
-    # Decorations
-    WARNING = 0
-    ERROR = 1
-    QUESTION = 2
-
-    def __init__(self, decoration, message, is_link):
-        self.decoration = decoration
+    def __init__(self, icon_style=None, message=None, is_link=False,
+                background_color_hex_str=None):
         self.message = message
         self.is_link = is_link
+
+        self.background_qcolor = None if background_color_hex_str is None \
+            else QtGui.QColor(background_color_hex_str)
+        self.qicon_style = icon_style
+
+class Hints:
+    WARNING = Hint(icon_style=QtWidgets.QStyle.SP_MessageBoxWarning,
+                   background_color_hex_str='#FCAF3E')
+    DONE = Hint(icon_style=QtWidgets.QStyle.SP_DialogApplyButton)
+    NOT_DONE = Hint(icon_style=QtWidgets.QStyle.SP_DialogCancelButton,
+                    background_color_hex_str='#FCE94F')
+    ERROR = Hint(icon_style=QtWidgets.QStyle.SP_MessageBoxCritical,
+                 background_color_hex_str='#EF2929')
+
+    ALL_HINTS = [WARNING, DONE, NOT_DONE, ERROR]
+
+    @staticmethod
+    def preload(qobj):
+        for hint in Hints.ALL_HINTS:
+            hint.qicon = qobj.style().standardIcon(hint.qicon_style)
 
 from .sheet_plugin import SheetPlugin
 
@@ -5998,16 +6013,27 @@ class DataSheetModel(QtCore.QAbstractTableModel):
 
     def data(self, index, role=QtCore.Qt.DisplayRole):
         if index.isValid():
+            view = self.sheet.get_df_view()
+            column = view.columns[index.column()]
+            value = view.iloc[index.row(), index.column()]
+            value_str = str(value) if not pd.isna(value) else ''
             if role == QtCore.Qt.DisplayRole:
-                value = self.sheet.get_df_view().iloc[index.row(),
-                                                      index.column()]
-                value = str(value) if not pd.isna(value) else ''
-                return value
-            elif role == QtCore.Qt.BackgroundRole:
-                validity = self.sheet.view_validity().iloc[index.row(),
-                                                           index.column()]
-                if not validity:
-                    return QtGui.QColor('#9C0006')
+                return value_str
+            else:
+                hint = self.sheet.plugin.hint(column, value)
+                if hint is not None:
+                    if role == QtCore.Qt.BackgroundRole:
+                        return hint.background_qcolor
+                    elif role == QtCore.Qt.DecorationRole:
+                        return hint.qicon
+                    elif role == QtCore.Qt.ToolTipRole:
+                        return hint.message
+                if role == QtCore.Qt.BackgroundRole:
+                    validity = self.sheet.view_validity().iloc[index.row(),
+                                                               index.column()]
+                    if not validity:
+                        return QtGui.QColor('#9C0006')
+
         return None
 
     def entry_id(self, index):
@@ -6190,6 +6216,8 @@ class PiccelApp(QtWidgets.QApplication):
     def __init__(self, argv, cfg_fn=None, user=None, access_pwd=None,
                  role_pwd=None, cfg_fns=None, refresh_rate_ms=0):
         super(PiccelApp, self).__init__(argv)
+
+        Hints.preload(self)
 
         self.refresh_rate_ms = refresh_rate_ms
 

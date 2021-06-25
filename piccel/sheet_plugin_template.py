@@ -63,8 +63,9 @@ class CustomSheetPlugin(SheetPlugin):
         df_validity.columns = df.columns
         return df_validity
 
-    def hints():
-        pass
+    def hint(self, value):
+        return None
+
     # def style(self)
 
     # def request_new_entry(self, column, row_df)
