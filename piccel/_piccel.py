@@ -1520,7 +1520,7 @@ class DataSheet:
 
     def __init__(self, label, form_master=None, df=None, user=None,
                  filesystem=None, plugin=None, live_forms=None,
-                 watchers=None, dynamic_only=False):
+                 watchers=None, dynamic_only=False, workbook=None):
         """
         filesystem.root is the sheet-specific folder where to save all data
         and pending forms
@@ -1576,9 +1576,9 @@ class DataSheet:
             self.set_plugin(plugin)
         else:
             if self.filesystem is not None:
-                self.load_plugin()
+                self.load_plugin(workbook)
             if self.plugin is None:
-                self.set_plugin(SheetPlugin(self))
+                self.set_plugin(SheetPlugin(self, workbook))
 
         if not dynamic_only and self.filesystem is not None:
             self.load_live_forms()
@@ -1590,14 +1590,15 @@ class DataSheet:
         self.filesystem.enable_track_changes()
 
     @staticmethod
-    def from_files(user, filesystem, watchers=None):
+    def from_files(user, filesystem, watchers=None, workbook=None):
         label = DataSheet.get_sheet_label_from_filesystem(filesystem)
         logger.debug('Load form master for sheet %s', label)
         form_master = DataSheet.load_form_master(filesystem)
         dynamic_only = filesystem.exists('dynamic_only')
         logger.debug('Create sheet %s', label)
         return DataSheet(label, form_master, None, user, filesystem,
-                         dynamic_only=dynamic_only, watchers=watchers)
+                         dynamic_only=dynamic_only, watchers=watchers,
+                         workbook=workbook)
 
     #@check_role(UserRole.ADMIN)
     def dump_plugin_code(self, plugin_code=None, overwrite=False):
@@ -1612,7 +1613,7 @@ class DataSheet:
         self.filesystem.save(plugin_fn, plugin_code, overwrite=overwrite)
         return plugin_fn
 
-    def load_plugin(self):
+    def load_plugin(self, workbook=None):
         plugin_module = 'plugin_%s' % self.label
         plugin_fn = '%s.py' % plugin_module
         if self.filesystem.exists(plugin_fn):
@@ -1624,7 +1625,7 @@ class DataSheet:
             plugin_module = import_module(plugin_module)
             reload_module(plugin_module)
             sys.path.pop(0)
-            self.set_plugin(plugin_module.CustomSheetPlugin(self, workbook=None))
+            self.set_plugin(plugin_module.CustomSheetPlugin(self, workbook))
         else:
             logger.info('No plugin to load for sheet %s', self.label)
 
@@ -3566,10 +3567,10 @@ class WorkBook:
         for linked_book, sheet_filter in self.linked_books:
             linked_book.user_login(user, pwd, load_sheets=load_sheets)
 
+        self.logged_in = True
+
         if load_sheets:
             self.reload(progress_callback)
-
-        self.logged_in = True
 
     def get_sheet(self, sheet_label):
         assert(self.logged_in)
@@ -3617,11 +3618,21 @@ class WorkBook:
                          self.label, progress_total, progress_increment)
 
         # ASSUME all sheet labels are unique
-        self.sheets = self.load_sheets()
+        self.sheets = self.load_sheets(parent_workbook=self)
         logger.debug('WorkBook %s: Load linked workbooks', self.label)
         for linked_book, sheet_regexp in self.linked_books:
             self.sheets.update(linked_book.load_sheets(sheet_regexp,
-                                                       progress_callback))
+                                                       progress_callback,
+                                                       parent_workbook=self))
+
+        for sheet in self.sheets.values():
+            if sheet.dynamic_only:
+                logger.debug('WorkBook %s: Setup dynamic sheet %s',
+                             self.label, sheet.label)
+                sheet.plugin.compute()
+                for other_sheet in self.sheets.values():
+                    if not other_sheet.dynamic_only:
+                        sheet.watch_other_sheet_changes(other_sheet)
 
     def load_plugin(self):
         plugin_module = 'plugin_common'
@@ -3635,7 +3646,8 @@ class WorkBook:
         self.plugin = plugin_module.CustomWorkBookPlugin(self)
         sys.path.pop(0)
 
-    def load_sheets(self, sheet_regexp=None, progress_callback=None):
+    def load_sheets(self, sheet_regexp=None, progress_callback=None,
+                    parent_workbook=None):
         # TODO. improve progress callback to avoid handling logic of increment
         if progress_callback is not None:
             progression = 0
@@ -3689,7 +3701,9 @@ class WorkBook:
                 sh_fs = self.filesystem.change_dir(op.join(sheet_folder,
                                                            sheet_label))
                 # TODO: sheet watchers?
-                sheets[sheet_label] = DataSheet.from_files(self.user, sh_fs)
+                sh = DataSheet.from_files(self.user, sh_fs,
+                                          workbook=parent_workbook)
+                sheets[sheet_label] = sh
                 if progress_callback is not None:
                     progression += progress_increment
                     progress_callback(int(progression))
@@ -3699,11 +3713,6 @@ class WorkBook:
             if progress_callback is not None:
                 progress_callback(100)
 
-        for sheet in sheets.values():
-            if sheet.dynamic_only:
-                for other_sheet in sheets.values():
-                    if not other_sheet.dynamic_only:
-                        sheet.watch_other_sheet_changes(other_sheet)
         return sheets
 
     def __eq__(self, other):
