@@ -68,7 +68,6 @@ logging.basicConfig(stream=sys.stdout,
                     format='%(asctime)s %(levelname)-8s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
 
-
 # For DataSheet export to pdf:
 HTML_TOP = '''
 <html>
@@ -1122,9 +1121,10 @@ class Translator():
         """
         if key in self.trs:
             raise TrKeyAlreadyRegistered('Key %s already registered' % key)
-        if translations is None or translations=='':
-            self.trs[key] = translations
-            return
+        if translations is None:
+            translations = {l:key for l in self.supported_languages}
+        elif translations=='':
+            translations = {l:'' for l in self.supported_languages}
 
         diff = self.supported_languages.symmetric_difference(translations.keys())
         if len(diff):
@@ -3279,7 +3279,8 @@ class WorkBook:
     ENCRYPTION_FN = 'encryption.json'
 
     def __init__(self, label, data_folder, filesystem,
-                 password_vault=None, linked_book_fns=None):
+                 password_vault=None, linked_book_fns=None,
+                 load_linked=True):
         """
         Create workbook from basic configuration: where is the main data folder
         and password checksums for every role.
@@ -3332,14 +3333,15 @@ class WorkBook:
         self.user_roles = None
 
         self.data_folder = data_folder
-        self.linked_book_fns = (linked_book_fns if linked_book_fns is not None\
+        self.linked_book_fns = (linked_book_fns if linked_book_fns is not None \
                                 else {})
         # TODO: user role retrieval can only be done while decrypting!
         self.linked_books = []
         # TODO: utest linked workbook!
-        for linked_workbook_fn in self.linked_book_fns.keys():
-            self.preload_linked_workbook(linked_workbook_fn)
-            # TODO: warning: prevent circular linkage!
+        if load_linked:
+            for linked_workbook_fn in self.linked_book_fns.keys():
+                self.preload_linked_workbook(linked_workbook_fn)
+                # TODO: warning: prevent circular linkage!
 
         logger.debug('WorkBook %s init: root folder: %s',
                      self.label, self.filesystem.root_folder)
@@ -3350,6 +3352,7 @@ class WorkBook:
 
         self.sheets = {}
         self.decrypted = False
+        self.logged_in = False
 
     def add_linked_workbook(self, cfg_fn, sheet_filters):
         self.linked_book_fns[cfg_fn] = sheet_filters
@@ -3364,6 +3367,7 @@ class WorkBook:
         self.linked_books.append((linked_wb, combine_regexps(sheet_filters)))
 
     def __getitem__(self, sheet_label):
+        assert(self.logged_in)
         return self.sheets[sheet_label]
 
     def save_configuration_file(self, workbook_fn):
@@ -3377,7 +3381,7 @@ class WorkBook:
         self.filesystem.save(workbook_fn, json.dumps(cfg))
 
     @staticmethod
-    def from_configuration_file(workbook_fn, filesystem):
+    def from_configuration_file(workbook_fn, filesystem=None, load_linked=True):
         """
         workbook_file is a json file:
         {
@@ -3389,11 +3393,11 @@ class WorkBook:
         }
         Decryption pwd is not entered and user is not logged in at this point
         """
-
+        if filesystem is None:
+            filesystem = LocalFileSystem(op.dirname(workbook_fn))
+            workbook_fn = op.basename(workbook_fn)
         cfg = json.loads(filesystem.load(workbook_fn))
         wb_cfg_folder = op.normpath(op.dirname(workbook_fn))
-        logger.debug('Init WorkBook %s: Change root folder to %s:',
-                     cfg['workbook_label'], wb_cfg_folder)
         filesystem = filesystem.change_dir(wb_cfg_folder)
         if filesystem.exists(cfg['data_folder']):
             crypt_cfg_rel_fn = op.join(cfg['data_folder'], WorkBook.ENCRYPTION_FN)
@@ -3409,7 +3413,8 @@ class WorkBook:
 
         return WorkBook(cfg['workbook_label'], cfg['data_folder'],
                         filesystem, password_vault=password_vault,
-                        linked_book_fns=cfg.get('linked_sheets', None))
+                        linked_book_fns=cfg.get('linked_sheets', None),
+                        load_linked=load_linked)
 
     def set_password(self, role, pwd, old_pwd=''):
         assert(role in UserRole)
@@ -3564,7 +3569,10 @@ class WorkBook:
         if load_sheets:
             self.reload(progress_callback)
 
+        self.logged_in = True
+
     def get_sheet(self, sheet_label):
+        assert(self.logged_in)
         return self.sheets[sheet_label]
 
     def get_nb_sheets(self, sheet_re):
@@ -3655,10 +3663,25 @@ class WorkBook:
         sheet_list = self.plugin.sheet_order()
         logger.info('WorkBook %s: sheets order from common plugin: %s',
                      self.label, sheet_list)
-        for sheet_label in self.filesystem.listdir(sheet_folder):
+
+        sheet_folders = self.filesystem.listdir(sheet_folder)
+
+        unknown_sheets = set(sheet_list).difference(sheet_folders)
+        if len(unknown_sheets) > 0:
+            logger.warning('WorkBook %s: Unknown sheets specified in '\
+                           'common plugin: %s' \
+                           %(self.label, ', '.join(unknown_sheets)))
+
+        for sheet_label in sheet_folders:
             if sheet_label not in sheet_list:
                 sheet_list.append(sheet_label)
+
         for sheet_label in sheet_list:
+            if not self.filesystem.exists(op.join(sheet_folder,
+                                                  sheet_label)):
+                logger.warning('WorkBook %s: Skip loading sheet %s '\
+                               '(no folder dfound)' %(self.label, sheet_label))
+                continue
             if sheet_regexp.match(sheet_label) is not None:
                 logger.info('WorkBook %s: Reload data sheet %s' % \
                             (self.label, sheet_label))
@@ -4357,13 +4380,13 @@ class FormItem:
         if self.choices is not None:
             assert(len(self.choices)>0) # TODO insure this
             for value,label in self.choices.items():
-                self.tr.unregister('choice_'+value) # TODO
+                self.tr.unregister(value) # TODO
                 self.tr.unregister('other_choice')
 
         self.allow_other_choice = False
         if choices is not None:
             for value,translation in choices.items():
-                self.tr.register('choice_'+value, translation)
+                self.tr.register(value, translation)
             if other_choice_label is not None:
                 self.allow_other_choice = True
                 self.tr.register('other_choice', other_choice_label)
@@ -4464,6 +4487,9 @@ class FormItem:
                 elif self.init_values is not None:
                     # logger.debug('%s: Use init value for key %s', self, key)
                     self.set_input_str(self.init_values[key], force=force)
+                elif self.choices is not None:
+                    self.set_input_str(self.tr[next(iter(self.choices))],
+                                       force=force)
                 else:
                     # empty string maps to None
                     # logger.debug('%s: Set empty string for key %s', self, key)
@@ -4499,6 +4525,9 @@ class FormItem:
             return
 
         value_str = self.values_str[key]
+        if self.choices is not None:
+            current_choices = {self.tr[k]:k for k in self.choices}
+            value_str = current_choices.get(value_str, value_str)
 
         if len(value_str)==0 and not self.allow_None:
             logger.debug('%s cannot be empty', self)
@@ -4514,7 +4543,8 @@ class FormItem:
             if self.choices is not None:
                 if not self.allow_other_choice and \
                    value_str not in self.choices:
-                    logger.warning('Value of %s not in choices', self)
+                    logger.warning('Value of %s not in choices (%s)', self,
+                                   ', '.join(self.choices))
                     self._set_validity(False, 'Value must be one of "%s"' % \
                                        ' or '.join(self.choices), key)
                     return
@@ -4548,9 +4578,9 @@ class FormItem:
             assert(len(self.keys)==1)
             key = next(iter(self.keys))
 
-        if self.value[key] is None or pd.isna(self.value[key]):
+        if self.values_str[key] is None:
             return ''
-        return self.format(self.value)
+        return self.format(self.unformat(self.values_str[key]))
 
     def set_value(self, key, value):
         self.set_input_str(self.format(value) \
@@ -4567,11 +4597,11 @@ class FormItem:
             key = next(iter(self.keys))
 
         if not self.validity:
-            raise InvalidValue(key)
+            raise InvalidValue("%s: %s" %(key,self.validity_message))
 
         value_str = self.values_str[key]
         if self.choices is not None:
-            current_choices = {self.tr['choice_%s'%k]:k for k in self.choices}
+            current_choices = {self.tr[k]:k for k in self.choices}
             value_str = current_choices.get(value_str, value_str)
 
         return self.unformat(value_str) if len(value_str)>0 else None
@@ -5879,9 +5909,9 @@ class TestTranslator(unittest.TestCase):
         tr = Translator(default_language='English',
                         supported_languages={'French','English'})
         tr.register('keyword1', None)
-        self.assertEqual(tr['keyword1'], None)
+        self.assertEqual(tr['keyword1'], 'keyword1')
         tr.set_language('French')
-        self.assertEqual(tr['keyword1'], None)
+        self.assertEqual(tr['keyword1'], 'keyword1')
 
     def test_empty(self):
         tr = Translator(default_language='English',
@@ -6112,15 +6142,9 @@ def make_item_input_widget(item_widget, item, key, key_label,
         _input_ui = ui.item_choice_radio_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
         _input_ui.label_key.setText(item.tr[key])
-        idx_default_choice = 0
-        choice_list = list(item.choices.keys())
-        if init_value != '':
-            idx_default_choice = choice_list.index(init_value)
-        logger.debug('Radio default_choice: %s (%d)',
-                     choice_list[idx_default_choice], idx_default_choice)
         radio_group = QtWidgets.QButtonGroup(input_widget)
-        for idx, choice in enumerate(choice_list):
-            txt = item.tr['choice_'+choice]
+        for idx, choice in enumerate(item.choices.keys()):
+            txt = item.tr[choice]
             frame = _input_ui.radio_frame
             radio_button = QtWidgets.QRadioButton(txt, frame)
             radio_button.setObjectName("radio_button_"+choice)
@@ -6134,6 +6158,8 @@ def make_item_input_widget(item_widget, item, key, key_label,
                     if state:
                         self.item.set_input_str(self.choice)
             radio_button.toggled.connect(ChoiceProcess(item, choice))
+            if item.is_valid() and item.get_value() == choice:
+                radio_group.button(idx).setChecked(True)
         if item.allow_other_choice:
             radio_group.addButton(_input_ui.radio_button_other, idx+1)
 
@@ -6146,7 +6172,7 @@ def make_item_input_widget(item_widget, item, key, key_label,
             _input_ui.other_field.editingFinished.connect(callback)
         else:
             _input_ui.radio_button_other_frame.hide()
-        radio_group.button(idx_default_choice).setChecked(True)
+        
 
     elif item.vtype == 'date' or item.vtype == 'datetime':
         # Date/Time input
