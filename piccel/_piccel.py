@@ -1321,6 +1321,8 @@ class LocalFileSystem:
     def save(self, fn, content_str, overwrite=False):
         fn = op.normpath(fn)
         afn = op.join(self.root_folder, fn)
+        logger.debug('Filesystem - save to abs fn: %s', afn)
+        logger.debug('Filesystem - working directory: %s', os.getcwd())
         if self.encrypter is not None:
             content_str = self.encrypter.encrypt_str(content_str)
 
@@ -6167,6 +6169,8 @@ def make_item_input_widget(item_widget, item, key, key_label,
                     if state:
                         self.item.set_input_str(self.choice)
             radio_button.toggled.connect(ChoiceProcess(item, choice))
+            if 0 and item.vtype == 'boolean':
+                from IPython import embed; embed()
             if item.is_valid() and item.get_value() == choice:
                 radio_group.button(idx).setChecked(True)
         if item.allow_other_choice:
