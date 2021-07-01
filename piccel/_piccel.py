@@ -293,6 +293,21 @@ def import_gform_file(gform_fn, form_fn, language, overwrite=False):
     with open(form_fn, 'w') as fout:
         fout.write(form.to_json())
 
+
+class FormJsonHook:
+    def __init__(self):
+        pass
+    def __call__(self, obj):
+        parsed_dict = {}
+        for k,v in obj.items():
+            if isinstance(k, str):
+                if k == 'false':
+                    k = False
+                elif k == 'true':
+                    k = True
+            parsed_dict[k] = v
+        return parsed_dict
+
 class Form:
     """
 
@@ -546,12 +561,12 @@ function snakeCaseToCamelCase(s) {
     #         df.set_index(index, inplace=True)
     #     return df
 
-    def _prepend(self, key, value_str, vtype, hidden=True, editable=False):
+    def _prepend(self, key, value, vtype, hidden=True, editable=False):
         section0 = next(iter(self.sections.values()))
         item = FormItem({key:None}, section0.tr.language,
                         section0.tr.supported_languages, vtype=vtype,
                         hidden=hidden, editable=editable,
-                        init_values={key:value_str})
+                        init_values={key:value})
         section0._prepend(item)
         # TODO: self.register_item
         self.key_to_items[key].append(item)
@@ -833,7 +848,7 @@ function snakeCaseToCamelCase(s) {
 
     @staticmethod
     def from_json(json_str):
-        return Form.from_dict(json.loads(json_str))
+        return Form.from_dict(json.loads(json_str)) # object_hook=FormJsonHook()
 
     def __getitem__(self, k):
         return self.sections[k]
@@ -1086,9 +1101,9 @@ class FormSection:
 
 
 def unformat_boolean(s):
-    if s=='True':
+    if s=='True' or s=='true':
         return True
-    elif s=='False' or s=='':
+    elif s=='False' or s=='false' or s=='':
         return False
     else:
         raise ValueError('Boolean string must be "True", "False" or '\
@@ -1143,7 +1158,7 @@ class Translator():
 
     def __getitem__(self, key):
         if key not in self.trs:
-            raise UnknownTrKey('%s unknown. Consider registering it')
+            raise UnknownTrKey('%s unknown. Consider registering it' % key)
         if self.trs[key] in [None, '']:
             return self.trs[key]
 
@@ -1264,6 +1279,7 @@ class LocalFileSystem:
             return
         logger.debug('Create folder %s', full_folder)
         os.makedirs(full_folder)
+        assert(op.exists(full_folder))
 
     def full_path(self, fn):
         return op.join(self.root_folder, fn)
@@ -2125,7 +2141,7 @@ class DataSheet:
 
         entry_id_str = str(entry_id)
         logger.debug('Sheet %s: prepend entry id and submission mode', self.label)
-        form._prepend('__entry_id__', entry_id_str, 'uint64')
+        form._prepend('__entry_id__', entry_id, 'uint64')
         form._prepend('__submission__', submission, 'text')
 
         if self.filesystem is not None:
@@ -2158,6 +2174,7 @@ class DataSheet:
         return op.join(folder, bfn)
 
     def get_live_form_folder(self, form_id):
+        #form_folder = op.join(self.get_live_forms_folder(), '%d' % form_id)
         return op.join(self.get_live_forms_folder(), '%d' % form_id)
 
     def new_entry_id(self):
@@ -4496,8 +4513,17 @@ class FormItem:
                     # TODO utest that value is generated even if
                     # init value is given
                 elif self.init_values is not None:
-                    # logger.debug('%s: Use init value for key %s', self, key)
-                    self.set_input_str(self.init_values[key], force=force)
+                    self.set_value(key, self.init_values[key], force=force)
+                #     # logger.debug('%s: Use init value for key %s', self, key)
+                #     if self.choices is not None and \
+                #        (not self.allow_other_choice or \
+                #         str(self.init_values[key]) in self.choices):
+                #         # from IPython import embed; embed()
+                #         self.set_input_str(self.tr[str(self.init_values[key])],
+                #                            force=force)
+                #     else:
+                #         self.set_input_str(self.format(self.init_values[key]),
+                #                            force=force)
                 elif self.choices is not None:
                     self.set_input_str(self.tr[next(iter(self.choices))],
                                        force=force)
@@ -4536,9 +4562,17 @@ class FormItem:
             return
 
         value_str = self.values_str[key]
-        if self.choices is not None:
+        if self.choices is not None and not self.allow_other_choice:
             current_choices = {self.tr[k]:k for k in self.choices}
-            value_str = current_choices.get(value_str, value_str)
+            if value_str not in current_choices:
+                from IPython import embed; embed()
+                logger.warning('Value of %s not in choices (%s)', self,
+                               ', '.join(current_choices))
+                self._set_validity(False, 'Value must be one of "%s"' % \
+                                   ' or '.join(current_choices), key)
+                return
+            else:
+                value_str = current_choices[value_str]
 
         if len(value_str)==0 and not self.allow_None:
             logger.debug('%s cannot be empty', self)
@@ -4550,15 +4584,6 @@ class FormItem:
                 logger.warning('Regexp not verified for %s', self)
                 self._set_validity(False, self.regexp_invalid_message, key)
                 return
-
-            if self.choices is not None:
-                if not self.allow_other_choice and \
-                   value_str not in self.choices:
-                    logger.warning('Value of %s not in choices (%s)', self,
-                                   ', '.join(self.choices))
-                    self._set_validity(False, 'Value must be one of "%s"' % \
-                                       ' or '.join(self.choices), key)
-                    return
 
         if len(value_str)==0 and self.allow_None:
             value = None
@@ -4591,12 +4616,24 @@ class FormItem:
 
         if self.values_str[key] is None:
             return ''
-        return self.format(self.unformat(self.values_str[key]))
 
-    def set_value(self, key, value):
-        self.set_input_str(self.format(value) \
-                           if (value is not None and not pd.isna(value)) \
-                           else '', key)
+        value_str = self.values_str[key]
+        if self.choices is not None:
+            current_choices = {self.tr[k]:k for k in self.choices}
+            value_str = current_choices.get(value_str, value_str)
+
+        return self.format(self.unformat(value_str))
+
+    def set_value(self, key, value, force=False):
+        if self.choices is not None and \
+           str(value) in self.choices:
+            # from IPython import embed; embed()
+            value_str = self.tr[str(value)]
+        else:
+            value_str = (self.format(value) \
+                         if (value is not None and not pd.isna(value)) \
+                         else '')
+        self.set_input_str(value_str, key, force=force)
 
     def get_value(self, key=None):
         """ Return the current value, without using submission generator """
@@ -5760,10 +5797,10 @@ class TestFormItem(unittest.TestCase):
                         default_language='English')
         item.set_input_str('Falsed')
         self.assertFalse(item.is_valid())
-        item.set_input_str('True')
+        item.set_input_str('Yep')
         self.assertTrue(item.is_valid())
         self.assertEqual(item.get_value(), True)
-        item.set_input_str('False')
+        item.set_input_str('Nope')
         self.assertEqual(item.get_value(), False)
 
     def test_boolean(self):
@@ -5799,7 +5836,7 @@ class TestFormItem(unittest.TestCase):
                         vtype='text', choices=choices,
                         supported_languages={'French'},
                         default_language='French')
-        item.set_input_str('epic_member')
+        item.set_input_str('Membre EPIC')
         self.assertTrue(item.is_valid())
         self.assertEqual(item.get_value(), 'epic_member')
         item.set_input_str('Dummy')
@@ -6168,10 +6205,10 @@ def make_item_input_widget(item_widget, item, key, key_label,
                 def __call__(self, state):
                     if state:
                         self.item.set_input_str(self.choice)
-            radio_button.toggled.connect(ChoiceProcess(item, choice))
-            if 0 and item.vtype == 'boolean':
-                from IPython import embed; embed()
-            if item.is_valid() and item.get_value() == choice:
+            radio_button.toggled.connect(ChoiceProcess(item, txt))
+            # if item.vtype == 'boolean':
+            #     from IPython import embed; embed()
+            if item.is_valid() and item.value_to_str() == choice:
                 radio_group.button(idx).setChecked(True)
         if item.allow_other_choice:
             radio_group.addButton(_input_ui.radio_button_other, idx+1)
