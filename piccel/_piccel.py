@@ -1786,21 +1786,25 @@ class DataSheet:
                              form_id_str, len(saved_entries))
                 first_section = self.form_master.first_section()
 
-                entry_id = saved_entries[first_section].pop('__entry_id__')
-                entry_id = np.uint64(entry_id)
-                submission = saved_entries[first_section].pop('__submission__')
+                if '__entry_id__' in saved_entries[first_section] or \
+                   '__submission__' in saved_entries[first_section]:
+                    entry_id = saved_entries[first_section].pop('__entry_id__')
+                    entry_id = np.uint64(entry_id)
+                    submission = saved_entries[first_section].pop('__submission__')
 
-                form_id = int(form_id_str) # TODO factorize
-                live_form = {'append' : self.form_new_entry,
-                             'update' : self.form_update_entry,
-                             'set': self.form_set_entry}[submission](entry_id,
-                                                                     form_id)
-                # From this point form input saving callback is active
-                for section, entries in saved_entries.items():
-                    for key, value_str in entries.items():
-                        live_form[section][key].set_input_str(value_str,
-                                                              use_callback=False)
-                self.live_forms[form_id] = live_form
+                    form_id = int(form_id_str) # TODO factorize
+                    live_form = {'append' : self.form_new_entry,
+                                 'update' : self.form_update_entry,
+                                 'set': self.form_set_entry}[submission](entry_id,
+                                                                         form_id)
+                    # From this point form input saving callback is active
+                    for section, entries in saved_entries.items():
+                        for key, value_str in entries.items():
+                            live_form[section][key].set_input_str(value_str,
+                                                                  use_callback=False)
+                    self.live_forms[form_id] = live_form
+                else:
+                    logger.error('Cannot load live form %s', form_id_str)
         else:
             logger.debug('Live form folder %s is empty', top_folder)
 
@@ -2065,7 +2069,11 @@ class DataSheet:
         if df  is None:
             return True
         if ignore_entry_id is not None:
-            df = df.drop(ignore_entry_id)
+            try:
+                df = df.drop(ignore_entry_id)
+            except KeyError:
+                logger.warning('Validate unique: Entry %s to ignore not found '\
+                               'in view %s', ignore_entry_id, view)
         return value not in df[key].values
 
     def form_update_entry(self, entry_id, form_id=None):
