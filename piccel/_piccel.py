@@ -2302,7 +2302,7 @@ class DataSheet:
             self.df = entry_df.copy()
         else:
             self.df = self.df.append(entry_df)
-        logger.info('Entry has been appended to sheet %s', self.label)
+        logger.debug('Entry has been appended to sheet %s', self.label)
         logger.debug('Resulting df has columns: %s)', ','.join(entry_df.columns))
         self.notifier.notify('appended_entry')
         self.invalidate_cached_views()
@@ -4573,7 +4573,6 @@ class FormItem:
         if self.choices is not None and not self.allow_other_choice:
             current_choices = {self.tr[k]:k for k in self.choices}
             if value_str not in current_choices:
-                from IPython import embed; embed()
                 logger.warning('Value of %s not in choices (%s)', self,
                                ', '.join(current_choices))
                 self._set_validity(False, 'Value must be one of "%s"' % \
@@ -6230,7 +6229,6 @@ def make_item_input_widget(item_widget, item, key, key_label,
             _input_ui.other_field.editingFinished.connect(callback)
         else:
             _input_ui.radio_button_other_frame.hide()
-        
 
     elif item.vtype == 'date' or item.vtype == 'datetime':
         # Date/Time input
@@ -6681,12 +6679,13 @@ class PiccelApp(QtWidgets.QApplication):
         cancel_shortcut.activated.connect(cancel)
 
         def submit():
+            #.setEnabled(False)
+            _form_ui.button_submit.setFocus()
             try:
                 form.submit()
                 tab_widget.removeTab(tab_idx)
             except Exception as e:
                 logger.error('Exception occured while submitting:\n%s', repr(e))
-                from IPython import embed; embed()
         _form_ui.button_submit.clicked.connect(submit)
 
 
