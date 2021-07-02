@@ -28,7 +28,14 @@
     </widget>
    </item>
    <item>
-    <widget class="FocusTextEdit" name="value_field"/>
+    <widget class="FocusTextEdit" name="value_field">
+     <property name="minimumSize">
+      <size>
+       <width>400</width>
+       <height>0</height>
+      </size>
+     </property>
+    </widget>
    </item>
   </layout>
  </widget>
