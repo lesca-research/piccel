@@ -35,7 +35,8 @@ import csv
 from . import sheet_plugin_template
 from . import workbook_plugin_template
 from .sheet_plugin_template import CustomSheetPlugin
-from .plugin_tools import conditional_set
+from .plugin_tools import map_set, And, Or #, Less, LessEqual, Greater, GreaterEqual
+from .plugin_tools import track_interview
 
 import unittest
 import tempfile
@@ -876,8 +877,11 @@ function snakeCaseToCamelCase(s) {
         logger.debug('Filling values of form "%s" from entry with keys %s',
                      self.tr['title'], entry_dict.keys())
         for key,value in entry_dict.items():
-            for item in self.key_to_items[key]:
-                item.set_value(key, value)
+            self.set_value_for_key(key, value)
+
+    def set_value_for_key(self, key, value):
+        for item in self.key_to_items[key]:
+            item.set_value(key, value)
 
     def reset(self):
         # logger.debug('Reset form "%s"', self.tr['title'])
@@ -1281,6 +1285,18 @@ class LocalFileSystem:
         os.makedirs(full_folder)
         assert(op.exists(full_folder))
 
+    def test_write_access(self):
+        success = True
+        try:
+            self.save('test_write', '')
+        except Exception as e:
+            logger.error('Cannot write to %s, exception: %s',
+                         self.root_folder, e)
+            success = False
+        else:
+            self.remove('test_write')
+        return success
+
     def full_path(self, fn):
         return op.join(self.root_folder, fn)
 
@@ -1567,6 +1583,9 @@ class DataSheet:
                 raise InvalidSheetLabel('Sheet label (%s) is not the same as '\
                                         'containing folder (%s)' % \
                                         (self.label, fs_label))
+        self.has_write_access = (self.filesystem.test_write_access() \
+                                 if self.filesystem is not None else False)
+
         # TODO: use Dummy file system to avoid checking all the time?
 
         self.default_view = 'raw'
@@ -1606,6 +1625,7 @@ class DataSheet:
         # TODO: check if really needed? Should be set only once at __init__
         self.filesystem = fs
         self.filesystem.enable_track_changes()
+        self.has_write_access = self.filesystem.test_write_access()
 
     @staticmethod
     def from_files(user, filesystem, watchers=None, workbook=None):
@@ -2081,7 +2101,7 @@ class DataSheet:
         Create a form and fill it with content of an existing entry.
         Some item are disabled according to item.freeze_on_update
         """
-        if self.form_master is not None:
+        if self.form_master is not None and self.has_write_access:
             entry_dict = self.df.loc[[entry_id]].to_dict('record')[0]
             form = self._new_form('update', entry_dict=entry_dict,
                                   form_id=form_id, entry_id=entry_id)
@@ -2092,9 +2112,13 @@ class DataSheet:
             return None
 
     def form_new_entry(self, entry_id=None, form_id=None):
+        if not self.has_write_access:
+            return None
         return self._new_form('append', form_id=form_id)
 
     def form_set_entry(self, entry_id, form_id=None):
+        if not self.has_write_access:
+            return None
         entry_dict = self.df.loc[[entry_id]].to_dict('record')[0]
         return self._new_form('set', entry_dict=entry_dict, form_id=form_id,
                               entry_id=entry_id)
@@ -2395,7 +2419,7 @@ class TestDataSheet(unittest.TestCase):
                          'vtype' : 'text'},
                         {'keys' : {'Date': None},
                          'vtype' : 'date'},
-                        {'keys' : {'timestamp': None},
+                        {'keys' : {'Timestamp': None},
                          'vtype' :'datetime',
                          'generator' : 'timestamp_submission', }
                     ]
@@ -2410,7 +2434,7 @@ class TestDataSheet(unittest.TestCase):
             ('Flag', [True, False, None]),
             ('Comment', ['a\tb', '"', '""']),
             ('Date', [date(2020,1,2), date(2020,1,21), date(2020,10,2)]),
-            ('timestamp', [datetime(2020,1,2,13,37),
+            ('Timestamp', [datetime(2020,1,2,13,37),
                            datetime(2021,2,2,13,37),
                            datetime(2020,1,5,13,37)]),
         ]))
@@ -2423,7 +2447,7 @@ class TestDataSheet(unittest.TestCase):
                  FormItem(keys={'Age':None},
                           vtype='int', supported_languages={'French'},
                           default_language='French'),
-                 FormItem(keys={'timestamp':None},
+                 FormItem(keys={'Timestamp':None},
                           vtype='datetime', generator='timestamp_creation',
                           supported_languages={'French'},
                           default_language='French')]
@@ -2449,7 +2473,7 @@ class TestDataSheet(unittest.TestCase):
 
     @staticmethod
     def ts_data_latest(df):
-        max_ts = lambda x: x.loc[x['timestamp']==x['timestamp'].max()]
+        max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
         df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
         return df
 
@@ -2457,7 +2481,7 @@ class TestDataSheet(unittest.TestCase):
         df1 = pd.DataFrame(OrderedDict([
             ('Participant_ID', ['CE0004', 'CE0004', 'CE0006']),
             ('Age', [22, 50, None]),
-            ('timestamp', [datetime(2020,1,2,13,37),
+            ('Timestamp', [datetime(2020,1,2,13,37),
                            datetime(2021,2,2,13,37),
                            datetime(2020,1,5,13,37)]),
         ]))
@@ -2473,7 +2497,7 @@ class TestDataSheet(unittest.TestCase):
         df2 = pd.DataFrame(OrderedDict([
             ('Participant_ID', ['CE0004', 'CE0004', 'CE0006']),
             ('Age', [22, 51, None]),
-            ('timestamp', [datetime(2020,1,2,13,37),
+            ('Timestamp', [datetime(2020,1,2,13,37),
                            datetime(2021,2,2,13,37),
                            datetime(2020,1,5,13,37)]),
         ]))
@@ -2523,7 +2547,7 @@ class TestDataSheet(unittest.TestCase):
                         },
                         {'keys' : {'Age': None},
                          'vtype' :'int'},
-                        {'keys' : {'timestamp': None},
+                        {'keys' : {'Timestamp': None},
                          'vtype' :'datetime',
                          'generator' : 'timestamp_creation', },
                         {'keys' : {'Extra_col' : None},
@@ -2713,7 +2737,7 @@ class TestDataSheet(unittest.TestCase):
                          entry['Participant_ID'])
         self.assertEqual(last_entry_dict['Phone_Number'],
                          entry['Phone_Number'])
-        self.assertGreater(last_entry_dict['timestamp'], ts_before_submit)
+        self.assertGreater(last_entry_dict['Timestamp'], ts_before_submit)
         self.assertEqual(watched_entry[0].to_dict('record')[0]['Age'],
                          entry['Age'])
 
@@ -2763,7 +2787,7 @@ class TestDataSheet(unittest.TestCase):
         self.assertEqual(last_entry_dict['Participant_ID'], previous_pid)
         self.assertEqual(last_entry_dict['Phone_Number'],
                          entry['Phone_Number'])
-        self.assertGreater(last_entry_dict['timestamp'], ts_before_submit)
+        self.assertGreater(last_entry_dict['Timestamp'], ts_before_submit)
         self.assertEqual(watched_entry[0].to_dict('record')[0]['Age'],
                          entry['Age'])
 
@@ -2829,7 +2853,7 @@ class TestDataSheet(unittest.TestCase):
                          'CE0000')
         self.assertEqual(watched_entry[0].loc[entry_to_modify, 'Phone_Number'],
                          entry['Phone_Number'])
-        self.assertGreater(watched_entry[0].loc[entry_to_modify, 'timestamp'],
+        self.assertGreater(watched_entry[0].loc[entry_to_modify, 'Timestamp'],
                            ts_before_submit)
 
     def test_set_entry_file_update(self):
@@ -3078,7 +3102,7 @@ class PiccelLogic:
             logger.error('Error loading file %s: %s', cfg_fn, e)
             message = 'Error loading file %s' % cfg_fn
             self.state = PiccelLogic.STATE_SELECTOR
-            from IPython import embed; embed()
+            # from IPython import embed; embed()
         return message
 
     def decrypt(self, access_pwd):
@@ -3341,6 +3365,8 @@ class WorkBook:
             logger.info('WorkBook %s: Data folder %s not found, create it',
                         self.label, data_folder)
             filesystem.makedirs(data_folder)
+
+        self.has_write_access = filesystem.test_write_access()
 
         sheet_folder = op.join(data_folder, WorkBook.SHEET_FOLDER)
         if not filesystem.exists(sheet_folder):
@@ -3843,6 +3869,13 @@ class TestWorkBook(unittest.TestCase):
         self.assertIsNotNone(regexp.match('john'))
         self.assertIsNone(regexp.match('doe'))
 
+    def test_write_access(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'Participant_info'
+        data_folder = 'pinfo_files'
+        wb = WorkBook(wb_id, data_folder, fs)
+        self.assertTrue(wb.has_write_access)
+
     def test_set_access_password(self):
         fs = LocalFileSystem(self.tmp_dir)
         wb_id = 'Participant_info'
@@ -3960,7 +3993,7 @@ class TestWorkBook(unittest.TestCase):
                  FormItem(keys={'Age':None},
                           vtype='int', supported_languages={'French'},
                           default_language='French'),
-                 FormItem(keys={'timestamp':None},
+                 FormItem(keys={'Timestamp':None},
                           vtype='datetime', generator='timestamp_creation',
                           supported_languages={'French'},
                           default_language='French')]
@@ -3972,10 +4005,10 @@ class TestWorkBook(unittest.TestCase):
         sh1 = DataSheet(sheet_id, form, user=user)
 
         sh1.append_entry({'Participant_ID' : 'CE9999', 'Age' : 43,
-                          'timestamp' : datetime(2021, 4, 16, 17, 28)})
+                          'Timestamp' : datetime(2021, 4, 16, 17, 28)})
 
         def ts_data_latest(df):
-            max_ts = lambda x: x.loc[x['timestamp']==x['timestamp'].max()]
+            max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
             df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
             df.set_index('Participant_ID', inplace=True)
             return df
@@ -4075,11 +4108,15 @@ class TestWorkBook(unittest.TestCase):
                    {'French':'Code Participant'}},
                           default_language='French',
                           supported_languages={'French'}),
+                 FormItem(keys={'Planned':None},
+                          vtype='boolean', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=False),
                  FormItem(keys={'Outcome':None},
                           vtype='text', supported_languages={'French'},
                           default_language='French',
                           allow_empty=False),
-                 FormItem(keys={'timestamp':None},
+                 FormItem(keys={'Timestamp':None},
                           vtype='datetime', generator='timestamp_submission',
                           supported_languages={'French'},
                           default_language='French')]
@@ -4091,7 +4128,7 @@ class TestWorkBook(unittest.TestCase):
         sh_eval = DataSheet(sheet_id, form, user=user)
 
         def ts_data_latest(df):
-            max_ts = lambda x: x.loc[x['timestamp']==x['timestamp'].max()]
+            max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
             df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
             df.set_index('Participant_ID', inplace=True)
             return df
@@ -4109,26 +4146,33 @@ class TestWorkBook(unittest.TestCase):
                 self.eval = workbook['Evaluation']
                 sheet.df = pd.DataFrame(columns=['Participant_ID', 'Eval'])
 
-            def sheet_index(self):
-                return 0
-
             def compute(self):
                 if self.pp.df is not None:
-                    self.sheet.df = self.pp.df[['Participant_ID']].sort_values(by='Participant_ID').reset_index(drop=True)
+                    self.sheet.df = (self.pp.df[['Participant_ID']]
+                                     .sort_values(by='Participant_ID')
+                                     .reset_index(drop=True))
                     self.sheet.df.set_index('Participant_ID', inplace=True)
                 self.refresh_entries(self.sheet.df.index)
 
             def refresh_entries(self, pids):
-                # Add latest function in common plugin
+                logger.debug('Dashboard refresh for: %s', pids)
+
                 self.sheet.df.loc[pids, 'Eval'] = 'eval_todo'
                 eval_df = self.eval.get_df_view('latest')
                 if eval_df is not None:
-                    conditional_set(self.sheet.df, 'Eval', 'eval_ok',
-                                    eval_df, 'Outcome', ['OK'],
-                                    indexes=pids)
-                    conditional_set(self.sheet.df, 'Eval', 'eval_FAIL',
-                                    eval_df, 'Outcome', ['FAIL'],
-                                    indexes=pids)
+                    common_index = (set(pids)
+                                    .intersection(self.sheet.df.index)
+                                    .intersection(eval_df.index))
+                    eval_df = eval_df.loc[common_index, :]
+
+                    map_set(self.sheet.df, 'Eval',
+                            {'eval_OK':
+                             And((eval_df, 'Planned', [True]),
+                                 (eval_df, 'Outcome', ['OK'])),
+                            'eval_FAIL':
+                             Or((eval_df, 'Planned', [False]),
+                                (eval_df, 'Outcome', ['FAIL']))
+                             })
 
             def update(self, sheet_source, entry):
                 entry = entry.set_index('Participant_ID')
@@ -4149,7 +4193,6 @@ class TestWorkBook(unittest.TestCase):
         # Add new pp
         sh_pp.append_entry({'Participant_ID' : 'CE4444',
                             'Secure_ID' : '5432524'})
-        # TODO: dispatch new entry to dynamical sheet!
         last_dashboard_entry = wb['Dashboard'].df.tail(1)
         self.assertEqual(last_dashboard_entry.index[0],
                          'CE4444')
@@ -4157,16 +4200,373 @@ class TestWorkBook(unittest.TestCase):
                          'eval_todo')
 
         # Add new eval
-        sh_eval.append_entry({'Participant_ID' : 'CE4444',
+        pid = 'CE4444'
+        sh_eval.append_entry({'Participant_ID' : pid,
+                              'Planned' : True,
                               'Outcome' : 'FAIL',
-                              'timestamp' : datetime.now()})
-        self.assertEqual( wb['Dashboard'].df.tail(1)['Eval'].iat[0],
+                              'Timestamp' : datetime.now()})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
                          'eval_FAIL')
+
+        time.sleep(0.01)
+        logger.debug('-------------- Add working entry ------------------')
+        sh_eval.append_entry({'Participant_ID' : pid,
+                              'Planned' : True,
+                              'Outcome' : 'OK',
+                              'Timestamp' : datetime.now()})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+                         'eval_OK')
 
         #TODO Delete pp
         if 0:
             sh_pp.delete_entry(sh_pp.df.iloc[1].name)
             self.assertEqual(wb['Dashboard'].df.shape, (2,2))
+
+
+    def test_dahsboard_interview_track(self):
+        # Create empty workbook
+        fs = LocalFileSystem(self.tmp_dir)
+
+        # Create new workbook from scratch
+        wb_id = 'Participant_info'
+        user = 'me'
+        user_roles = {user : UserRole.ADMIN}
+        data_folder = 'pinfo_files'
+        wb = WorkBook(wb_id, data_folder, fs)
+        wb.set_access_password(self.access_pwd)
+        wb.set_password(UserRole.ADMIN, self.admin_pwd)
+        wb.set_password(UserRole.EDITOR, self.editor_pwd)
+        wb.decrypt(self.access_pwd)
+        wb.set_user(user, UserRole.ADMIN)
+        wb.user_login(user, self.admin_pwd)
+
+        def ts_data_latest(df):
+            max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
+            df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
+            df.set_index('Participant_ID', inplace=True)
+            return df
+
+        # Create data sheet participant info (no form)
+        sheet_id = 'Participant'
+        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002']})
+        items = [FormItem({'Participant_ID' :
+                   {'French':'Code Participant'}},
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+        ]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Participant Information'})
+        sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
+
+        # Create Interview plan sheet
+        sheet_id = 'Interview_Plan'
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          default_language='French',
+                          supported_languages={'French'}),
+                 FormItem({'Staff' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Interview_Type':None},
+                          vtype='text', supported_languages={'French'},
+                          choices={'Preliminary' :
+                                   {'French' : 'Séance préliminaire'},
+                                   'Eval' : {'French' : "Séance d'évaluation"}
+                                   },
+                          default_language='French',
+                          allow_empty=True),
+                 FormItem(keys={'Action':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          choices={'plan':{'French':'Plannifier un rendez-vous'},
+                                   'cancel_date':
+                                   {'French':'Annuler le rendez-vous précédent'},
+                                   'assign_staff':
+                                   {'French':'Assigner un intervenant'}},
+                          allow_empty=False),
+                 FormItem(keys={'Interview_Date':None},
+                          vtype='datetime', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=True),
+                 FormItem(keys={'Availability':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=True),
+                 FormItem(keys={'Send_Email':None},
+                          vtype='boolean', supported_languages={'French'},
+                          default_language='French',
+                          choices={'true':{'French':'Envoyer un courriel'},
+                                   'false':{'French':'NE PAS envoyer de courriel'}},
+                          allow_empty=True),
+                 FormItem(keys={'Email_Schedule':None},
+                         vtype='text', supported_languages={'French'},
+                         default_language='French',
+                         choices={'now':None,
+                                  'days_before_1':None,
+                                  'days_before_2':None,
+                                  'days_before_3':None},
+                          allow_empty=True),
+                 FormItem(keys={'Email_Template':None},
+                         vtype='text', supported_languages={'French'},
+                         default_language='French',
+                         choices={'Eval':None,
+                                  'Eval_remind':None,
+                                  'Preliminary':None,
+                                  'Preliminary_remind':None},
+                          allow_empty=True),
+                FormItem(keys={'Email_Status':None},
+                         vtype='text', supported_languages={'French'},
+                         default_language='French',
+                         choices={'to_send':None,
+                                  'sent':None,
+                                  'error':None},
+                          allow_empty=True),
+                 FormItem(keys={'Timestamp':None},
+                          vtype='datetime',
+                          allow_empty=False,
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Plannification'})
+        sh_plan = DataSheet(sheet_id, form, user=user)
+        sh_plan.add_views({'latest' : ts_data_latest})
+
+        # Create evaluation sheet
+        sheet_id = 'Eval'
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          default_language='French',
+                          supported_languages={'French'}),
+                 FormItem({'Staff' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Action':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          choices={'plan':{'French':'Plannifier'},
+                                   'do_session':{'French':'Réaliser la séance'},
+                                   'cancel_session':
+                                   {'French':'Annuler la séance'}},
+                          allow_empty=False),
+                 FormItem(keys={'Session_Status':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          choices={'done':None,
+                                   'redo':None},
+                          allow_empty=True),
+                 FormItem(keys={'Timestamp':None},
+                          vtype='datetime',
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Evaluation'})
+        sh_eval = DataSheet(sheet_id, form, user=user)
+        sh_eval.add_views({'latest' : ts_data_latest})
+
+        wb.add_sheet(sh_plan)
+        wb.add_sheet(sh_eval)
+        wb.add_sheet(sh_pp)
+
+        # Create dashboard sheet that gets list of participants from p_info
+        # and compute evaluation status. Action is a string report.
+        class Dashboard(SheetPlugin):
+            def __init__(self, sheet, workbook=None):
+                super(Dashboard, self).__init__(sheet, workbook)
+                self.pp = workbook['Participant']
+
+            def compute(self):
+                if self.pp.df is not None:
+                    self.sheet.df = (self.pp.df[['Participant_ID']]
+                                     .sort_values(by='Participant_ID')
+                                     .reset_index(drop=True))
+                    self.sheet.df.set_index('Participant_ID', inplace=True)
+                self.refresh_entries(self.sheet.df.index)
+
+            def refresh_entries(self, pids):
+                logger.debug('Dashboard refresh for: %s', pids)
+                track_interview(self.sheet.df, 'Eval', self.workbook, pids)
+
+            def update(self, sheet_source, entry):
+                entry = entry.set_index('Participant_ID')
+                if sheet_source.label == self.pp.label:
+                    empty_df = pd.DataFrame([], index=entry.index)
+                    self.sheet.df = self.sheet.df.append(empty_df)
+                self.refresh_entries(entry.index)
+
+        sh_dashboard = DataSheet('Dashboard', dynamic_only=True)
+        sh_dashboard.set_plugin(Dashboard(sh_dashboard, wb))
+        wb.add_sheet(sh_dashboard)
+
+        self.assertEqual(set(wb['Dashboard'].df.index.values),
+                         set(pp_df['Participant_ID']))
+        self.assertTrue((wb['Dashboard'].df['Eval'] == 'eval_not_scheduled').all())
+
+        from .plugin_tools import DATE_FMT
+        pid = 'CE0001'
+        logger.debug('------- Assign staff for %s --------' % pid)
+        ts = datetime(2021,9,10,10,10)
+        sh_plan.append_entry({'Participant_ID' : pid,
+                              'Action' : 'assign_staff',
+                              'Staff' : 'Thomas Vincent',
+                              'Interview_Type' : 'Eval',
+                              'Interview_Date' : None,
+                              'Availability' : None,
+                              'Send_Email' : True,
+                              'Timestamp' : ts})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+                         'eval_not_scheduled')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+                         'Thomas Vincent')
+        self.assertTrue(pd.isna(wb['Dashboard'].df.loc[pid, 'Eval_Date']))
+
+        logger.debug('------- Plan interview for %s --------' % pid)
+        idate = datetime(2021,10,10,10,10)
+        ts = datetime(2021,9,10,10,11)
+        sh_plan.append_entry({'Participant_ID' : pid,
+                              'Action' : 'plan',
+                              'Staff' : 'Thomas Vincent',
+                              'Interview_Type' : 'Eval',
+                              'Interview_Date' : idate,
+                              'Availability' : None,
+                              'Send_Email' : False,
+                              'Timestamp' : ts})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+                         'eval_scheduled')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+                         'Thomas Vincent')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+                         idate.strftime(DATE_FMT))
+
+        logger.debug('------- Plan availability for %s --------' % pid)
+        idate = datetime(2021,10,10,10,10)
+        ts = datetime(2021,9,10,10,11,30)
+        sh_plan.append_entry({'Participant_ID' : pid,
+                              'Action' : 'plan',
+                              'Staff' : 'Thomas Vincent',
+                              'Interview_Type' : 'Eval',
+                              'Interview_Date' : None,
+                              'Availability' : 'parfois',
+                              'Send_Email' : False,
+                              'Timestamp' : ts})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+                         'eval_scheduled')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+                         'Thomas Vincent')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+                         'parfois')
+        # TODO: test competing entries plan/interview with different timestamp
+
+        logger.debug('------- Plan interview email for %s --------' % pid)
+        idate = datetime(2021,10,10,10,10)
+        ts = datetime(2021,9,10,10,12)
+        sh_plan.append_entry({'Participant_ID' : pid,
+                              'Action' : 'plan',
+                              'Staff' : 'Thomas Vincent',
+                              'Interview_Type' : 'Eval',
+                              'Interview_Date' : idate,
+                              'Availability' : None,
+                              'Send_Email' : True,
+                              'Email_Status' : 'to_send',
+                              'Timestamp' : ts})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+                         'eval_email_pending')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+                         'Thomas Vincent')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+                         idate.strftime(DATE_FMT))
+
+        logger.debug('------- Interview email sent for %s --------' % pid)
+        idate = datetime(2021,10,10,10,10)
+        ts = datetime(2021,9,10,10,13)
+        sh_plan.append_entry({'Participant_ID' : pid,
+                              'Action' : 'plan',
+                              'Staff' : 'Thomas Vincent',
+                              'Interview_Type' : 'Eval',
+                              'Interview_Date' : idate,
+                              'Availability' : None,
+                              'Send_Email' : True,
+                              'Email_Status' : 'sent',
+                              'Timestamp' : ts})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+                         'eval_email_sent')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+                         'Thomas Vincent')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+                         idate.strftime(DATE_FMT))
+
+
+        logger.debug('------- Interview email error for %s --------' % pid)
+        idate = datetime(2021,10,10,10,10)
+        ts = datetime(2021,9,10,10,14)
+        sh_plan.append_entry({'Participant_ID' : pid,
+                              'Action' : 'plan',
+                              'Staff' : 'Thomas Vincent',
+                              'Interview_Type' : 'Eval',
+                              'Interview_Date' : idate,
+                              'Send_Email' : True,
+                              'Email_Status' : 'error',
+                              'Timestamp' : ts})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+                         'eval_email_error')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+                         'Thomas Vincent')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+                         idate.strftime(DATE_FMT))
+
+        logger.debug('------- Interview done for %s --------' % pid)
+        idate = datetime(2021,10,10,10,10)
+        ts = datetime(2021,9,10,10,16)
+        sh_eval.append_entry({'Participant_ID' : pid,
+                              'Action' : 'do_session',
+                              'Staff' : 'Thomas Vincent',
+                              'Session_Status' : 'done',
+                              'Timestamp' : ts})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+                         'eval_ok')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+                         'Thomas Vincent')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+                         ts.strftime(DATE_FMT))
+
+        logger.debug('------- Interview to redo for %s --------' % pid)
+        idate = datetime(2021,10,10,10,10)
+        ts = datetime(2021,9,10,10,17)
+        sh_eval.append_entry({'Participant_ID' : pid,
+                              'Action' : 'do_session',
+                              'Staff' : 'Thomas Vincent',
+                              'Session_Status' : 'redo',
+                              'Timestamp' : ts})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+                         'eval_redo')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+                         'Thomas Vincent')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+                         ts.strftime(DATE_FMT))
+
+        logger.debug('------- Interview cancelled for %s --------' % pid)
+        idate = datetime(2021,10,11,10,10)
+        ts = datetime(2021,9,10,10,18)
+        sh_eval.append_entry({'Participant_ID' : pid,
+                              'Staff' : 'Thomas Vincent',
+                              'Action' : 'cancel_session',
+                              'Timestamp' : ts})
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+                         'eval_cancelled')
+        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+                         'Thomas Vincent')
+        self.assertTrue(pd.isna(wb['Dashboard'].df.loc[pid, 'Eval_Date']))
 
     def test_view_on_dynamic_sheet(self):
         pass
@@ -4734,7 +5134,7 @@ class TestForm(unittest.TestCase):
         self.df_ts = pd.DataFrame(OrderedDict([
             ('Participant_ID', ['CE0004', 'CE0004', 'CE0006']),
             ('Age', [22, 50, 24]),
-            ('timestamp', [datetime(2020,1,2,13,37), datetime(2021,2,2,13,37),
+            ('Timestamp', [datetime(2020,1,2,13,37), datetime(2021,2,2,13,37),
                            datetime(2020,1,5,13,37)])
         ]))
 
@@ -6413,6 +6813,14 @@ class PiccelApp(QtWidgets.QApplication):
             message_box.setText(msg)
             message_box.exec_()
         else:
+            if not self.logic.workbook.has_write_access:
+                message_box = QtWidgets.QMessageBox()
+                message_box.setIcon(QtWidgets.QMessageBox.Critical)
+                message_box.setText('Cannot write to %s. This could be an '\
+                                    'issue with the cloud storage client '\
+                                    '(ex Dropbox) or app permissions' % \
+                                    self.logic.workbook.filesystem.root_folder)
+                message_box.exec_()
             self.refresh()
 
     def show_screen(self, screen):
@@ -6764,7 +7172,7 @@ class PiccelApp(QtWidgets.QApplication):
             f_new_entry = lambda : self.make_form_tab(sh_name, model, _data_sheet_ui,
                                                       self._workbook_ui.tabWidget,
                                                       form=sh.form_new_entry())
-            if not sh.dynamic_only: #TODO: and user is admin
+            if not sh.dynamic_only or not self.logic.workbook.has_write_access: #TODO: and user is admin
                 _data_sheet_ui.button_new_entry.clicked.connect(f_new_entry)
                 # new_entry_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("N"),
                 #                                      sheet_widget)

@@ -15,7 +15,8 @@ def main():
 
     parser = OptionParser(usage=usage, description=description)
 
-    parser.add_option('-v', '--verbose', dest='verbose', metavar='VERBOSELEVEL',
+    parser.add_option('-v', '--verbose', dest='verbose',
+                      metavar='VERBOSELEVEL',
                       type='int', default=0,
                       help='Amount of verbose: '\
                            '0 (NOTSET: quiet, default), '\

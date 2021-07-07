@@ -188,6 +188,9 @@
          <property name="selectionMode">
           <enum>QAbstractItemView::SingleSelection</enum>
          </property>
+         <property name="sortingEnabled">
+          <bool>true</bool>
+         </property>
         </widget>
         <widget class="QFrame" name="cell_value_frame">
          <property name="sizePolicy">
