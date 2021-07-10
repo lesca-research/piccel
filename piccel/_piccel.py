@@ -36,7 +36,7 @@ from . import sheet_plugin_template
 from . import workbook_plugin_template
 from .sheet_plugin_template import CustomSheetPlugin
 from .plugin_tools import map_set, And, Or #, Less, LessEqual, Greater, GreaterEqual
-from .plugin_tools import track_interview
+from .plugin_tools import ts_data_latest, track_interview
 
 import unittest
 import tempfile
@@ -1300,8 +1300,11 @@ class LocalFileSystem:
     def full_path(self, fn):
         return op.join(self.root_folder, fn)
 
-    def listdir(self, folder):
-        return os.listdir(op.join(self.root_folder, folder))
+    def listdir(self, folder, list_folders_only=False):
+        afolder = op.join(self.root_folder, folder)
+        predicate = (lambda e : op.isdir(op.join(afolder, e)) \
+                     if list_folders_only else lambda e : True)
+        return [e for e in os.listdir(afolder) if predicate(e)]
 
     def dir_is_empty(self, folder):
         try:
@@ -1350,7 +1353,7 @@ class LocalFileSystem:
         os.remove(op.join(self.root_folder, fn))
         self.current_stats.pop(fn)
 
-    def save(self, fn, content_str, overwrite=False):
+    def save(self, fn, content_str='', overwrite=False):
         fn = op.normpath(fn)
         afn = op.join(self.root_folder, fn)
         logger.debug('Filesystem - save to abs fn: %s', afn)
@@ -1548,7 +1551,7 @@ class DataSheet:
     Notify on data change.
     """
     CSV_SEPARATOR = '\t'
-    DATA_EXT = '.csv'
+    DATA_FILE_EXT = '.csv'
 
     SHEET_LABEL_RE = re.compile('[A-Za-z._-]+')
 
@@ -1690,7 +1693,8 @@ class DataSheet:
         logger.debug('Reload all data for sheet %s', self.label)
         data_folder = 'data'
         if self.filesystem.exists(data_folder):
-            data_bfns = self.filesystem.listdir(data_folder)
+            data_bfns = [fn for fn in self.filesystem.listdir(data_folder) \
+                         if fn.endswith(DataSheet.DATA_FILE_EXT)]
             if logger.level >= logging.DEBUG:
                 logger.debug('Available data files for sheet %s:\n%s',
                              self.label, '\n'.join(data_bfns))
@@ -3424,6 +3428,9 @@ class WorkBook:
         assert(self.logged_in)
         return self.sheets[sheet_label]
 
+    def has_sheet(self, sheet_label):
+        return sheet_label in self.sheets
+
     def save_configuration_file(self, workbook_fn):
         cfg = {
             'workbook_label' : self.label,
@@ -3729,7 +3736,8 @@ class WorkBook:
         logger.info('WorkBook %s: sheets order from common plugin: %s',
                      self.label, sheet_list)
 
-        sheet_folders = self.filesystem.listdir(sheet_folder)
+        sheet_folders = self.filesystem.listdir(sheet_folder,
+                                                list_folders_only=True)
 
         unknown_sheets = set(sheet_list).difference(sheet_folders)
         if len(unknown_sheets) > 0:
@@ -3875,6 +3883,81 @@ class TestWorkBook(unittest.TestCase):
         data_folder = 'pinfo_files'
         wb = WorkBook(wb_id, data_folder, fs)
         self.assertTrue(wb.has_write_access)
+
+    def test_load_with_unknown_files(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'Participant_info'
+        data_folder = 'pinfo_files'
+        user = 'TV'
+
+
+        logger.debug('-----------------------')
+        logger.debug('utest: create workbook1')
+
+        wb = WorkBook(wb_id, data_folder, fs)
+        wb.set_access_password(self.access_pwd)
+        wb.set_password(UserRole.ADMIN, self.admin_pwd)
+        wb.set_password(UserRole.EDITOR, self.editor_pwd)
+        cfg_bfn = 'wb.psh'
+        wb.save_configuration_file(cfg_bfn)
+
+        wb.decrypt(self.access_pwd)
+        wb.set_user(user, UserRole.ADMIN)
+        wb.user_login(user, self.admin_pwd)
+
+        sheet_id = 'Participant_info'
+        items = [FormItem({'Participant_ID' :
+                   {'French':'Code Participant'}},
+                          default_language='French',
+                          supported_languages={'French'}),
+                 FormItem(keys={'Age':None},
+                          vtype='int', supported_languages={'French'},
+                          default_language='French'),
+                 FormItem(keys={'Timestamp':None},
+                          vtype='datetime', generator='timestamp_creation',
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Titre de formulaire'})
+        sh1 = DataSheet(sheet_id, form, user=user)
+
+        sh1.append_entry({'Participant_ID' : 'CE9999', 'Age' : 43,
+                          'Timestamp' : datetime(2021, 4, 16, 17, 28)})
+
+        def ts_data_latest(df):
+            max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
+            df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
+            df.set_index('Participant_ID', inplace=True)
+            return df
+        sh1.add_views({'latest' : ts_data_latest})
+        sh1.set_default_view('latest')
+        # Add sheet to workbook (auto save)
+        logger.debug('utest: add sheet1 to workbook1')
+        wb.add_sheet(sh1) # note: this is an admin feature
+
+        fs.save(op.join(wb.data_folder, 'dummy_file'))
+        fs.makedirs(op.join(wb.data_folder, 'dummy_folder'))
+        fs.save(op.join(wb.data_folder, 'dummy_folder','dummy_file'))
+        fs.save(op.join(wb.data_folder, 'sheets', 'dummy_file'))
+        fs.save(op.join(wb.data_folder, 'sheets', sheet_id, 'dummy_file'))
+        fs.save(op.join(wb.data_folder, 'sheets', sheet_id, 'data', 'dummy_file'),
+                'dummy data content')
+        fs.makedirs(op.join(wb.data_folder, 'sheets', sheet_id, 'live_forms',
+                            'dummy_form_folder'))
+        fs.save(op.join(wb.data_folder, 'sheets', sheet_id, 'live_forms',
+                        'dummy_form_folder', 'dummy_file'), 'dummy form content')
+
+        logger.debug('-----------------------')
+        logger.debug('utest: create workbook2')
+
+        # TODO: ignore sheet subfolder that do not contain proper sheet data
+        wb2 = WorkBook.from_configuration_file(op.join(self.tmp_dir, cfg_bfn))
+        wb2.decrypt(self.access_pwd)
+        wb2.user_login(user, self.admin_pwd)
+        self.assertEqual(wb, wb2)
 
     def test_set_access_password(self):
         fs = LocalFileSystem(self.tmp_dir)
@@ -4127,11 +4210,6 @@ class TestWorkBook(unittest.TestCase):
                     title={'French':'Evaluation'})
         sh_eval = DataSheet(sheet_id, form, user=user)
 
-        def ts_data_latest(df):
-            max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
-            df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
-            df.set_index('Participant_ID', inplace=True)
-            return df
         sh_eval.add_views({'latest' : ts_data_latest})
 
         wb.add_sheet(sh_eval)
@@ -6817,8 +6895,8 @@ class PiccelApp(QtWidgets.QApplication):
                 message_box = QtWidgets.QMessageBox()
                 message_box.setIcon(QtWidgets.QMessageBox.Critical)
                 message_box.setText('Cannot write to %s. This could be an '\
-                                    'issue with the cloud storage client '\
-                                    '(ex Dropbox) or app permissions' % \
+                                    'unauthorized access in the cloud storage '\
+                                    'client (ex Dropbox).' % \
                                     self.logic.workbook.filesystem.root_folder)
                 message_box.exec_()
             self.refresh()
