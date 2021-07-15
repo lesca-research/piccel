@@ -1,10 +1,9 @@
 import pandas as pd
 import logging
 
-logger = logging.getLogger('Piccel')
+logger = logging.getLogger('piccel')
 
 class InconsistentIndex(Exception): pass
-
 
 class Operation:
     def __init__(self, *args):
@@ -39,8 +38,7 @@ def map_set(dest_df, dest_column, conditions):
         if dest_df.index.name != selector.index_name:
             raise InconsistentIndex('Inconsistent index: destination is "%s" '\
                                     'and selection is "%s"' % \
-                                    (dest_df.index.name,
-                                     selector.index_name))
+                                    (dest_df.index.name, selector.index_name))
         extra = selector.index.difference(dest_df.index)
         if len(extra) > 0:
             logger.warning('Index values in source df but not in selection: %s',
@@ -263,20 +261,26 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print('dashboard_df beginning of track_interview')
         print(dashboard_df)
 
-    plan_df = workbook[plan_sheet_label].get_df_view('latest')
+    if workbook is None:
+        return
 
-    interview_df = workbook[interview_label].get_df_view('latest')
+    interview_df = (workbook[interview_label].get_df_view('latest') \
+                    if workbook.has_sheet(plan_sheet_label) else None)
+
     if interview_df is None:
         interview_df = (pd.DataFrame(columns=['Participant_ID', 'Staff',
                                              'Action', 'Session_Status',
                                              'Timestamp'])
                         .set_index('Participant_ID'))
+    plan_df = (workbook[plan_sheet_label].get_df_view('latest') \
+               if workbook.has_sheet(plan_sheet_label) else None)
+
     if plan_df is None:
         plan_df = (pd.DataFrame(columns=['Participant_ID', 'Staff', 'Action',
-                                        'Interview_Type', 'Interview_Date',
-                                        'Availability', 'Send_Email',
-                                        'Email_Schedule', 'Email_Template',
-                                        'Email_Status', 'Timestamp'])
+                                         'Interview_Type', 'Interview_Date',
+                                         'Availability', 'Send_Email',
+                                         'Email_Schedule', 'Email_Template',
+                                         'Email_Status', 'Timestamp'])
                    .set_index('Participant_ID'))
     plan_df = plan_df[plan_df['Interview_Type'] == interview_label]
 
@@ -310,8 +314,9 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         dashboard_df.loc[common_index, column_date] = dates
 
     def set_date_from_interview(pids):
-        done = interview_df[((interview_df['Session_Status']=='done') | \
-                             (interview_df['Session_Status']=='redo'))]
+        done = interview_df[((interview_df['Action']!='cancel_session') & \
+                             ((interview_df['Session_Status']=='done') | \
+                              (interview_df['Session_Status']=='redo')))]
         common_index = set(pids).intersection(done.index)
         dates = (done.loc[common_index, 'Timestamp']
                  .apply(lambda x: x.strftime(DATE_FMT)))
@@ -368,12 +373,13 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
     # Status
     dashboard_df.loc[common_index, column_status] = default_status
 
-    if 0:
+    if 1:
         print('dashboard_df before map_set')
         print(dashboard_df)
 
     plan_df_selected = plan_df.loc[pids_plan, :]
 
+    logger.debug('Set interview status from %s', plan_sheet_label)
     map_set(dashboard_df, column_status,
             {'%s_scheduled' % interview_tag:
              And((plan_df_selected, 'Action', ['plan']),
@@ -398,6 +404,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     interview_df_selected = interview_df.loc[pids_interview, :]
 
+    logger.debug('Set interview status from %s', interview_label)
     map_set(dashboard_df, column_status,
             {'%s_ok' % interview_tag:
              And((interview_df_selected, 'Action', ['do_session']),
@@ -411,3 +418,10 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
     if 0:
         print('dashboard_df after map_set from interview_df')
         print(dashboard_df)
+
+
+def ts_data_latest(df):
+    max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
+    df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
+    df.set_index('Participant_ID', inplace=True)
+    return df
