@@ -1639,7 +1639,9 @@ class DataSheet:
             self.load_live_forms()
          # TODO: update_data_from_files -> load only entries that were not loaded
 
-    def latest_update_df(self, df):
+    def latest_update_df(self, df=None):
+        if df is None:
+            df = self.df
         max_uidx = lambda x: (x.loc[x['__update_idx__'] == \
                                     x['__update_idx__'].max()])
         return (df.groupby(by='__origin_id__', group_keys=False)
@@ -2069,7 +2071,7 @@ class DataSheet:
         if '__origin_id__' in df.columns:
                 df['__origin_id__'] = (df['__origin_id__']
                                        .apply(hex_to_int)
-                                       .astype(np.dtype('int64')))
+                                       .astype(np.int64))
                 if df.dtypes['__origin_id__'] != np.int64:
                     print('df_from_str: Error __origin_id__')
                     from IPython import embed; embed()
@@ -2077,11 +2079,12 @@ class DataSheet:
         if '__entry_id__' in df.columns:
             df['__entry_id__'] = (df['__entry_id__']
                                   .apply(hex_to_int)
-                                  .astype(np.dtype('int64')))
+                                  .astype(np.int64))
             df.set_index('__entry_id__', inplace=True)
 
             if '__update_idx__' in df.columns:
-                df['__update_idx__'] = df['__update_idx__'].apply(int)
+                df['__update_idx__'] = (df['__update_idx__'].apply(int)
+                                        .astype(np.int64))
         else:
             logger.warning('Df converted from csv str has no __entry_id__')
         return df
@@ -2116,6 +2119,7 @@ class DataSheet:
             self.cached_views[view] = None
             self.cached_validity[view] = None
             self.cached_inconsistent_entries = None
+
     def get_df_view(self, view_label=None):
 
         if self.df is None:
@@ -2166,10 +2170,14 @@ class DataSheet:
                 self.cached_inconsistent_entries.update(dup_ids)
         return self.cached_inconsistent_entries
 
-    def duplicate_entries(self, df=None, conflicting_ids=None):
+    def duplicate_entries(self, df=None, conflicting_ids=None,
+                          cols_to_check=None):
         df = df if df is not None else self.df
         if df is None:
             return set()
+
+        cols_to_check = cols_to_check if cols_to_check is not None \
+            else self.form_master.unique_keys
 
         if conflicting_ids is None:
             conflicting_ids = self.concurrent_updated_entries(df)
@@ -2178,16 +2186,17 @@ class DataSheet:
         origin_ids_duplicates = set()
         max_uidx = lambda x: (x.loc[x['__update_idx__'] == \
                                     x['__update_idx__'].max()])
-        latest_df = (self.df.groupby(by='__origin_id__', group_keys=False)
+
+        latest_df = (df.groupby(by='__origin_id__', group_keys=False)
                      .apply(max_uidx))
-        for col in self.form_master.unique_keys:
+        for col in cols_to_check:
             m = latest_df[col].duplicated(keep=False)
             origin_ids_duplicates.update(latest_df.loc[m, '__origin_id__'])
         m = df['__origin_id__'].isin(origin_ids_duplicates)
         ids_of_duplicates = set(df[m].index)
         if len(ids_of_duplicates) > 0:
             logger.error('Duplicate entries for column(s) %s:\n %s',
-                         ', '.join(self.form_master.unique_keys),
+                         ', '.join(cols_to_check),
                          df.loc[ids_of_duplicates, ['__origin_id__',
                                                     '__update_idx__']])
         return ids_of_duplicates
@@ -2207,16 +2216,21 @@ class DataSheet:
                                                    '__update_idx__']])
         return ids_of_conflicts
 
-    def validate_unique(self, key, value):
-        logger.debug('Validate uniqueness of %s', key)
+    def validate_unique(self, key, value, origin_id, update_idx, entry_id):
+        logger.debug('Sheet %s: Validate uniqueness of %s', self.label, key)
         if self.df is None:
             return True
         cols = [key, '__origin_id__', '__update_idx__']
-        tmp_entry_id = self.new_entry_id()
-        tmp_entry_df = pd.DataFrame([[value, tmp_entry_id, 0]], columns=cols,
-                                    index=[tmp_entry_id])
-        tmp_df = self.df[cols].append(tmp_entry_df)
-        duplicate_entry_ids = self.duplicate_entries(tmp_df)
+        if entry_id not in self.df.index:
+            tmp_entry_id = self.new_entry_id()
+            tmp_entry_df = pd.DataFrame([[value, origin_id, update_idx]],
+                                        columns=cols, index=[tmp_entry_id])
+            tmp_entry_df.index.name = "__entry_id__"
+            tmp_df = self.df[cols].append(tmp_entry_df)
+        else:
+            tmp_df = self.df[cols].copy()
+            tmp_df.loc[entry_id, key] = value
+        duplicate_entry_ids = self.duplicate_entries(tmp_df, cols_to_check=[key])
         duplicate_entry_ids.difference_update(self.inconsistent_entries())
         unique_ok = len(duplicate_entry_ids) == 0
         if not unique_ok:
@@ -2234,7 +2248,8 @@ class DataSheet:
             update_idx = entry_dict.pop('__update_idx__')
             form = self._new_form('update', entry_dict=entry_dict,
                                   form_id=form_id, entry_id=entry_id,
-                                  origin_id=origin_id, update_idx=update_idx+1)
+                                  origin_id=origin_id,
+                                  update_idx=update_idx + np.int64(1))
             for item in form.to_freeze_on_update:
                 item.set_editable(False)
             return form
@@ -2258,7 +2273,7 @@ class DataSheet:
                               entry_id=entry_id, update_idx=update_idx)
 
     def _new_form(self, submission, entry_dict=None, entry_id=None,
-                  origin_id=None, form_id=None, update_idx=0):
+                  origin_id=None, form_id=None, update_idx=np.int64(0)):
         if self.form_master is None:
             raise NoFormMasterError()
 
@@ -2305,9 +2320,14 @@ class DataSheet:
 
         form.set_values_from_entry(entry_dict)
 
-        logger.debug('Sheet %s: set unique validator', self.label)
+        logger.debug('Sheet %s: set unique validator for items %s',
+                     self.label, ', '.join(['%s'%i for i in form.unique_items]))
+
         for item in form.unique_items:
-            item.set_unique_validator(self.validate_unique)
+            item.set_unique_validator(LazyFunc(self.validate_unique,
+                                               origin_id=origin_id,
+                                               update_idx=update_idx,
+                                               entry_id=entry_id))
 
         entry_id_str = str(entry_id)
         origin_id_str = str(origin_id)
@@ -2462,7 +2482,12 @@ class DataSheet:
 
     # TODO: admin feature!
     def delete_entry(self, entry_id):
+        logger.debug('Sheet %s (df shape: %s): delete entry %d',
+                     self.label, self.df.shape, entry_id)
         self.df.drop(entry_id, inplace=True)
+        logger.debug('Sheet %s: df shape after deletion: %s',
+                     self.label, self.df.shape)
+
         if self.filesystem is not None:
             entry_bfn = '%d.csv' % entry_id
             entry_fn = op.join('data', entry_bfn)
@@ -2474,7 +2499,8 @@ class DataSheet:
                                      self.df_to_str(self.df),
                                      overwrite=True)
 
-        self.notifier.notify('deleted_entry') # TODO
+        self.notifier.notify('deleted_entry', entry_id)
+        self.invalidate_cached_views()
 
     def set_entry(self, entry_dict, entry_id):
         """ WARNING: this is an admin feature, not conflict-free! """
@@ -2506,12 +2532,12 @@ class DataSheet:
             print('set_entry before update: Error __origin_id__')
             from IPython import embed; embed()
 
+        self.df.update(entry_df)
+
         if entry_df.dtypes['__origin_id__'] != np.int64:
-            print('set_entry before update: Error __origin_id__ in entry_df')
+            print('set_entry after update: Error __origin_id__ in entry_df')
             from IPython import embed; embed()
 
-        df_bak = self.df.copy()
-        self.df.update(entry_df)
         # see: https://github.com/pandas-dev/pandas/pull/40219
         #      https://stackoverflow.com/questions/28217172/why-does-pandas-dataframe-update-change-the-dtypes-of-the-updated-dataframe
 
@@ -2780,10 +2806,14 @@ class TestDataSheet(unittest.TestCase):
         self.assertFalse(sheet.is_valid())
         self.assertEqual(sheet.inconsistent_entries(), {0, 3})
 
-    def test_unique_view(self):
-        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
-        form = self.sheet_ts.form_update_entry(self.sheet_ts.df.index[1])
-        self.assertTrue(form.is_valid())
+    def test_duplicate_form_input(self):
+        form = self.sheet_ts.form_new_entry()
+        entry = {'Participant_ID' : 'CE0004', 'Age' : 55,
+                 'Taille' : 1.6, 'Date' : date(2010,1,3),
+                 'Phone_Number' : '555'}
+        form.set_values_from_entry(entry)
+        self.assertFalse(form.is_valid())
+
 
     def test_to_pdf(self):
         pdf_fn = op.join(self.tmp_dir, 'sheet.pdf')
@@ -3025,7 +3055,8 @@ class TestDataSheet(unittest.TestCase):
 
         entry_to_update = self.sheet_ts.df.iloc[1].name
         previous_pid = self.sheet_ts.df.loc[entry_to_update, 'Participant_ID']
-        previous_update_idx = self.sheet_ts.df.loc[entry_to_update, '__update_idx__']
+        previous_update_idx = self.sheet_ts.df.loc[entry_to_update,
+                                                   '__update_idx__']
         self.assertTrue(self.sheet_ts.df.groupby('Participant_ID')
                         .__origin_id__.nunique().eq(1).all())
         logger.debug('-------------------------')
@@ -3049,6 +3080,7 @@ class TestDataSheet(unittest.TestCase):
         ts_before_submit = datetime.now()
         self.assertEqual(type(form['section1']['__origin_id__'].get_value()),
                          np.int64)
+
         time.sleep(0.1)
         logger.debug('-----------------')
         logger.debug('utest: submit form')
@@ -3056,8 +3088,9 @@ class TestDataSheet(unittest.TestCase):
 
         self.assertTrue(self.sheet_ts.df.groupby('Participant_ID')
                         .__origin_id__.nunique().eq(1).all())
+        
         self.assertEqual(self.sheet_ts.df.tail(1)['__update_idx__'].iat[0],
-                         previous_update_idx + 1)
+                         previous_update_idx + np.int64(1))
         entry_id = form['section1']['__entry_id__'].get_value()
         last_entry = self.sheet_ts.df.tail(1)
         self.assertEqual(last_entry.index, entry_id)
@@ -3155,7 +3188,6 @@ class TestDataSheet(unittest.TestCase):
         self.sheet_ts.reload_all_data()
         self.assertTrue(self.sheet_ts.df.index.is_unique)
         self.assertEqual(self.sheet_ts.df.loc[entry_to_modify, 'Age'], 77)
-
 
 
     def test_form_folder_removal(self):
@@ -4584,11 +4616,15 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
                          'eval_OK')
 
-        #TODO Delete pp
-        if 0:
-            sh_pp.delete_entry(sh_pp.df.iloc[1].name)
-            self.assertEqual(wb['Dashboard'].df.shape, (2,2))
+        print("wb['Dashboard'].df (%s) before delete_entry:",
+              wb['Dashboard'].df.shape)
+        print(wb['Dashboard'].df)
+        sh_pp.delete_entry(sh_pp.df.iloc[1].name)
+        print("wb['Dashboard'].df (%s) after delete_entry:",
+              wb['Dashboard'].df.shape)
+        print(wb['Dashboard'].df)
 
+        self.assertEqual(wb['Dashboard'].df.shape, (2,2))
 
     def test_dashboard_interview_track(self):
         # Create empty workbook
@@ -5211,7 +5247,7 @@ class FormItem:
     def validate_unique(self, key, value):
         if self.unique:
             if self.unique_validator is None:
-                logger.debug('Cannot check uniqueness of %s (not validator set)',
+                logger.debug('Cannot check uniqueness of %s (no validator set)',
                              key)
                 return True
             else:
@@ -6889,6 +6925,12 @@ class DataSheetModel(QtCore.QAbstractTableModel):
             if role == QtCore.Qt.DisplayRole:
                 return value_str
             else:
+                if role == QtCore.Qt.BackgroundRole:
+                    validity = self.view_validity().iloc[index.row(),
+                                                         index.column()]
+                    if not validity:
+                        return QtGui.QColor('#9C0006')
+
                 hint = self.sheet.plugin.hint(column, value)
                 if hint is not None:
                     if role == QtCore.Qt.BackgroundRole:
@@ -6899,11 +6941,6 @@ class DataSheetModel(QtCore.QAbstractTableModel):
                         return hint.qicon
                     elif role == QtCore.Qt.ToolTipRole:
                         return hint.message
-                if role == QtCore.Qt.BackgroundRole:
-                    validity = self.view_validity().iloc[index.row(),
-                                                         index.column()]
-                    if not validity:
-                        return QtGui.QColor('#9C0006')
 
         return None
 
@@ -6924,7 +6961,31 @@ class DataSheetModel(QtCore.QAbstractTableModel):
     def update_after_append(self):
         self.beginInsertRows(QtCore.QModelIndex(), self.rowCount(),
                              self.rowCount())
+        # TODO: proper callback to actual data change here
         self.endInsertRows()
+        return True
+
+    @QtCore.pyqtSlot()
+    def update_after_delete(self, entry_id):
+        view = self.get_df_view()
+        irow = view.index.get_loc(entry_id)
+        logger.debug('update_after_delete(%d) -> irow = %d',
+                     entry_id, irow)
+        self.layoutAboutToBeChanged.emit()
+        self.beginRemoveRows(QtCore.QModelIndex(), irow, irow)
+        # TODO: proper callback to actual data change here
+        self.endRemoveRows()
+        self.layoutChanged.emit()
+        return True
+
+    @QtCore.pyqtSlot()
+    def update_after_set(self, entry_id):
+        view = self.get_df_view()
+        irow = view.index.get_loc(entry_id)
+        ncols = view.shape[1]
+        self.dataChanged.emit(self.createIndex(irow,0),
+                              self.createIndex(irow,ncols-1))
+        return True
 
 def dict_lazy_setdefault(d, k, make_value):
     # TODO: ustest
@@ -7515,18 +7576,13 @@ class PiccelApp(QtWidgets.QApplication):
 
             model = DataSheetModel(sh)
             sh.notifier.add_watcher('appended_entry', model.update_after_append)
+            sh.notifier.add_watcher('set_entry', model.update_after_set)
+            sh.notifier.add_watcher('deleted_entry', model.update_after_delete)
             # TODO: watch entry modification
             _data_sheet_ui.tableView.setModel(model)
             _data_sheet_ui.tableView.horizontalHeader().setMaximumSectionSize(500) # TODO expose param
             _data_sheet_ui.tableView.resizeColumnsToContents()
 
-            # def f_update_entry(idx):
-            #     entry_id = model.entry_id(idx)
-            #     logger.debug('update_entry: idx.row=%s, entry_id=%s',
-            #                  idx.row(), entry_id)
-            #     self.make_form_tab(sh_name, model, _data_sheet_ui,
-            #                        self._workbook_ui.tabWidget,
-            #                        form=sh.form_update_entry(entry_id))
             def f_cell_action(idx):
                 row_df = sh.get_df_view().iloc[[idx.row()]]
                 action_result = sh.plugin.action(row_df,
@@ -7554,6 +7610,14 @@ class PiccelApp(QtWidgets.QApplication):
                 self.make_form_tab(sh_name, model, _data_sheet_ui,
                                    self._workbook_ui.tabWidget,
                                    form=sh.form_set_entry(entry_id))
+
+            def f_delete_entry():
+                idx = _data_sheet_ui.tableView.currentIndex()
+                entry_id = model.entry_id(idx)
+                logger.debug('delete_entry: idx.row=%s, entry_id=%s',
+                             idx.row(), entry_id)
+                sh.delete_entry(entry_id)
+
             if not sh.dynamic_only: #TODO: and user is admin
                 _data_sheet_ui.button_edit_entry.clicked.connect(f_edit_entry)
             else:
@@ -7562,14 +7626,18 @@ class PiccelApp(QtWidgets.QApplication):
             f_new_entry = lambda : self.make_form_tab(sh_name, model, _data_sheet_ui,
                                                       self._workbook_ui.tabWidget,
                                                       form=sh.form_new_entry())
+
             if not sh.dynamic_only or not self.logic.workbook.has_write_access: #TODO: and user is admin
                 _data_sheet_ui.button_new_entry.clicked.connect(f_new_entry)
+                (_data_sheet_ui.button_delete_entry
+                 .clicked.connect(f_delete_entry))
                 # new_entry_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("N"),
                 #                                      sheet_widget)
                 # new_entry_shortcut.activated.connect(f_new_entry)
             else:
                 _data_sheet_ui.button_new_entry.hide()
 
+                
             _data_sheet_ui.comboBox_view.addItems(list(sh.views.keys()))
             _data_sheet_ui.comboBox_view.setCurrentText(sh.default_view)
             f = SheetViewChanger(_data_sheet_ui.comboBox_view, model)

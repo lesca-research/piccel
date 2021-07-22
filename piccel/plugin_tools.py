@@ -114,23 +114,26 @@ def filter_indexes(filter_def):
     return src_df[mask(src_df, src_col)].index
 
 
-def interview_action(entry_df, interview_column, workbook, entry_id):
+def interview_action(entry_df, interview_column, workbook):
 
-    value = entry_df[interview_column]
+    value = entry_df[interview_column].iat[0]
     if value=='' or pd.isna(value) or value is None or \
        interview_column.endswith('_Date') or interview_column.endswith('_Staff'):
         return None
 
     interview_label = interview_column
-    # TODO: there is no entry_id here: grab the lastest one from interview_sheet!
-    # TODO: new form is no previous one
     interview_sheet = workbook[interview_label]
-    if entry_id is None:
-        form = interview_sheet.form_new_entry()
-    else:
-        form = interview_sheet.form_update_entry(entry_id)
 
-    form_entry = {'Participant_ID' : entry_df['Participant_ID']}
+    latest_interviews = interview_sheet.get_df_view('latest')
+    assert(latest_interviews.index.name == 'Participant_ID')
+    participant_id = entry_df.index[0]
+    if participant_id in latest_interviews.index:
+        entry_id = latest_interviews.loc[participant_id, '__entry_id__']
+        form = interview_sheet.form_update_entry(entry_id)
+    else:
+        form = interview_sheet.form_new_entry()
+
+    form_entry = {'Participant_ID' : participant_id}
     if value.endswith('_not_scheduled') or value.endswith('_cancelled'):
         form_entry.update({
             'Action' : 'plan',
