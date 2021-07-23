@@ -114,46 +114,36 @@ def filter_indexes(filter_def):
     return src_df[mask(src_df, src_col)].index
 
 
-def interview_action(entry_df, interview_column, workbook):
+def interview_action(entry_series, interview_column, workbook):
 
-    value = entry_df[interview_column].iat[0]
-    if value=='' or pd.isna(value) or value is None or \
-       interview_column.endswith('_Date') or interview_column.endswith('_Staff'):
+    from IPython import embed; embed()
+    value = entry_series[interview_column]
+    if value=='' or pd.isna(value) or value is None:
         return None
 
-    interview_label = interview_column
-    interview_sheet = workbook[interview_label]
-
-    latest_interviews = interview_sheet.get_df_view('latest')
-    assert(latest_interviews.index.name == 'Participant_ID')
-    participant_id = entry_df.index[0]
-    if participant_id in latest_interviews.index:
-        entry_id = latest_interviews.loc[participant_id, '__entry_id__']
-        form = interview_sheet.form_update_entry(entry_id)
+    form = None
+    if interview_column.endswith('_Date'):
+        # if value.endswith('_not_scheduled') or value.endswith('_cancelled'):
+        # elif value.endswith('_scheduled') or value.endswith('_email_pending') or \
+        #  value.endswith('_email_sent') or value.endswith('_email_error') or \
+        #  value.endswith('_ok') or value.endswith('_redo'):
+        raise NotImplementedError()
+    elif interview_column.endswith('_Staff'):
+        raise NotImplementedError()
     else:
+
+        # TODO: create gform for Pre_Screening_Session and import it
+
+        interview_label = interview_column
+        interview_sheet = workbook[interview_label]
         form = interview_sheet.form_new_entry()
-
-    form_entry = {'Participant_ID' : participant_id}
-    if value.endswith('_not_scheduled') or value.endswith('_cancelled'):
-        form_entry.update({
-            'Action' : 'plan',
-            'Send_Email' : True,
-            'Email_Status' : 'to_send',
-            'Email_Date' : 'days_before_2',
-            'Email_Template' : interview_label,
-        })
-    elif value.endswith('_scheduled') or value.endswith('_email_pending') or \
-         value.endswith('_email_sent') or value.endswith('_email_error') or \
-         value.endswith('_ok') or value.endswith('_redo'):
-        form_entry.update({
-            'Action' : 'do_session',
-            'Send_email' : False,
-            'Email_Status' : None,
-            'Email_Date' : 'days_before_2',
-            'Email_Template' : interview_label + '_remind'
+        participant_id = entry_series.name
+        form.set_values_from_entry({
+            'Participant_ID' : participant_id,
+            'Session_Action' : 'do_session',
+            'Staff' : interview_sheet.user
         })
 
-    form.set_values_from_entry(form_entry)
     return form
 
 DATE_FMT = '%Y-%m-%d %H:%M:%S'
@@ -272,14 +262,14 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     if interview_df is None:
         interview_df = (pd.DataFrame(columns=['Participant_ID', 'Staff',
-                                             'Action', 'Session_Status',
+                                             'Session_Action', 'Session_Status',
                                              'Timestamp'])
                         .set_index('Participant_ID'))
     plan_df = (workbook[plan_sheet_label].get_df_view('latest') \
                if workbook.has_sheet(plan_sheet_label) else None)
 
     if plan_df is None:
-        plan_df = (pd.DataFrame(columns=['Participant_ID', 'Staff', 'Action',
+        plan_df = (pd.DataFrame(columns=['Participant_ID', 'Staff', 'Plan_Action',
                                          'Interview_Type', 'Interview_Date',
                                          'Availability', 'Send_Email',
                                          'Email_Schedule', 'Email_Template',
@@ -302,13 +292,13 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     def set_date_from_plan(pids):
 
-        availability = plan_df[((plan_df['Action']=='plan') & \
+        availability = plan_df[((plan_df['Plan_Action']=='plan') & \
                                 (~pd.isna(plan_df['Availability'])))]
         common_index = set(pids).intersection(availability.index)
         dashboard_df.loc[common_index, column_date] = \
             availability.loc[common_index, 'Availability']
 
-        planned = plan_df[((plan_df['Action']=='plan') & \
+        planned = plan_df[((plan_df['Plan_Action']=='plan') & \
                            (~pd.isna(plan_df['Interview_Date'])))]
         common_index = set(pids).intersection(planned.index)
 
@@ -317,7 +307,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         dashboard_df.loc[common_index, column_date] = dates
 
     def set_date_from_interview(pids):
-        done = interview_df[((interview_df['Action']!='cancel_session') & \
+        done = interview_df[((interview_df['Session_Action']!='cancel_session') & \
                              ((interview_df['Session_Status']=='done') | \
                               (interview_df['Session_Status']=='redo')))]
         common_index = set(pids).intersection(done.index)
@@ -374,7 +364,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         interview_df.loc[pids_interview, 'Staff']
 
     # Status
-    dashboard_df.loc[common_index, column_status] = default_status
+    dashboard_df.loc[pids, column_status] = default_status
 
     if 1:
         print('dashboard_df before map_set')
@@ -385,23 +375,23 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
     logger.debug('Set interview status from %s', plan_sheet_label)
     map_set(dashboard_df, column_status,
             {'%s_scheduled' % interview_tag:
-             And((plan_df_selected, 'Action', ['plan']),
+             And((plan_df_selected, 'Plan_Action', ['plan']),
                  (plan_df_selected, 'Send_Email', [False])),
              '%s_email_pending' % interview_tag:
-             And((plan_df_selected, 'Action', ['plan']),
+             And((plan_df_selected, 'Plan_Action', ['plan']),
                  (plan_df_selected, 'Send_Email', [True]),
                  (plan_df_selected, 'Email_Status', ['to_send'])),
              '%s_email_sent' % interview_tag:
-             And((plan_df_selected, 'Action', ['plan']),
+             And((plan_df_selected, 'Plan_Action', ['plan']),
                  (plan_df_selected, 'Send_Email', [True]),
                  (plan_df_selected, 'Email_Status', ['sent'])),
              '%s_email_error' % interview_tag:
-             And((plan_df_selected, 'Action', ['plan']),
+             And((plan_df_selected, 'Plan_Action', ['plan']),
                  (plan_df_selected, 'Send_Email', [True]),
                  (plan_df_selected, 'Email_Status', ['error'])),
             })
 
-    if 0:
+    if 1:
         print('dashboard_df after map_set from plan_df')
         print(dashboard_df)
 
@@ -410,15 +400,15 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
     logger.debug('Set interview status from %s', interview_label)
     map_set(dashboard_df, column_status,
             {'%s_ok' % interview_tag:
-             And((interview_df_selected, 'Action', ['do_session']),
+             And((interview_df_selected, 'Session_Action', ['do_session']),
                  (interview_df_selected, 'Session_Status', ['done'])),
              '%s_redo' % interview_tag:
-             And((interview_df_selected, 'Action', ['do_session']),
+             And((interview_df_selected, 'Session_Action', ['do_session']),
                  (interview_df_selected, 'Session_Status', ['redo'])),
              '%s_cancelled' % interview_tag:
-             (interview_df_selected, 'Action', ['cancel_session'])
+             (interview_df_selected, 'Session_Action', ['cancel_session'])
             })
-    if 0:
+    if 1:
         print('dashboard_df after map_set from interview_df')
         print(dashboard_df)
 

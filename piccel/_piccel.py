@@ -637,11 +637,22 @@ function snakeCaseToCamelCase(s) {
 
             return label, title
 
+        def extract_transitions(gdict):
+            TRANSITION_TAG = '##transitions'
+            transitions = None
+            description = gdict.get('description', None)
+            if description is not None and description.startswith(TRANSITION_TAG):
+                transitions = eval(description.lstrip(TRANSITION_TAG).strip())
+                gdict.pop('description')
+                # TODO: do not completely remove description,
+                #       remove only transition definition
+            return transitions
 
         with open(json_fn, 'r') as fin:
             gform_dict = json.load(fin)
-        print('gform_dict:')
-        pprint(gform_dict)
+        if 0:
+            print('gform_dict:')
+            pprint(gform_dict)
 
         section_label = '__section_0__'
         section_dict = {'items' : [],
@@ -649,7 +660,7 @@ function snakeCaseToCamelCase(s) {
                         'supported_languages' : {language}}
         sections = {section_label : section_dict}
         for item_gdict in gform_dict['items']:
-            print('Convert gform item %s' % pformat(item_gdict))
+            # print('Convert gform item %s' % pformat(item_gdict))
             if item_gdict['type'] == 'PAGE_BREAK':
                 slabel, stitle = get_label(item_gdict['title'], section_gen_label)
                 section_dict = {'title' : {language: stitle},
@@ -658,6 +669,7 @@ function snakeCaseToCamelCase(s) {
                                 'items' : []}
                 sections[slabel] = section_dict
             else:
+                transitions = extract_transitions(item_gdict)
                 item_title = item_gdict['title']
                 item_choices = None
                 other_choice_label = None
@@ -701,6 +713,7 @@ function snakeCaseToCamelCase(s) {
                                               'nb_lines' : nb_lines,
                                               'other_choice_label' : \
                                               other_choice_label})
+                section_dict['transitions'] = transitions
 
         return Form({sn : FormSection.from_dict(sd) \
                      for sn,sd in sections.items()},
@@ -4683,7 +4696,7 @@ class TestWorkBook(unittest.TestCase):
                                    },
                           default_language='French',
                           allow_empty=True),
-                 FormItem(keys={'Action':None},
+                 FormItem(keys={'Plan_Action':None},
                           vtype='text', supported_languages={'French'},
                           default_language='French',
                           choices={'plan':{'French':'Plannifier un rendez-vous'},
@@ -4752,11 +4765,10 @@ class TestWorkBook(unittest.TestCase):
                           default_language='French',
                           supported_languages={'French'},
                           allow_empty=False),
-                 FormItem(keys={'Action':None},
+                 FormItem(keys={'Session_Action':None},
                           vtype='text', supported_languages={'French'},
                           default_language='French',
-                          choices={'plan':{'French':'Plannifier'},
-                                   'do_session':{'French':'Réaliser la séance'},
+                          choices={'do_session':{'French':'Réaliser la séance'},
                                    'cancel_session':
                                    {'French':'Annuler la séance'}},
                           allow_empty=False),
@@ -4821,7 +4833,7 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Assign staff for %s --------' % pid)
         ts = datetime(2021,9,10,10,10)
         sh_plan.add_new_entry({'Participant_ID' : pid,
-                               'Action' : 'assign_staff',
+                               'Plan_Action' : 'assign_staff',
                                'Staff' : 'Thomas Vincent',
                                'Interview_Type' : 'Eval',
                                'Interview_Date' : None,
@@ -4838,7 +4850,7 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11)
         sh_plan.add_new_entry({'Participant_ID' : pid,
-                              'Action' : 'plan',
+                              'Plan_Action' : 'plan',
                               'Staff' : 'Thomas Vincent',
                               'Interview_Type' : 'Eval',
                               'Interview_Date' : idate,
@@ -4856,7 +4868,7 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11,30)
         sh_plan.add_new_entry({'Participant_ID' : pid,
-                              'Action' : 'plan',
+                              'Plan_Action' : 'plan',
                               'Staff' : 'Thomas Vincent',
                               'Interview_Type' : 'Eval',
                               'Interview_Date' : None,
@@ -4875,7 +4887,7 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,12)
         sh_plan.add_new_entry({'Participant_ID' : pid,
-                              'Action' : 'plan',
+                              'Plan_Action' : 'plan',
                               'Staff' : 'Thomas Vincent',
                               'Interview_Type' : 'Eval',
                               'Interview_Date' : idate,
@@ -4894,7 +4906,7 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,13)
         sh_plan.add_new_entry({'Participant_ID' : pid,
-                              'Action' : 'plan',
+                              'Plan_Action' : 'plan',
                               'Staff' : 'Thomas Vincent',
                               'Interview_Type' : 'Eval',
                               'Interview_Date' : idate,
@@ -4914,7 +4926,7 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,14)
         sh_plan.add_new_entry({'Participant_ID' : pid,
-                              'Action' : 'plan',
+                              'Plan_Action' : 'plan',
                               'Staff' : 'Thomas Vincent',
                               'Interview_Type' : 'Eval',
                               'Interview_Date' : idate,
@@ -4932,7 +4944,7 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,16)
         sh_eval.add_new_entry({'Participant_ID' : pid,
-                              'Action' : 'do_session',
+                              'Plan_Action' : 'do_session',
                               'Staff' : 'Thomas Vincent',
                               'Session_Status' : 'done',
                               'Timestamp' : ts})
@@ -4947,7 +4959,7 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,17)
         sh_eval.add_new_entry({'Participant_ID' : pid,
-                              'Action' : 'do_session',
+                              'Plan_Action' : 'do_session',
                               'Staff' : 'Thomas Vincent',
                               'Session_Status' : 'redo',
                               'Timestamp' : ts})
@@ -4963,7 +4975,7 @@ class TestWorkBook(unittest.TestCase):
         ts = datetime(2021,9,10,10,18)
         sh_eval.add_new_entry({'Participant_ID' : pid,
                               'Staff' : 'Thomas Vincent',
-                              'Action' : 'cancel_session',
+                              'Plan_Action' : 'cancel_session',
                               'Timestamp' : ts})
         self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
                          'eval_cancelled')
@@ -7479,11 +7491,11 @@ class PiccelApp(QtWidgets.QApplication):
                 else:
                     _section_ui.frame_title.hide()
                 for item in section.items:
-                    if self.logic.workbook.user_role == UserRole.ADMIN or \
-                       not item.hidden or \
-                       (self.logic.workbook.user_role < UserRole.ADMIN and \
-                        len(item.keys)>0 and \
-                        not next(iter(item.keys.keys())).startswith('__')):
+                    if self.logic.workbook.user_role >= UserRole.ADMIN or \
+                       ((len(item.keys)==0 or \
+                         not next(iter(item.keys.keys())).startswith('__')) and \
+                        ((not item.hidden) or \
+                         self.logic.workbook.user_role >= UserRole.MANAGER)):
                         item_widget = make_item_widget(section_widget, item)
                         _section_ui.verticalLayout.addWidget(item_widget)
                 section_widgets[section_label] = section_widget
