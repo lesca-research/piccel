@@ -7597,8 +7597,8 @@ class PiccelApp(QtWidgets.QApplication):
 
             def f_cell_action(idx):
                 row_df = sh.get_df_view().iloc[[idx.row()]]
-                action_result = sh.plugin.action(row_df,
-                                                 row_df.columns[idx.column()])
+                column = row_df.columns[idx.column()-(row_df.index.name is not None)]
+                action_result = sh.plugin.action(row_df, column)
                 if isinstance(action_result, Form):
                     self.make_form_tab(sh_name, model, _data_sheet_ui,
                                        self._workbook_ui.tabWidget,

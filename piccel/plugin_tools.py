@@ -114,10 +114,10 @@ def filter_indexes(filter_def):
     return src_df[mask(src_df, src_col)].index
 
 
-def interview_action(entry_series, interview_column, workbook):
+def interview_action(entry_df, interview_column, workbook):
 
-    from IPython import embed; embed()
-    value = entry_series[interview_column]
+
+    value = entry_df[interview_column].iat[0]
     if value=='' or pd.isna(value) or value is None:
         return None
 
@@ -137,7 +137,7 @@ def interview_action(entry_series, interview_column, workbook):
         interview_label = interview_column
         interview_sheet = workbook[interview_label]
         form = interview_sheet.form_new_entry()
-        participant_id = entry_series.name
+        participant_id = entry_df.index.values[0]
         form.set_values_from_entry({
             'Participant_ID' : participant_id,
             'Session_Action' : 'do_session',
