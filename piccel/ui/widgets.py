@@ -89,7 +89,7 @@ from PyQt5.QtWidgets import QApplication, QHeaderView, QTableView
 
 
 import logging
-logger = logging.getLogger('Sheeter')
+logger = logging.getLogger('piccel')
 
 class FreezeTableWidget(QTableView):
     def __init__(self, parent):
@@ -106,9 +106,14 @@ class FreezeTableWidget(QTableView):
     def setModel(self, model):
         super(FreezeTableWidget, self).setModel(model)
         self.frozenTableView.setModel(model)
-        for col in range(1, model.columnCount()):
-            self.frozenTableView.setColumnHidden(col, True)
+        self.model = model
+        model.layoutChanged.connect(self.hide_columns)
+        self.hide_columns()
         self.frozenTableView.setSelectionModel(self.selectionModel())
+
+    def hide_columns(self):
+        for col in range(1, self.model.columnCount()):
+            self.frozenTableView.setColumnHidden(col, True)
 
     def init(self):
         self.frozenTableView.setFocusPolicy(Qt.NoFocus)
@@ -147,8 +152,7 @@ class FreezeTableWidget(QTableView):
     def moveCursor(self, cursorAction, modifiers):
         current = super(FreezeTableWidget, self).moveCursor(cursorAction,
                                                             modifiers)
-        if (cursorAction == self.MoveLeft and 
-            current.column() > 0 and
+        if (cursorAction == self.MoveLeft and current.column() > 0 and
             self.visualRect(current).topLeft().x() <
             self.frozenTableView.columnWidth(0)):
             newValue = (self.horizontalScrollBar().value() +
