@@ -65,9 +65,11 @@ from . import ui
 from appdirs import user_data_dir
 
 logger = logging.getLogger('piccel')
-logging.basicConfig(stream=sys.stdout,
-                    format='%(asctime)s %(levelname)-8s %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S')
+console_handler = logging.StreamHandler(stream=sys.stdout)
+fmt = '%(name)s | %(asctime)s %(levelname)-8s  %(message)s'
+console_handler.setFormatter(logging.Formatter(fmt=fmt,
+                                               datefmt='%Y-%m-%d %H:%M:%S'))
+logger.addHandler(console_handler)
 
 # For DataSheet export to pdf:
 HTML_TOP = '''
@@ -468,6 +470,12 @@ function snakeCaseToCamelCase(s) {
 
     def __init__(self, sections, default_language, supported_languages,
                  title='', watchers=None):
+        """
+        - sections:
+          IMPORTANT: if no next_section_definition is given, then use the next section
+                     in order. If section is last then consider that the form can be 
+                     submitted afterwards.
+        """
         self.notifier = Notifier(watchers)
 
         self.tr = Translator(default_language=default_language,
@@ -484,13 +492,27 @@ function snakeCaseToCamelCase(s) {
         self.to_freeze_on_update = set()
 
         self.key_to_items = defaultdict(list)
-        for section_name, section in sections.items():
+        section_names = list(sections.keys())
+        for i_section, (section_name, section) in enumerate(sections.items()):
             section.notifier.add_watcher('section_valid',
                                          LazyFunc(self.on_section_is_valid,
                                                   section_name, section))
             section.notifier.add_watcher('section_invalid',
                                          LazyFunc(self.on_section_is_invalid,
                                                   section_name, section))
+            if section.next_section_definition is None:
+                next_section = (section_names[i_section+1]
+                                if i_section+1 < len(section_names)
+                                else '__submit__')
+                logger.debug('Set default next section of %s to %s',
+                             section_name, next_section)
+                section.set_next_section_definition(next_section)
+                print('!!!! section.next_section_predicates:',
+                      section.next_section_predicates)
+            else:
+                logger.debug('Kept next section definition for %s: %s',
+                             section_name, section.next_section_definition)
+
             for item in section.items:
                 for key in item.keys:
                     self.key_to_items[key].append(item)
@@ -541,26 +563,25 @@ function snakeCaseToCamelCase(s) {
             logger.debug(' - other form: %s', pformat(od))
         return isinstance(other, Form) and self.to_dict()==other.to_dict()
 
+    def set_transitions(self, next_section_definitions):
+        for section_name, section_transitions in next_section_definitions.items():
+            logger.debug('Set transitions of section %s', section_name)
+            if section_transitions is not None:
+                if isinstance(section_transitions, str) or section_transitions is None:
+                    section_transitions = [section_transitions]
+                for section_transition in section_transitions:
+                    logger.debug('Check transition definition: %s', section_transition)
+                    if isinstance(section_transition, str) or section_transition is None:
+                        next_section_label = section_transition
+                    else:
+                        _, next_section_label = section_transition
+                    assert( (next_section_label is None)
+                            or (next_section_label=='__submit__')
+                            or (next_section_label in self.sections))
+            self[section_name].set_next_section_definition(section_transitions)
+
     def first_section(self):
         return next(iter(self.sections))
-
-    # def new_df(self):
-    #     current_section = self[self.section_path[0]]
-    #     stem_dict = {}
-    #     index = None
-    #     while current_section is not None:
-    #         for item in current_section.items:
-    #             if item.keys is not None:
-    #                 dtype = item.dtype_pd
-    #                 for key in item.keys:
-    #                     stem_dict[key] = pd.Series([], dtype=dtype)
-    #         next_section = self.next_section()
-    #         current_section = self[next_section] if next_section is not None else None
-
-    #     df = pd.DataFrame(stem_dict)
-    #     if index is not None:
-    #         df.set_index(index, inplace=True)
-    #     return df
 
     def _prepend(self, key, value, vtype, hidden=True, editable=False):
         section0 = next(iter(self.sections.values()))
@@ -617,7 +638,7 @@ function snakeCaseToCamelCase(s) {
                 protected_label = protected_label.replace(*repl)
             if not protected_label.isidentifier():
                 raise BadLabelFormat(label)
-            return protected_label.lower()
+            return protected_label
 
         def get_label(label, gen_default=None, protect=True):
             sep = '::'
@@ -636,17 +657,6 @@ function snakeCaseToCamelCase(s) {
                 label = protect_label(label)
 
             return label, title
-
-        def extract_transitions(gdict):
-            TRANSITION_TAG = '##transitions'
-            transitions = None
-            description = gdict.get('description', None)
-            if description is not None and description.startswith(TRANSITION_TAG):
-                transitions = eval(description.lstrip(TRANSITION_TAG).strip())
-                gdict.pop('description')
-                # TODO: do not completely remove description,
-                #       remove only transition definition
-            return transitions
 
         with open(json_fn, 'r') as fin:
             gform_dict = json.load(fin)
@@ -669,7 +679,6 @@ function snakeCaseToCamelCase(s) {
                                 'items' : []}
                 sections[slabel] = section_dict
             else:
-                transitions = extract_transitions(item_gdict)
                 item_title = item_gdict['title']
                 item_choices = None
                 other_choice_label = None
@@ -713,7 +722,6 @@ function snakeCaseToCamelCase(s) {
                                               'nb_lines' : nb_lines,
                                               'other_choice_label' : \
                                               other_choice_label})
-                section_dict['transitions'] = transitions
 
         return Form({sn : FormSection.from_dict(sd) \
                      for sn,sd in sections.items()},
@@ -827,7 +835,7 @@ function snakeCaseToCamelCase(s) {
         self.validate()
 
     def validate(self):
-        current_section_is_final = self.current_section.next() is None
+        current_section_is_final = self.current_section.next() == '__submit__'
         # validity = (self.nb_valid_sections == len(self.section_path)) and \
         #     current_section_is_final
         validity = current_section_is_final and \
@@ -840,8 +848,7 @@ function snakeCaseToCamelCase(s) {
         logger.debug('%s notifies %s', self, signal)
         self.notifier.notify(signal)
 
-        if self.current_section.next() is None or \
-           not self.current_section.is_valid():
+        if current_section_is_final or not self.current_section.is_valid():
             signal = 'next_section_not_available'
         else:
             signal = 'next_section_available'
@@ -919,22 +926,29 @@ function snakeCaseToCamelCase(s) {
                      self.tr['title'])
         current_section_name, current_section = next(iter(self.sections.items()))
         entry = {}
-        while current_section is not None:
+        while current_section_name != '__submit__':
             section_items = current_section.submit()
             for k,v in section_items.items():
                 if k in entry:
                     logger.warning('Duplicate input for key %s while submitting '\
-                                   'form %s', k, self.title)
+                                   'form %s', k, self.tr['title'])
                 entry[k] = v
             if logger.level >= logging.DEBUG:
                 logger.debug('Collected values from section "%s" for keys: %s',
                              current_section_name, ', '.join(section_items))
             next_section_name = current_section.next()
-            if next_section_name is not None and \
-               next_section_name not in self.sections:
-                raise SectionNotFound(next_section_name)
-            current_section = self.sections.get(next_section_name, None)
-            current_section_name = next_section_name
+            if next_section_name == '__submit__':
+                current_section_name = '__submit__'
+                current_section = None
+            else:
+                if next_section_name is not None and  \
+                   next_section_name not in self.sections:
+                    raise SectionNotFound(next_section_name)
+                current_section = self.sections.get(next_section_name, None)
+                if current_section is None:
+                    raise InvalidForm('No next section defined for section %s' % \
+                                      current_section_name)
+                current_section_name = next_section_name
         if self.on_submission is None:
             logger.warning('No submission function set for form %s', self)
         else:
@@ -953,7 +967,7 @@ function snakeCaseToCamelCase(s) {
 
     def ready_to_submit(self):
         try:
-            return self.next_section() is None and self.is_valid()
+            return self.next_section() == '__submit__' and self.is_valid()
         except InvalidValue:
             return False
 
@@ -968,7 +982,7 @@ class Predicate:
         return self.code
 
     def __call__(self, key_values):
-        result = eval(self.code, key_values)
+        result = eval(self.code, {}, key_values)
         if not isinstance(result, bool):
             raise InvalidPredicateResult('Result "%s" is not bool' % result)
         return result
@@ -987,10 +1001,23 @@ class TestPredicate(unittest.TestCase):
 class FormSection:
 
     def __init__(self, items, default_language, supported_languages,
-                 title='', default_next_section=None, transitions=None,
-                 watchers=None):
+                 title='', next_section_definition=None, watchers=None):
         """
-        When next section is None, it means that the form should be submitted
+        - next_section_definition:
+            Type: None | str | list(None | str | tuple(str, str, None | str)
+            Define how to get the next section as a list of criterions, whose
+            first matching one is used. If nothing matches, then there is no
+            next section and the form cannot be submitted.
+            * None: No next section and form cannot be submitted
+            * str: The label of the next section or '__submit__' to indicate submission.
+            * tuple(str, '__submit__' | str):
+                  tuple(predicate_code, '__submit__' | section_label)
+                  Define a criterion depending on actual values, associated with
+                  a section_label or '__submit__'.
+                  A predicate code is evaluated by eval(predicate_code, key_vals_dict)
+                  and must return a boolean.
+            By default, next_section_definition is None, meaning that a section cannot
+            be submitted (safer to explicitely indicate when submission is ready).
         """
         self.notifier = Notifier(watchers if watchers is not None else {})
         self.validity = None
@@ -1009,18 +1036,33 @@ class FormSection:
                                         'item_invalid':
                                         [LazyFunc(self.on_item_invalid)]})
 
-        self.default_next_section = default_next_section
-
         self.tr = Translator(default_language=default_language,
                              supported_languages=supported_languages)
         self.tr.register('title', title)
 
-        self.transitions = transitions
-        # print('!!!!!! %s:, transitions: %s' % (self, transitions))
+        self.set_next_section_definition(next_section_definition)
+
         self.check_validity()
 
+    def set_next_section_definition(self, next_section_definition):
+        self.next_section_definition = next_section_definition
+        self.next_section_predicates = []
+        predicate_always_true = Predicate('True')
+        if next_section_definition is None or isinstance(next_section_definition, str):
+            self.next_section_predicates.append((next_section_definition,
+                                                 predicate_always_true))
+        else:
+            for criterion in self.next_section_definition:
+                if criterion is None or isinstance(criterion, str):
+                    self.next_section_predicates.append((criterion,
+                                                         predicate_always_true))
+                else:
+                    predicate_code, next_section = criterion
+                    self.next_section_predicates.append((next_section,
+                                                         Predicate(predicate_code)))
+
     def _prepend(self, item):
-        """ WARNING: no notification associated with item """ 
+        """ WARNING: no notification associated with item """
         self.items.insert(0, item)
         for key in item.keys:
             assert(key not in self.key_to_items)
@@ -1039,8 +1081,7 @@ class FormSection:
         items = [make_item(sd) for sd in d['items']]
         return FormSection(items, d['default_language'],
                            d['supported_languages'], d.get('title', ''),
-                           d.get('default_next_section', None),
-                           d.get('transitions', None))
+                           d.get('next_section_definition', None))
 
     def on_item_valid(self):
         self.nb_valid_items = min(len(self.items), self.nb_valid_items+1)
@@ -1073,8 +1114,7 @@ class FormSection:
                 'items' : [i.to_dict() for i in self.items],
                 'default_language' : self.tr.language,
                 'supported_languages' : list(self.tr.supported_languages),
-                'default_next_section' : self.default_next_section,
-                'transitions' : self.transitions}
+                'next_section_definition' : self.next_section_definition}
 
     def set_language(self, language):
         logger.debug('Set %s as section language', language)
@@ -1093,21 +1133,25 @@ class FormSection:
             item.reset()
 
     def next(self):
-        if self.transitions is not None:
-            for item_key, predicate, next_section in self.transitions:
-                logger.debug('Checking conditional transition to %s depending '\
-                             'on value of %s', next_section, item_key,)
-                try:
-                    if predicate(self[item_key].get_value()):
-                        logger.debug('Section %s, transition will be to %s',
-                                     self, next_section)
-                        return next_section
-                except InvalidValue:
-                    logger.debug('Transition to %s not verified because '\
-                                 'value of %s is invalid', next_section, item_key)
-        logger.debug('Section %s, transition will be to default one (%s)',
-                     self, self.default_next_section)
-        return self.default_next_section
+        current_items = {}
+        try:
+            for item in self.items:
+                current_items.update(item.get_items())
+        except InvalidValue:
+            logger.debug('Section is invalid, no transition')
+            return None
+
+        for section_label, predicate in self.next_section_predicates:
+            if predicate(current_items):
+                logger.debug('Conditional transition to %s because '\
+                             '"%s" matched', section_label, predicate.code)
+                return section_label
+            else:
+                logger.debug('No conditional transition to %s because '\
+                             '"%s" did not match', section_label, predicate.code)
+
+        logger.debug('No matching transition criterion')
+        return None
 
     def submit(self):
         d = {}
@@ -1752,8 +1796,14 @@ class DataSheet:
     def watch_other_sheet_changes(self, other_sheet):
         f = lambda : self.plugin.update(other_sheet, other_sheet.df.tail(1))
         other_sheet.notifier.add_watcher('appended_entry', f)
-        # TODO: watch set_entry
-        # TODO: watch remove_entry
+
+        fs = lambda eid : self.plugin.update(other_sheet, other_sheet.df.loc[[eid]])
+        other_sheet.notifier.add_watcher('set_entry', fs)
+
+        # TODO: better to transmit entry_df for all notifications of entry modification
+        #       -> set_entry & appended_entry
+        fd = lambda entry_df: self.plugin.update(other_sheet, entry_df, deletion=True)
+        other_sheet.notifier.add_watcher('deleted_entry', fd)
 
     def refresh_data(self):
         """
@@ -1928,7 +1978,8 @@ class DataSheet:
             "}\n"
         ))
 
-        df_html = df.style.render() # self.df.to_html(classes='wide', escape=False)
+        df_html = (df.style.hide_index().render()) # .apply(highlight_odd_row, axis=1)
+         # self.df.to_html(classes='wide', escape=False)
         html_page = HTML_TOP + df_html + HTML_BOTTOM
 
         fpdf = BytesIO()
@@ -2497,7 +2548,10 @@ class DataSheet:
     def delete_entry(self, entry_id):
         logger.debug('Sheet %s (df shape: %s): delete entry %d',
                      self.label, self.df.shape, entry_id)
+        deleted_entry = self.df.loc[[entry_id]]
+        self.notifier.notify('pre_delete_entry', entry_id)
         self.df.drop(entry_id, inplace=True)
+
         logger.debug('Sheet %s: df shape after deletion: %s',
                      self.label, self.df.shape)
 
@@ -2512,7 +2566,7 @@ class DataSheet:
                                      self.df_to_str(self.df),
                                      overwrite=True)
 
-        self.notifier.notify('deleted_entry', entry_id)
+        self.notifier.notify('deleted_entry', deleted_entry)
         self.invalidate_cached_views()
 
     def set_entry(self, entry_dict, entry_id):
@@ -4579,12 +4633,19 @@ class TestWorkBook(unittest.TestCase):
                                 (eval_df, 'Outcome', ['FAIL']))
                              })
 
-            def update(self, sheet_source, entry):
-                entry = entry.set_index('Participant_ID')
-                if sheet_source.label == self.pp.label:
-                    empty_df = pd.DataFrame([], index=entry.index)
+            def update(self, sheet_source, entry_df, deletion=False):
+                if sheet_source.label == self.pp.label and deletion:
+                    self.sheet.df.drop(index=entry_df.Participant_ID.iat[0],
+                                       inplace=True)
+                    return
+
+                entry_df = entry_df.set_index('Participant_ID')
+
+                if sheet_source.label == self.pp.label and \
+                   entry_df.index.array[0] not in self.sheet.df.index:
+                    empty_df = pd.DataFrame([], index=entry_df.index)
                     self.sheet.df = self.sheet.df.append(empty_df)
-                self.refresh_entries(entry.index)
+                self.refresh_entries(entry_df.index)
             # TODO action
 
         sh_dashboard = DataSheet('Dashboard', dynamic_only=True)
@@ -4629,15 +4690,15 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
                          'eval_OK')
 
-        print("wb['Dashboard'].df (%s) before delete_entry:",
-              wb['Dashboard'].df.shape)
+        print("wb['Dashboard'].df (%s) before delete_entry:" % \
+              str(wb['Dashboard'].df.shape))
         print(wb['Dashboard'].df)
         sh_pp.delete_entry(sh_pp.df.iloc[1].name)
-        print("wb['Dashboard'].df (%s) after delete_entry:",
-              wb['Dashboard'].df.shape)
+        print("wb['Dashboard'].df (%s) after delete_entry:" % \
+              str(wb['Dashboard'].df.shape))
         print(wb['Dashboard'].df)
 
-        self.assertEqual(wb['Dashboard'].df.shape, (2,2))
+        self.assertEqual(wb['Dashboard'].df.shape, (2,1))
 
     def test_dashboard_interview_track(self):
         # Create empty workbook
@@ -4815,7 +4876,9 @@ class TestWorkBook(unittest.TestCase):
 
             def update(self, sheet_source, entry):
                 entry = entry.set_index('Participant_ID')
-                if sheet_source.label == self.pp.label:
+                if sheet_source.label == self.pp.label and \
+                   entry.index.array[0] not in self.sheet.df.index:
+                    # Add an empty line for the new entry index:
                     empty_df = pd.DataFrame([], index=entry.index)
                     self.sheet.df = self.sheet.df.append(empty_df)
                 self.refresh_entries(entry.index)
@@ -4944,10 +5007,10 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,16)
         sh_eval.add_new_entry({'Participant_ID' : pid,
-                              'Plan_Action' : 'do_session',
-                              'Staff' : 'Thomas Vincent',
-                              'Session_Status' : 'done',
-                              'Timestamp' : ts})
+                               'Session_Action' : 'do_session',
+                               'Staff' : 'Thomas Vincent',
+                               'Session_Status' : 'done',
+                               'Timestamp' : ts})
         self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
                          'eval_ok')
         self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
@@ -4959,8 +5022,8 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,17)
         sh_eval.add_new_entry({'Participant_ID' : pid,
-                              'Plan_Action' : 'do_session',
-                              'Staff' : 'Thomas Vincent',
+                               'Session_Action' : 'do_session',
+                               'Staff' : 'Thomas Vincent',
                               'Session_Status' : 'redo',
                               'Timestamp' : ts})
         self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
@@ -4975,7 +5038,7 @@ class TestWorkBook(unittest.TestCase):
         ts = datetime(2021,9,10,10,18)
         sh_eval.add_new_entry({'Participant_ID' : pid,
                               'Staff' : 'Thomas Vincent',
-                              'Plan_Action' : 'cancel_session',
+                              'Session_Action' : 'cancel_session',
                               'Timestamp' : ts})
         self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
                          'eval_cancelled')
@@ -5345,9 +5408,9 @@ class FormItem:
                 #     else:
                 #         self.set_input_str(self.format(self.init_values[key]),
                 #                            force=force)
-                elif self.choices is not None:
-                    self.set_input_str(self.tr[next(iter(self.choices))],
-                                       force=force)
+                # elif self.choices is not None:
+                #     self.set_input_str(self.tr[next(iter(self.choices))],
+                #                        force=force)
                 else:
                     # empty string maps to None
                     # logger.debug('%s: Set empty string for key %s', self, key)
@@ -5377,18 +5440,19 @@ class FormItem:
     def validate(self, key):
         assert(key in self.keys)
 
+        value_str = self.values_str[key]
         if (self.generator is not None and \
-                self.generator.endswith('submission')):
+                self.generator.endswith('submission')) or \
+            (len(value_str)==0 and self.allow_None):
             self._set_validity(True, '', key)
             return
 
-        value_str = self.values_str[key]
         if self.choices is not None and not self.allow_other_choice:
             current_choices = {self.tr[k]:k for k in self.choices}
             if value_str not in current_choices:
-                choices_str = ', '.join(['"%c"' for c in current_choices])
-                logger.warning('Value of %s not in choices (%s)', self,
-                               choices_str)
+                choices_str = ', '.join(['"%s"' %c for c in current_choices])
+                logger.debug('Value of %s not in choices (%s)', self,
+                             choices_str)
                 self._set_validity(False, 'Value must be one of "%s"' % \
                                    choices_str, key)
                 return
@@ -5406,23 +5470,20 @@ class FormItem:
                 self._set_validity(False, self.regexp_invalid_message, key)
                 return
 
-        if len(value_str)==0 and self.allow_None:
-            value = None
-        else:
-            try:
-                value = self.unformat(value_str)
-            except ValueError:
-                self._set_validity(False, self.invalid_vtype_format_message, key)
+        try:
+            value = self.unformat(value_str)
+        except ValueError:
+            self._set_validity(False, self.invalid_vtype_format_message, key)
+            return
+
+        if self.vtype == 'number' or self.vtype == 'int':
+            if value not in self.number_interval:
+                self._set_validity(False, 'Value must be in %s' % \
+                                   self.number_interval, key)
                 return
 
-            if self.vtype == 'number' or self.vtype == 'int':
-                if value not in self.number_interval:
-                    self._set_validity(False, 'Value must be in %s' % \
-                                       self.number_interval, key)
-                    return
-
-            if not self.validate_unique(key, value): # validity msg is set there
-                return
+        if not self.validate_unique(key, value): # validity msg is set there
+            return
 
         self._set_validity(True, '', key)
 
@@ -5553,93 +5614,6 @@ class TestForm(unittest.TestCase):
                            datetime(2020,1,5,13,37)])
         ]))
 
-        dlg = 'French'
-        slg = {'French', 'English'}
-        self.form_def = {
-            'title' : {'French' : 'Formulaire participant',
-                       'English' : 'Participant form'},
-            'default_language' : dlg,
-            'supported_language' : slg,
-            'sections' : {
-                'participant_info_1' : {
-                    'title' : {'French' : 'Section 1',
-                               'English' : 'Section 1'},
-                    'default_language' : dlg,
-                    'supported_language' : slg,
-                    'default_next_section' : None,
-                    'transitions' : [
-                        ('Participant_ID', '=', 'CE0001', 'info_CE0001')
-                    ],
-                    'items' : [
-                        {
-                            'keys' : {'Participant_ID' :
-                                      {'French' : 'Code participant'}},
-                            'default_language' : dlg,
-                            'supported_language' : slg,
-                            'unique' : True,
-                            'allow_empty' : False,
-                            'regexp' : 'CE[0-9]{4}',
-                        },
-                        {'keys' : {'Referencing' :
-                                   {'English' : 'Referencing',
-                                    'French' : 'Réferencement'}},
-                         'choices' : {'community_dwelling' :
-                                      {'French' : 'Communauté',
-                                       'English' : 'Community'},
-                                      'cardiac_rehab' :
-                                      {'French' : 'Clinique réhab',
-                                       'English' : 'Rehab clinic'},
-                                      'epic_member' :
-                                      {'French' : 'Membre EPIC',
-                                       'English' : 'EPIC member'}},
-                        },
-                        {'keys' : {'First_Name' : ''}},
-                        {'keys' : {'Last_Name' : ''}},
-                        {'keys' : {'Email_Address' : ''},
-                         'regexp' : '^[^@]+@[^@]+[.][^@]+[^.]$'},
-                        {'keys' : {'Phone_Number' : ''},
-                         'description' : {
-                             'French' : ("Si doublon, bien vérifier qu'il " \
-                                         "s'agit d'une personne différente " \
-                                         "et rajouter une extension à la " \
-                                         "fin (ex: #2, #3)"),
-                             'English' : ("If duplicate, verify that it's not" \
-                                          "the same person and append an extension"),
-                         },
-                        'regexp' : '[0-9]{3}-[0-9]{3}-[0-9]{4}(#[0-9]+)?',
-                         'allow_empty' : False,
-                         'unique' : True,
-                        }
-                    ]
-                },
-                'participant_info_2' :
-                    { 'title' : {'Section 2' : ''},
-                      'items': [
-                          {'keys' : {'Agree_contact' :
-                                     {'French' : 'Etre contacté',
-                                      'English' : 'Be contacted'},
-                                     'Agree_participation' :
-                                     {'French' : "Participer à l'étude",
-                                      'English' : "Participate in study"}},
-                           'vtype' : 'boolean',
-                     },
-                     {'keys' : {'Comment' : ''},
-                      'nb_lines' : 5
-                     },
-                     {'keys' : {'Exlude' : ''},
-                      'description' : "Indique si l'entrée doit être importée dans la base de données en ligne",
-                      'title' : {'French' : 'Exclusion ?',
-                                 'English' : 'Exclude?'},
-                      'vtype' : 'boolean',
-                     },
-                     {'keys' : {'Secure_ID' : ''},
-                      'hidden' : True,
-                      'generator' : 'uuid4',
-                      'allow_empty' : False}, # TODO: uuid regexp
-                 ] # end of list of items for section participant_info_2
-                } # end of section participant_info_2
-            } # end of list of sections
-        } # end of form definition
         logger.setLevel(logging.DEBUG)
         self.tmp_dir = tempfile.mkdtemp()
 
@@ -5674,19 +5648,6 @@ class TestForm(unittest.TestCase):
                     title={'French':'Titre de formulaire'})
         self.assertEqual(form.tr['title'], 'Titre de formulaire')
 
-
-    # def test_missing_index(self):
-    #     items = [FormItem({'Age' :
-    #                        {'French':'Age en année'}},
-    #                       default_language='French',
-    #                       supported_languages={'French'},
-    #                       vtype='int')]
-    #     sections = {'section1' : FormSection(items, default_language='French',
-    #                                          supported_languages={'French'})}
-    #     form = Form(sections, default_language='French',
-    #                 supported_languages={'French'}, title='')
-
-    #     self.assertRaises(InconsistentIndex, form.attach_df, self.get_data_df)
 
     def test_reset(self):
         # TODO: test with all dtypes
@@ -5768,7 +5729,76 @@ class TestForm(unittest.TestCase):
         self.assertFalse(form.is_valid())
         self.assertRaises(InvalidForm, form.submit)
 
-    def test_section_transitions(self):
+    def test_default_next_sections(self):
+        items1 = [FormItem({'Participant_ID' :
+                            {'French':'Code Participant'}},
+                           default_language='French',
+                           supported_languages={'French'},
+                           allow_empty=False)]
+        items2 = [FormItem({'Age' :
+                            {'French':'Age en année'}},
+                           default_language='French',
+                           supported_languages={'French'},
+                           vtype='int', allow_empty=False)]
+        items3 = [FormItem({'Age' :
+                            {'French':'Age en année'}},
+                           default_language='French',
+                           supported_languages={'French'},
+                           vtype='int', allow_empty=True)]
+        sections = {'section1' :
+                    FormSection(items1,
+                                default_language='French',
+                                supported_languages={'French'}),
+                    'section2' :
+                    FormSection(items2, default_language='French',
+                                supported_languages={'French'}),
+                    'section3' :
+                    FormSection(items3, default_language='French',
+                                supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'})
+
+        print("utest CP1: form['section1'].next_section_definition: ",
+              form['section1'].next_section_definition)
+        print("utest CP1: form['section1'].next_section_predicates: ",
+              form['section1'].next_section_predicates)
+        # Fill first section (section1)
+        self.assertFalse(form.is_valid())
+        self.assertFalse(form.ready_to_submit())
+        self.assertRaises(InvalidSection, form.to_next_section)
+        form['section1']['Participant_ID'].set_input_str('CE0009')
+        self.assertTrue(form.is_valid())
+        self.assertFalse(form.ready_to_submit())
+
+        print("utest CP2: form['section1'].next_section_definition: ",
+              form['section1'].next_section_definition)
+        print("utest CP2: form['section1'].next_section_predicates: ",
+              form['section1'].next_section_predicates)
+
+        self.assertEqual(form.next_section(), 'section2')
+        self.assertEqual(form.previous_section(), None)
+        # Go to 2nd section
+        form.to_next_section()
+        self.assertFalse(form.is_valid())
+        self.assertFalse(form.ready_to_submit())
+        self.assertEqual(form.next_section(), None)
+        self.assertEqual(form.previous_section(), 'section1')
+        form['section2']['Age'].set_input_str('55')
+        self.assertTrue(form.is_valid())
+        self.assertEqual(form.next_section(), 'section3')
+        self.assertFalse(form.ready_to_submit())
+        # Go to 3rd section
+        form.to_next_section()
+        self.assertTrue(form.is_valid())
+        self.assertEqual(form.next_section(), '__submit__')
+        self.assertTrue(form.ready_to_submit())
+        self.assertEqual(form.previous_section(), 'section2')
+        entry = form.submit()
+        self.assertEqual(entry['Participant_ID'], 'CE0009')
+        self.assertEqual(entry['Age'], None)
+
+    def test_section_conditional_transitions(self):
+        """ Test transitions based on value criteria """
         items1 = [FormItem({'Participant_ID' :
                             {'French':'Code Participant'}},
                            default_language='French',
@@ -5787,18 +5817,22 @@ class TestForm(unittest.TestCase):
 
         sections = {'section1' :
                     FormSection(items1,
-                                default_next_section='section_default',
                                 default_language='French',
                                 supported_languages={'French'},
-                                transitions=[('Participant_ID',
-                                              lambda pid: pid=='CE0009',
-                                              'section_CE0009')]),
+                                next_section_definition=[
+                                    ("Participant_ID is not None and "\
+                                     "Participant_ID=='CE0009'", 'section_CE0009'),
+                                    'section_default'
+                                ]),
                     'section_CE0009' :
                     FormSection(items2, default_language='French',
-                                supported_languages={'French'}),
+                                supported_languages={'French'},
+                                next_section_definition='__submit__'),
                     'section_default' :
                     FormSection(items3, default_language='French',
-                                supported_languages={'French'})}
+                                supported_languages={'French'},
+                                next_section_definition='__submit__')}
+
         form = Form(sections, default_language='French',
                     supported_languages={'French'})
         # Fill first section (section1)
@@ -5859,20 +5893,23 @@ class TestForm(unittest.TestCase):
         sections = {'section1' :
                     FormSection(items1,
                                 title={'French':'section1'},
-                                default_next_section='section_default',
                                 default_language='French',
                                 supported_languages={'French'},
-                                transitions=[('Participant_ID',
-                                              lambda pid: pid=='CE0009',
-                                              'section_CE0009')]),
+                                next_section_definition=[
+                                    ('Participant_ID is not None and '\
+                                     'Participant_ID=="CE0009"','section_CE0009'),
+                                    'section_default'
+                                ]),
                     'section_CE0009' :
                     FormSection(items2, title={'French':'section_CE0009'},
                                 default_language='French',
-                                supported_languages={'French'}),
+                                supported_languages={'French'},
+                                next_section_definition='__submit__'),
                     'section_default' :
                     FormSection(items3, title={'French':'section_default'},
                                 default_language='French',
-                                supported_languages={'French'})}
+                                supported_languages={'French'},
+                                next_section_definition='__submit__')}
 
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
@@ -5949,6 +5986,101 @@ class TestForm(unittest.TestCase):
 
 
 
+    def test_set_transitions(self):
+
+        dlg = 'English'
+        slg = {'English'}
+        PARAGRAPH_NB_LINES = 10
+        expected_form_def = {
+            'title' : {dlg : 'Form title'},
+            'description' : {dlg : 'Form description'},
+            'default_language' : dlg,
+            'supported_languages' : slg,
+            'sections' : {
+                '__section_0__' : {
+                    'title' : '',
+                    'default_language' : dlg,
+                    'supported_languages' : slg,
+                    'items' : [
+                        {
+                            'keys' : {'S1_Q1' :
+                                      {dlg : 'section 1 question 1'}},
+                            'description' : {
+                                dlg : 'description of S1_Q1'
+                            },
+                            'choices' : {
+                                'go_s2' : {dlg : 'go to section 2'},
+                                'go_s3' : {dlg : 'go to section 3'}},
+                            'allow_empty' : False
+                        }],
+                    },
+                'section_2' : {
+                    'title' : {dlg : 'This is section 2'},
+                    'description' : {
+                        dlg : 'description of section 2'
+                    },
+                    'default_language' : dlg,
+                    'supported_languages' : slg,
+                    'items' : [
+                        {
+                            'keys' : {'S2_Q1' :
+                                      {dlg : 'section 2 question 1'}},
+                            'description' : {
+                                dlg : 'description of s2q1'
+                            },
+                        }],
+                },
+                'section_3' : {
+                    'title' : {dlg : 'This is section 3'},
+                    'description' : {
+                        dlg : 'description of section 3'
+                    },
+                    'default_language' : dlg,
+                    'supported_languages' : slg,
+                    'items' : [
+                        {
+                            'keys' : {'S3_Q1' :
+                                      {dlg : 'section 3 question 1'}},
+                            'description' : {
+                                dlg : 'description of s3q1'
+                            },
+                        }],
+                } # end of section
+            } # end of list of sections
+        } # end of form definition
+        form = Form.from_dict(expected_form_def)
+
+        transitions_str = """
+{'__section_0__' : [
+    ("S1_Q1=='go_s2'", 'section_2'),
+    ("S1_Q1=='go_s3'", 'section_3')
+ ],
+ 'section_3' : '__submit__',
+}""".strip()
+        form.set_transitions(eval(transitions_str))
+        self.assertFalse(form.ready_to_submit())
+        self.assertIsNone(form.next_section())
+
+        form['__section_0__']['S1_Q1'].set_value('S1_Q1', 'go_s3')
+        self.assertEqual(form.next_section(),'section_3')
+
+        form['__section_0__']['S1_Q1'].set_value('S1_Q1', 'go_s2')
+        self.assertEqual(form.next_section(),'section_2')
+
+        form.to_next_section()
+        self.assertFalse(form.ready_to_submit())
+        self.assertEqual(form.next_section(), 'section_3')
+
+        form.to_next_section()
+        self.assertTrue(form.ready_to_submit())
+        self.assertEqual(form.next_section(), '__submit__')
+
+        result = form.submit()
+        self.assertEqual(result, {'S1_Q1' : 'go_s2',
+                                  'S2_Q1' : None,
+                                  'S3_Q1' : None,
+        })
+
     def test_from_gform_sections(self):
         dlg = 'English'
         slg = {'English'}
@@ -5963,48 +6095,45 @@ class TestForm(unittest.TestCase):
                     'title' : '',
                     'default_language' : dlg,
                     'supported_languages' : slg,
-                    'default_next_section' : None,
                     'items' : [
                         {
-                            'keys' : {'section_1_question_1' :
+                            'keys' : {'S1_Q1' :
                                       {dlg : 'section 1 question 1'}},
                             'description' : {
-                                dlg : 'description of s1q1'
+                                dlg : 'description of S1_Q1'
                             },
                             'choices' : {
-                                'go to section 2' : {dlg : 'go to section 2'},
-                                'go to section 3' : {dlg : 'go to section 3'}},
+                                'go_s2' : {dlg : 'go to section 2'},
+                                'go_s3' : {dlg : 'go to section 3'}},
                             'allow_empty' : False
                         }],
                     },
-                'this_is_section_2' : {
+                'section_2' : {
                     'title' : {dlg : 'This is section 2'},
                     'description' : {
                         dlg : 'description of section 2'
                     },
                     'default_language' : dlg,
                     'supported_languages' : slg,
-                    'default_next_section' : None,
                     'items' : [
                         {
-                            'keys' : {'section_2_question_1' :
+                            'keys' : {'S2_Q1' :
                                       {dlg : 'section 2 question 1'}},
                             'description' : {
                                 dlg : 'description of s2q1'
                             },
                         }],
                 },
-                'this_is_section_3' : {
+                'section_3' : {
                     'title' : {dlg : 'This is section 3'},
                     'description' : {
                         dlg : 'description of section 3'
                     },
                     'default_language' : dlg,
                     'supported_languages' : slg,
-                    'default_next_section' : None,
                     'items' : [
                         {
-                            'keys' : {'section_3_question_1' :
+                            'keys' : {'S3_Q1' :
                                       {dlg : 'section 3 question 1'}},
                             'description' : {
                                 dlg : 'description of s3q1'
@@ -6019,13 +6148,30 @@ class TestForm(unittest.TestCase):
 
         gform_json_fn = op.join(self.tmp_dir, 'gform.json')
         with open(gform_json_fn, 'w') as fout:
-            fout.write('{"metadata":{"title":"Form title","id":"1dOsPTG7vJVv9vkBKVCsK3M1bl9k6VgggSEPxvEpuhBU","description":"Form description","publishedUrl":"https://docs.google.com/forms/d/e/1FAIpQLSfn1S_fmS9nv6yQ1eZAuFzmxlKkqkYYKVygjv_E18yWAZFqOw/viewform","editorEmails":["covepic.research@gmail.com"],"count":5,"confirmationMessage":"","customClosedFormMessage":""},"items":[{"type":"MULTIPLE_CHOICE","title":"section 1 question 1","description":"description of s1q1","required":true,"choices":["go to section 2","go to section 3"]},{"type":"PAGE_BREAK","title":"This is section 2","description":"description of section 2","pageNavigationType":"CONTINUE"},{"type":"TEXT","title":"section 2 question 1","description":"description of s2q1","required":false},{"type":"PAGE_BREAK","title":"This is section 3","description":"description of section 3","pageNavigationType":"CONTINUE"},{"type":"TEXT","title":"section 3 question 1","description":"description of s3q1","required":false}],"count":5}')
+            fout.write('{"metadata":{"title":"Form title","id":"1dOsPTG7vJVv9vkBKVCsK3M1bl9k6VgggSEPxvEpuhBU","description":"Form description","publishedUrl":"https://docs.google.com/forms/d/e/1FAIpQLSfn1S_fmS9nv6yQ1eZAuFzmxlKkqkYYKVygjv_E18yWAZFqOw/viewform","editorEmails":["covepic.research@gmail.com"],"count":5,"confirmationMessage":"","customClosedFormMessage":""},"items":[{"type":"MULTIPLE_CHOICE","title":"S1_Q1:: section 1 question 1","description":"description of S1_Q1","required":true,"allow_other_choice":false,"choices":["go_s2:: go to section 2","go_s3:: go to section 3"]},{"type":"PAGE_BREAK","title":"section_2:: This is section 2","description":"description of section 2","pageNavigationType":"CONTINUE"},{"type":"TEXT","title":"S2_Q1:: section 2 question 1","description":"description of s2q1","required":false},{"type":"PAGE_BREAK","title":"section_3:: This is section 3","description":"description of section 3","pageNavigationType":"SUBMIT"},{"type":"TEXT","title":"S3_Q1:: section 3 question 1","description":"description of s3q1","required":false}],"count":5}')
 
         form = Form.from_gform_json_file(gform_json_fn, 'English',
                                          use_item_title_as_key=True)
-        if 0 and form != expected_form:
+        if form != expected_form:
             self.show_form_diff(form, expected_form)
         self.assertEqual(form, expected_form)
+
+        form.set_values_from_entry({'S1_Q1' : 'go_s3'})
+        self.assertTrue(form.is_valid())
+        self.assertFalse(form.ready_to_submit())
+
+        self.assertEqual(form.next_section(), 'section_2')
+        form.to_next_section()
+        self.assertFalse(form.ready_to_submit())
+
+        self.assertEqual(form.next_section(), 'section_3')
+        form.to_next_section()
+        self.assertTrue(form.ready_to_submit())
+
+        result = form.submit()
+        self.assertEqual(result['S1_Q1'], 'go_s3')
+        self.assertEqual(result['S2_Q1'], None)
+        self.assertEqual(result['S3_Q1'], None)
 
     def test_from_gform_items(self):
         dlg = 'French'
@@ -6041,7 +6187,6 @@ class TestForm(unittest.TestCase):
                     'title' : '',
                     'default_language' : dlg,
                     'supported_languages' : slg,
-                    'default_next_section' : None,
                     'items' : [
                         {
                             'keys' : {'required_short_answer' :
@@ -6215,12 +6360,12 @@ class TestFormSection(unittest.TestCase):
                                         vtype='int')],
                               default_language='French',
                               supported_languages={'French'})
-        self.assertEqual(section.next(), None)
+        self.assertIsNone(section.next())
 
-    def test_next_with_transition(self):
-        transitions = [
-            ('Age', lambda v: v > 60, 'section_elder'),
-            ('Age', lambda v: v <= 60, 'section_younger')
+    def test_next_section_with_transition(self):
+        next_section_def = [
+            ('Age is not None and Age > 60', 'section_elder'),
+            ('Age is not None and Age <= 60', 'section_younger')
         ]
         section = FormSection([FormItem({'Participant_ID' :
                                          {'French':'Code Participant'}},
@@ -6231,18 +6376,19 @@ class TestFormSection(unittest.TestCase):
                                         default_language='French',
                                         supported_languages={'French'},
                                         vtype='int')],
-                              transitions=transitions,
+                              next_section_definition=next_section_def,
                               default_language='French',
                               supported_languages={'French'})
+        self.assertIsNone(section.next())
         section['Age'].set_input_str('19')
         self.assertEqual(section.next(), 'section_younger')
         section['Age'].set_input_str('99')
         self.assertEqual(section.next(), 'section_elder')
 
     def test_no_transition_when_invalid(self):
-        transitions = [
-            ('Age', lambda v: v > 60, 'section_elder'),
-            ('Age', lambda v: v <= 60, 'section_younger')
+        next_section_def = [
+            ('Age is not None and Age > 60', 'section_elder'),
+            ('Age is not None and Age <= 60', 'section_younger')
         ]
         section = FormSection([FormItem({'Participant_ID' :
                                          {'French':'Code Participant'}},
@@ -6253,10 +6399,31 @@ class TestFormSection(unittest.TestCase):
                                         default_language='French',
                                         supported_languages={'French'},
                                         vtype='int', allow_empty=False)],
-                              transitions=transitions,
+                              next_section_definition=next_section_def,
                               default_language='French',
                               supported_languages={'French'})
         self.assertFalse(section.is_valid())
+        self.assertIsNone(section.next())
+
+    def test_no_transition_when_no_matching_criterion(self):
+        next_section_def = [
+            ('Age is not None and Age > 60', 'section_elder'),
+            ('Age is not None and Age <= 60', 'section_younger')
+        ]
+        section = FormSection([FormItem({'Participant_ID' :
+                                         {'French':'Code Participant'}},
+                                        default_language='French',
+                                        supported_languages={'French'}),
+                               FormItem({'Age' :
+                                         {'French':'Age en année'}},
+                                        default_language='French',
+                                        supported_languages={'French'},
+                                        vtype='int')],
+                              next_section_definition=next_section_def,
+                              default_language='French',
+                              supported_languages={'French'})
+        self.assertTrue(section.is_valid())
+        self.assertIsNone(section.next())
 
     def test_submit(self):
         section = FormSection([FormItem({'Participant_ID' :
@@ -6268,6 +6435,7 @@ class TestFormSection(unittest.TestCase):
                                         default_language='French',
                                         supported_languages={'French'},
                                         vtype='int')],
+                              next_section_definition='__submit__',
                               default_language='French',
                               supported_languages={'French'})
         section['Participant_ID'].set_input_str('CE0000')
@@ -6315,50 +6483,6 @@ class TestFormSection(unittest.TestCase):
         received_signals.clear()
         section['Participant_ID'].set_input_str('??')
         self.assertEqual(received_signals, ['section_invalid'])
-
-    def __test_invalidation_from_items(self):
-        validation_flag = None
-        def validity_check(self, is_valid):
-            global validation_flag
-            validation_flag = is_valid
-
-        form = Form(self.form_def['title'],
-                    self.form_def['sections'],
-                    validity_watchers=[validity_check])
-        self.assertTrue(validation_flag is not None)
-        self.assertFalse(validation_flag)
-        self.assertFalse(form.current_section_is_valid())
-        validation_flag = None
-        form['Participant_ID'].set_value('CE0007')
-        self.assertTrue(validation_flag is None)
-        self.assertFalse(form.current_section_is_valid())
-        form['Phone_Number'].set_value('514-000-0000')
-        self.assertTrue(validation_flag)
-        self.assertTrue(form.current_section_is_valid())
-        form['Phone_Number'].set_value('5140000000')
-        self.assertFalse(form.current_section_is_valid())
-        self.assertFalse(validation_flag)
-
-    def __test_invalidation_from_changed_data(self):
-
-        validation_flag = None
-        def validity_check(self, is_valid):
-            global validation_flag
-            validation_flag = is_valid
-
-        form = Form(self.form_def['title'],
-                    self.form_def['sections'],
-                    validity_watchers=[validity_check])
-        form['Participant_ID'].set_value('CE0007')
-        form['Referencing'].set_value('epic_member')
-        form['Last_Name'].set_value('Lucky')
-        form['Phone_Number'].set_value('514-000-0000')
-        self.assertEqual(form.current_section.key, 'participant_info_1')
-        form.next_section()
-        self.assertEqual(form.current_section, 'participant_info_2')
-        self.data_df.iloc[2]['Participant_ID'] = 'CE0007'
-        self.assertEqual(form.get_focused_item().key, 'Participant_ID')
-        self.assertEqual(form.current_section, 'participant_info_1')
 
 
 class LazyFunc:
@@ -6911,10 +7035,10 @@ class DataSheetModel(QtCore.QAbstractTableModel):
 
     def columnCount(self, parnet=None):
         view_df = self.sheet.get_df_view()
+        count = 0
         if view_df is not None:
-            return view_df.shape[1] + self.sheet.dynamic_only
-        else:
-            return 0
+            count = view_df.shape[1] + self.sheet.dynamic_only
+        return count
 
     def get_df_view(self):
         view = self.sheet.get_df_view()
@@ -6978,17 +7102,19 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         return True
 
     @QtCore.pyqtSlot()
-    def update_after_delete(self, entry_id):
-        view = self.get_df_view()
-        irow = view.index.get_loc(entry_id)
-        logger.debug('update_after_delete(%d) -> irow = %d',
-                     entry_id, irow)
-        self.layoutAboutToBeChanged.emit()
-        self.beginRemoveRows(QtCore.QModelIndex(), irow, irow)
+    def update_after_delete(self, deleted_entry_df):
         # TODO: proper callback to actual data change here
         self.endRemoveRows()
         self.layoutChanged.emit()
         return True
+
+    def update_before_delete(self, entry_id):
+        view = self.get_df_view()
+        irow = view.index.get_loc(entry_id)
+        logger.debug('before_delete(%d) -> irow = %d',
+                     entry_id, irow)
+        self.layoutAboutToBeChanged.emit()
+        self.beginRemoveRows(QtCore.QModelIndex(), irow, irow)
 
     @QtCore.pyqtSlot()
     def update_after_set(self, entry_id):
@@ -7148,7 +7274,9 @@ class SheetViewChanger:
 
     def __call__(self, combox_index):
         view_label = self.combobox.currentText()
+        self.sheet_model.beginResetModel()
         self.sheet_model.sheet.set_default_view(view_label)
+        self.sheet_model.endResetModel()
         self.sheet_model.layoutChanged.emit()
 
 class PiccelApp(QtWidgets.QApplication):
@@ -7589,8 +7717,9 @@ class PiccelApp(QtWidgets.QApplication):
             model = DataSheetModel(sh)
             sh.notifier.add_watcher('appended_entry', model.update_after_append)
             sh.notifier.add_watcher('set_entry', model.update_after_set)
+            sh.notifier.add_watcher('pre_delete_entry', model.update_before_delete)
             sh.notifier.add_watcher('deleted_entry', model.update_after_delete)
-            # TODO: watch entry modification
+
             _data_sheet_ui.tableView.setModel(model)
             _data_sheet_ui.tableView.horizontalHeader().setMaximumSectionSize(500) # TODO expose param
             _data_sheet_ui.tableView.resizeColumnsToContents()
@@ -7649,7 +7778,7 @@ class PiccelApp(QtWidgets.QApplication):
             else:
                 _data_sheet_ui.button_new_entry.hide()
 
-                
+
             _data_sheet_ui.comboBox_view.addItems(list(sh.views.keys()))
             _data_sheet_ui.comboBox_view.setCurrentText(sh.default_view)
             f = SheetViewChanger(_data_sheet_ui.comboBox_view, model)
