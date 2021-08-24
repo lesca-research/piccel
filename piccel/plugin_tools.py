@@ -1,7 +1,70 @@
 import pandas as pd
 import logging
+from .sheet_plugin import SheetPlugin
 
 logger = logging.getLogger('piccel')
+
+class LescaDashboard(SheetPlugin):
+    def __init__(self, sheet):
+        super(LescaDashboard, self).__init__(sheet)
+        self.df = None
+
+    def set_workbook(self, workbook):
+        super(LescaDashboard, self).set_workbook(workbook)
+        logger.debug('Plugin of sheet %s, set workbook: %s',
+                     self.sheet.label, workbook.label \
+                     if workbook is not None else 'None')
+        if workbook is not None:
+            self.pp = workbook['Participant']
+
+    def sheets_to_watch(self):
+        return ['Participant']
+
+    def get_data(self):
+        logger.debug('Plugin of sheet %s, get_data: self.df=%s, '\
+                     'self.pp.df=%s', self.sheet.label,
+                     self.df.shape if self.df is not None else 'None',
+                     self.pp.df.shape if self.pp.df is not None \
+                     else 'None')
+        if self.df is None and self.pp.df is not None:
+            self.df = (self.pp.df[['Participant_ID']]
+                       .sort_values(by='Participant_ID')
+                       .reset_index(drop=True))
+            self.df.set_index('Participant_ID', inplace=True)
+            self.refresh_entries(self.df.index)
+        return self.df
+
+    def refresh_entries(self, pids):
+        raise NotImplementedError('Must be implemented in subclass')
+
+    def views(self, base_views):
+        return {'full' : lambda df: self.get_data()}
+
+    def default_view(self):
+        return 'full'
+
+    def update(self, sheet_source, entry_df, deletion=False):
+        if sheet_source.label == self.pp.label and deletion:
+            self.df.drop(index=entry_df.Participant_ID.iat[0],
+                         inplace=True)
+            return
+
+        entry_df = entry_df.set_index('Participant_ID')
+
+        if sheet_source.label == self.pp.label and \
+           entry_df.index.array[0] not in self.df.index:
+            empty_df = pd.DataFrame([], index=entry_df.index)
+            self.df = self.df.append(empty_df)
+        if entry_df.index.values[0] in self.df.index:
+            self.refresh_entries(entry_df.index)
+        else:
+            logger.warning('Update plugin of sheet %s: '\
+                           'New entry for %s not in index',
+                           self.sheet.label,
+                           entry_df.index.values[0])
+
+    def action(self):
+        raise NotImplementedError('TODO: default action')
 
 class InconsistentIndex(Exception): pass
 
@@ -147,8 +210,9 @@ def interview_action(entry_df, interview_column, workbook):
     return form
 
 DATE_FMT = '%Y-%m-%d %H:%M:%S'
+DEFAULT_INTERVIEW_PLAN_SHEET_LABEL = 'Interview_Plan'
 def track_interview(dashboard_df, interview_label, workbook, pids,
-                    plan_sheet_label='Interview_Plan'):
+                    plan_sheet_label=DEFAULT_INTERVIEW_PLAN_SHEET_LABEL):
     """
 
     Date
@@ -316,7 +380,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         dashboard_df.loc[common_index, column_date] = dates
 
     common_pids = plan_df.index.intersection(interview_df.index)
-    if 0:
+    if 1:
         print('Get most recent entry btwn plan and interview')
 
         print('plan_df:')
@@ -414,6 +478,8 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
 
 def ts_data_latest(df):
+    if df is None or df.shape[0]==0:
+        return None
     max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
     df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
     df.set_index('Participant_ID', inplace=True)

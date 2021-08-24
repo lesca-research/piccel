@@ -1,12 +1,14 @@
 import pandas as pd
 import numpy as np
 
+from piccel.core import LazyFunc
+
 class SheetPlugin:
 
-    def __init__(self, data_sheet, workbook=None):
+    def __init__(self, data_sheet):
         """
-        workbook (WorkBook | None): workbook in which the sheet has been loaded.
-        May be None if the sheet is stand-alone.
+        Called when user has logged in the associated data_sheet,
+        after data loading.
 
         Useful methods:
            - workbook.user_roles():
@@ -24,32 +26,57 @@ class SheetPlugin:
            - df = sheet.get_df_view(view_label)
         """
         self.sheet = data_sheet
+        self._watch_sheets([data_sheet])
+
+    def set_workbook(self, workbook):
         self.workbook = workbook
+        if workbook is not None:
+            self._watch_sheets([self.workbook[l] \
+                                for l in self.sheets_to_watch()])
 
-    def sheet_index(self):
-        """ Return index in the sheet list, for display order """
-        return -1
+    def _on_entry_append(self, sheet):
+        self.update(sheet, sheet.df.tail(1))
+        self.sheet.invalidate_cached_views()
 
-    def compute(self):
-        """
-        Generate a DataFrame. Called only if sheet.dynamic_only == True
-        """
-        self.sheet.df = pd.DataFrame()
+    def _on_entry_set(self, sheet, entry_id):
+        self.update(sheet, sheet.df.loc[[entry_id]])
+        self.sheet.invalidate_cached_views()
 
-    def views(self):
+    def _on_entry_deletion(self, sheet, entry_df):
+        self.update(sheet, entry_df, deletion=True)
+        self.sheet.invalidate_cached_views()
+
+    def _watch_sheets(self, sheets_to_watch):
+        for sheet_to_watch in sheets_to_watch:
+            # Watch update
+            fu = LazyFunc(self._on_entry_append, sheet_to_watch)
+            sheet_to_watch.notifier.add_watcher('appended_entry', fu)
+            # Watch entry set
+            fs = LazyFunc(self._on_entry_set, sheet_to_watch)
+            sheet_to_watch.notifier.add_watcher('entry_set', fs)
+            # Watch deletion
+            fd = LazyFunc(self._on_entry_deletion, sheet_to_watch)
+            sheet_to_watch.notifier.add_watcher('deleted_entry', fd)
+
+    def reset_view_index_for_display(self):
+        return False
+
+    def views(self, base_views):
         """
         Return a dictionnary that maps a view label to a callable.
         The callable will be given the raw panda.Dataframe of the sheet and
         should return a transformed panda.Dataframe (view).
 
         Example:
-            def views(self):
-                views = {
-                   'Staff' : lambda df: df[df.staff=='John']
-                }
-                return views
+            def views(self, base_views):
+                # Keep default 'raw' and 'latest' view and
+                # add a John-specific one
+                base_view.update({
+                   'John' : lambda df: df[df.Staff=='John']
+                })
+                return base_views
         """
-        return {}
+        return base_views
 
     def default_view(self):
         """
@@ -58,7 +85,7 @@ class SheetPlugin:
 
         Return None to keep the original default view.
         """
-        return None
+        return 'raw'
 
     def view_validity(self, df, view):
         """
@@ -70,8 +97,20 @@ class SheetPlugin:
         df_validity.columns = df.columns
         return df_validity
 
-    def update(self, sheet_source, changed_entry):
-        """ Called when another sheet has been modified """
+    def sheets_to_watch(self):
+        """
+        Return a list of sheet labels to watch for changes (method update will
+        be called when they change).
+        Note that the associated sheet is always watched for changes
+        """
+        return []
+
+    def update(self, sheet_source, changed_entry, deletion=False):
+        """
+        Called when a watched sheet has been modified.
+        Watch sheets comprise the associated sheet and sheets defined by
+        method sheets_to_watch
+        """
         pass
 
     def action(self, entry_df, selected_column):

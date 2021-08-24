@@ -36,7 +36,8 @@ from . import sheet_plugin_template
 from . import workbook_plugin_template
 from .sheet_plugin_template import CustomSheetPlugin
 from .plugin_tools import map_set, And, Or #, Less, LessEqual, Greater, GreaterEqual
-from .plugin_tools import ts_data_latest, track_interview
+from .plugin_tools import (ts_data_latest, LescaDashboard, track_interview,
+                           DEFAULT_INTERVIEW_PLAN_SHEET_LABEL)
 
 import unittest
 import tempfile
@@ -61,6 +62,8 @@ from io import BytesIO
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from . import ui
+
+from .core import LazyFunc
 
 from appdirs import user_data_dir
 
@@ -289,10 +292,15 @@ class IndexedPattern:
         self.index += 1
         return result
 
-def import_gform_file(gform_fn, form_fn, language, overwrite=False):
-    # TODO: enable language merge (use overwrite)
+def import_gform_file(gform_fn, form_fn, language, merge=True):
     form = Form.from_gform_json_file(gform_fn, language,
                                      use_item_title_as_key=True)
+    if op.exists(form_fn) and merge:
+        with open(form_fn, 'r') as fin:
+            form_origin = Form.from_json(fin.read())
+            form_origin.add_translations(form)
+            form = form_origin
+
     with open(form_fn, 'w') as fout:
         fout.write(form.to_json())
 
@@ -553,6 +561,25 @@ function snakeCaseToCamelCase(s) {
     def unformat(self, key, value):
         return self.key_to_items[key][0].unformat(value)
 
+    def add_translations(self, other_form):
+        self.tr.add_translations(other_form.tr)
+        differing_sections = (set(self.sections.keys())
+                              .symmetric_difference(other_form.sections))
+
+        if len(differing_sections) != 0:
+            raise InconsistentForms('Differing sections: %s' % \
+                                    differing_sections)
+        for (section_name, section), (other_section_name, other_section) \
+            in zip(self.sections.items(), other_form.sections.items()):
+            if section_name != other_section_name:
+                raise InconsistentForms('Differing section names: %s / %s' %\
+                                        section_name, other_section_name)
+            try:
+                section.add_translations(other_form.sections)
+            except InconsistentSections:
+                raise InconsistentForms('Content of sections differ: %s / %s'%\
+                                        section_name, other_section_name)
+
     def __eq__(self, other):
         sd = self.to_dict()
         od = other.to_dict()
@@ -583,14 +610,16 @@ function snakeCaseToCamelCase(s) {
     def first_section(self):
         return next(iter(self.sections))
 
+    def first_section(self):
+        return next(iter(self.sections))
+
     def _prepend(self, key, value, vtype, hidden=True, editable=False):
         section0 = next(iter(self.sections.values()))
         item = FormItem({key:None}, section0.tr.language,
                         section0.tr.supported_languages, vtype=vtype,
                         hidden=hidden, editable=editable,
                         init_values={key:value})
-        section0._prepend(item)
-        # TODO: self.register_item
+        section0.add_item(item, position=0, watch_validity=False)
         self.key_to_items[key].append(item)
         if vtype == 'date':
             self.date_keys.add(key)
@@ -694,9 +723,9 @@ function snakeCaseToCamelCase(s) {
                             clabel, ctitle = get_label(c, protect=False)
                             item_choices[clabel] = {language : ctitle}
                         if item_gdict.get('allow_other_choice', False):
-                            other_label = {'English':'Other',
-                                           'French':'Autre'}.get(language,
-                                                                 'Other')
+                            other_label = {'English' : 'Other',
+                                           'French' : 'Autre'}.get(language,
+                                                                   'Other')
                             other_choice_label = {language : other_label}
                 else:
                     item_keys = {}
@@ -921,7 +950,13 @@ function snakeCaseToCamelCase(s) {
         submission (eg timestamp_submission) so transitions may differ
         """
         if not self.is_valid():
-            raise InvalidForm()
+            invalid_sections = []
+            for section_name in self.section_path:
+                if not self[section_name].is_valid():
+                    invalid_items = self[section_name].get_invalid_items()
+                    invalid_sections.append((section_name, invalid_items))
+            raise InvalidForm('\n'.join('%s: %s' %(s,', '.join('%s'%i for i in its)) \
+                                        for s,its in invalid_sections))
         logger.debug('Collecting values in form "%s" for submission',
                      self.tr['title'])
         current_section_name, current_section = next(iter(self.sections.items()))
@@ -998,6 +1033,9 @@ class TestPredicate(unittest.TestCase):
         self.assertRaises(InvalidPredicateResult,
                           Predicate('Participant_ID[-1]'),
                           {'Participant_ID':'CE9004'})
+
+class InconsistentSections(Exception): pass
+
 class FormSection:
 
     def __init__(self, items, default_language, supported_languages,
@@ -1021,20 +1059,14 @@ class FormSection:
         """
         self.notifier = Notifier(watchers if watchers is not None else {})
         self.validity = None
+
+        # Not currently used:
         self.nb_valid_items = sum(item.is_valid() for item in items)
-        self.items = items
 
         self.key_to_items = {}
-        self.all_keys = set()
-        for item in self.items:
-            for key in item.keys:
-                assert(key not in self.key_to_items)
-                self.key_to_items[key] = item
-                self.all_keys.add(key)
-            item.notifier.add_watchers({'item_valid' :
-                                        [LazyFunc(self.on_item_valid)],
-                                        'item_invalid':
-                                        [LazyFunc(self.on_item_invalid)]})
+        self.items = []
+        for item in items:
+            self.add_item(item)
 
         self.tr = Translator(default_language=default_language,
                              supported_languages=supported_languages)
@@ -1044,11 +1076,38 @@ class FormSection:
 
         self.check_validity()
 
+    def add_item(self, item, position=None, watch_validity=True):
+        for key in item.keys:
+            assert(key not in self.key_to_items)
+            self.key_to_items[key] = item
+        if watch_validity:
+            item.notifier.add_watchers({'item_valid' :
+                                        [LazyFunc(self.on_item_valid)],
+                                        'item_invalid':
+                                        [LazyFunc(self.on_item_invalid)]})
+        self.items.insert(position if position is not None else len(self.items),
+                          item)
+
+    def has_key(self, key):
+        return key in self.key_to_items
+
+    def add_translations(self, other_section):
+        self.tr.add_translations(other_section.tr)
+        if len(self.items) != len(other_section.item):
+            raise InconsistentSections()
+        for item, other_item in zip(self.items, other_section.items):
+            if len(item.keys) != len(other_item.keys) or \
+               any(k != ok for k,ok in zip(item.keys.keys(),
+                                           other_item.keys.keys())):
+                raise InconsistentSections()
+            item.tr.add_translations(other_item.tr)
+
     def set_next_section_definition(self, next_section_definition):
         self.next_section_definition = next_section_definition
         self.next_section_predicates = []
         predicate_always_true = Predicate('True')
-        if next_section_definition is None or isinstance(next_section_definition, str):
+        if next_section_definition is None or \
+           isinstance(next_section_definition, str):
             self.next_section_predicates.append((next_section_definition,
                                                  predicate_always_true))
         else:
@@ -1058,16 +1117,8 @@ class FormSection:
                                                          predicate_always_true))
                 else:
                     predicate_code, next_section = criterion
-                    self.next_section_predicates.append((next_section,
-                                                         Predicate(predicate_code)))
-
-    def _prepend(self, item):
-        """ WARNING: no notification associated with item """
-        self.items.insert(0, item)
-        for key in item.keys:
-            assert(key not in self.key_to_items)
-            self.key_to_items[key] = item
-            self.all_keys.add(key)
+                    (self.next_section_predicates
+                     .append((next_section, Predicate(predicate_code))))
 
     @staticmethod
     def from_dict(d):
@@ -1104,7 +1155,6 @@ class FormSection:
             for i in self.items:
                 if not i.is_valid():
                     logger.debug('item %s is invalid', i)
-                    logger.debug('!!!!!!!!!!!!!!!!!!!!!!!!')
         signal = ['section_invalid', 'section_valid'][self.validity]
         logger.debug('%s notifies %s', self, signal)
         self.notifier.notify(signal)
@@ -1126,7 +1176,13 @@ class FormSection:
         return self.key_to_items[key]
 
     def is_valid(self):
+        if not self.validity:
+            for i in self.get_invalid_items():
+                logger.debug('item %s is invalid', i)
         return self.validity
+
+    def get_invalid_items(self):
+        return [i for i in self.items if not i.is_valid()]
 
     def reset(self):
         for item in self.items:
@@ -1187,8 +1243,24 @@ class Translator():
         self.trs = {}
         self.set_language(default_language)
 
+    def add_supported_language(self, language):
+        self.supported_languages.add(language)
+
     def is_supported(self, language):
         return language in self.supported_languages
+
+    def add_translations(self, other_tr):
+        for key, translations in other_tr.trs.items():
+            self.add_key_translations(key, translations)
+
+    def add_key_translations(self, key, translations):
+        if key not in self.trs:
+            raise UnknownTrKey('Unknown translation key %s' % key)
+        for language in translations.keys():
+            self.add_supported_language(language)
+
+        self.check_translations(key, translations)
+        self.trs[key].update(translations)
 
     def register(self, key, translations):
         """
@@ -1202,15 +1274,26 @@ class Translator():
         elif translations=='':
             translations = {l:'' for l in self.supported_languages}
 
-        diff = self.supported_languages.symmetric_difference(translations.keys())
-        if len(diff):
+        self.check_translations(key, translations)
+
+        self.trs[key] = translations
+
+    def unregister(self, key):
+        self.trs.pop(key, None)
+
+    def check_translations(self, key, translations):
+        if not isinstance(translations, dict):
+            msg = 'Translations for key %s is not a dict: %s' % \
+                (key, translations)
+            raise TypeError(msg)
+
+        diff = set(translations.keys()).difference(self.supported_languages)
+        if len(diff) > 0:
             msg = 'Supported languages are: %s. Languages in '\
                 'translation of key %s: %s' % \
                 (', '.join(self.supported_languages), key,
                  ', '.join(translations.keys()))
             raise LanguageError(msg)
-
-        self.trs[key] = translations
 
     def set_language(self, language):
         if language not in self.supported_languages:
@@ -1219,7 +1302,8 @@ class Translator():
 
     def __getitem__(self, key):
         if key not in self.trs:
-            raise UnknownTrKey('%s unknown. Consider registering it' % key)
+            raise UnknownTrKey('Unknown translation key %s' % key)
+
         if self.trs[key] in [None, '']:
             return self.trs[key]
 
@@ -1624,21 +1708,16 @@ class DataSheet:
     SHEET_LABEL_RE = re.compile('[A-Za-z._-]+')
 
     def __init__(self, label, form_master=None, df=None, user=None,
-                 filesystem=None, plugin=None, live_forms=None,
-                 watchers=None, dynamic_only=False, workbook=None):
+                 filesystem=None, live_forms=None, watchers=None, workbook=None):
         """
         filesystem.root is the sheet-specific folder where to save all data
         and pending forms
         """
-        self.dynamic_only = dynamic_only
         self.label = self.validate_sheet_label(label)
-        if dynamic_only:
-            assert(form_master is None)
-            assert(df is None)
 
         if df is not None and form_master is None:
             # TODO: also check that all columns in df can be formatted using form
-            raise Exception('Cannot set df without defining form master')
+            raise Exception('Form master cannot be None if df is given')
 
         self.form_master = form_master
         self.live_forms = live_forms if live_forms is not None else {}
@@ -1660,9 +1739,8 @@ class DataSheet:
         # TODO: use Dummy file system to avoid checking all the time?
 
         self.default_view = 'raw'
+        self.views = {}
 
-        self.views = {'raw' : lambda ddf: ddf,
-                      'latest' : self.latest_update_df}
         self.cached_views = defaultdict(lambda: None)
         self.cached_validity = defaultdict(lambda: None)
         self.cached_inconsistent_entries = None
@@ -1670,31 +1748,54 @@ class DataSheet:
         self.notifier = Notifier(watchers if watchers is not None else {})
 
         self.df = None
+        if form_master is not None:
+            cols = ['__entry_id__', '__origin_id__', '__update_idx__']
+
+            self.df = pd.DataFrame(columns=cols)
+            self.df['__entry_id__'] = self.df['__entry_id__'].astype(np.int64)
+            self.df['__origin_id__'] = self.df['__origin_id__'].astype(np.int64)
+            self.df['__update_idx__'] = (self.df['__update_idx__']
+                                         .astype(np.int64))
+            self.df.set_index('__entry_id__', inplace=True)
+
         if df is not None:
             self.import_df(df)
 
-        if dynamic_only and plugin is not None:
-            logger.debug('Init sheet %s: Call plugin.compute to set df',
-                         self.label)
-            plugin.compute()
+        if self.filesystem is not None and not self.filesystem.exists('data'):
+            self.filesystem.makedirs('data')
 
-        if not dynamic_only and self.filesystem is not None:
-            if not self.filesystem.exists('data'):
-                self.filesystem.makedirs('data')
+        if self.filesystem is not None:
             self.reload_all_data()
-
-        self.plugin = None
-        if plugin is not None:
-            self.set_plugin(plugin)
-        else:
-            if self.filesystem is not None:
-                self.load_plugin(workbook)
-            if self.plugin is None:
-                self.set_plugin(SheetPlugin(self, workbook))
-
-        if not dynamic_only and self.filesystem is not None:
             self.load_live_forms()
-         # TODO: update_data_from_files -> load only entries that were not loaded
+
+        self.workbook = workbook
+        self.set_plugin(SheetPlugin(self))
+
+    def set_filesystem(self, fs):
+        # TODO: check if really needed? Should be set only once at __init__
+        self.filesystem = fs
+        self.filesystem.enable_track_changes()
+        self.has_write_access = self.filesystem.test_write_access()
+
+    def set_workbook(self, workbook):
+        self.plugin.set_workbook(workbook)
+
+    @staticmethod
+    def from_files(user, filesystem, watchers=None, workbook=None):
+        label = DataSheet.get_sheet_label_from_filesystem(filesystem)
+        logger.debug('Load form master for sheet %s', label)
+        form_master = DataSheet.load_form_master(filesystem)
+        logger.debug('Create sheet %s, using filesystem(root=%s)',
+                     label, filesystem.full_path(filesystem.root_folder))
+        sheet = DataSheet(label, form_master=form_master, df=None, user=user,
+                          filesystem=filesystem, watchers=watchers,
+                          workbook=workbook)
+        sheet.load_plugin()
+        return sheet
+
+    def base_views(self):
+        return {'raw' : lambda ddf: ddf,
+                'latest' : self.latest_update_df}
 
     def latest_update_df(self, df=None):
         if df is None:
@@ -1703,23 +1804,6 @@ class DataSheet:
                                     x['__update_idx__'].max()])
         return (df.groupby(by='__origin_id__', group_keys=False)
                 .apply(max_uidx))
-
-    def set_filesystem(self, fs):
-        # TODO: check if really needed? Should be set only once at __init__
-        self.filesystem = fs
-        self.filesystem.enable_track_changes()
-        self.has_write_access = self.filesystem.test_write_access()
-
-    @staticmethod
-    def from_files(user, filesystem, watchers=None, workbook=None):
-        label = DataSheet.get_sheet_label_from_filesystem(filesystem)
-        logger.debug('Load form master for sheet %s', label)
-        form_master = DataSheet.load_form_master(filesystem)
-        dynamic_only = filesystem.exists('dynamic_only')
-        logger.debug('Create sheet %s', label)
-        return DataSheet(label, form_master, None, user, filesystem,
-                         dynamic_only=dynamic_only, watchers=watchers,
-                         workbook=workbook)
 
     #@check_role(UserRole.ADMIN)
     def dump_plugin_code(self, plugin_code=None, overwrite=False):
@@ -1734,22 +1818,6 @@ class DataSheet:
         self.filesystem.save(plugin_fn, plugin_code, overwrite=overwrite)
         return plugin_fn
 
-    def load_plugin(self, workbook=None):
-        plugin_module = 'plugin_%s' % self.label
-        plugin_fn = '%s.py' % plugin_module
-        if self.filesystem.exists(plugin_fn):
-            logger.info('Load plugin of sheet %s from %s',
-                        self.label, self.filesystem.full_path(plugin_fn))
-            tmp_folder = op.dirname(self.filesystem.copy_to_tmp(plugin_fn,
-                                                                decrypt=True))
-            sys.path.insert(0, tmp_folder)
-            plugin_module = import_module(plugin_module)
-            reload_module(plugin_module)
-            sys.path.pop(0)
-            self.set_plugin(plugin_module.CustomSheetPlugin(self, workbook))
-        else:
-            logger.info('No plugin to load for sheet %s', self.label)
-
     def get_plugin_code(self):
         plugin_module = 'plugin_%s' % self.label
         plugin_fn = '%s.py' % plugin_module
@@ -1758,16 +1826,33 @@ class DataSheet:
         else:
             return ''
 
+    def load_plugin(self):
+        plugin_module = 'plugin_%s' % self.label
+        plugin_fn = '%s.py' % plugin_module
+        if self.filesystem.exists(plugin_fn):
+            logger.info('Load plugin of sheet %s from %s',
+                        self.label, self.filesystem.full_path(plugin_fn))
+            tmp_folder = op.dirname(self.filesystem.copy_to_tmp(plugin_fn,
+                                                                 decrypt=True))
+            sys.path.insert(0, tmp_folder)
+            plugin_module = import_module(plugin_module)
+            reload_module(plugin_module)
+            sys.path.pop(0)
+            self.set_plugin(plugin_module.CustomSheetPlugin(self))
+        else:
+            logger.info('No plugin to load for sheet %s', self.label)
+
     @staticmethod
     def load_form_master(filesystem):
         form_fn = 'master.form'
+        form = None
         if filesystem.exists(form_fn):
             content = filesystem.load(form_fn)
-            return Form.from_json(content)
+            form = Form.from_json(content)
         else:
             logger.debug('No form master to load from %s',
                          filesystem.root_folder)
-        return None
+        return form
 
     def reload_all_data(self):
         logger.debug('Reload all data for sheet %s', self.label)
@@ -1793,25 +1878,12 @@ class DataSheet:
             self.filesystem.makedirs(data_folder)
             logger.debug('Data folder %s is empty', data_folder)
 
-    def watch_other_sheet_changes(self, other_sheet):
-        f = lambda : self.plugin.update(other_sheet, other_sheet.df.tail(1))
-        other_sheet.notifier.add_watcher('appended_entry', f)
-
-        fs = lambda eid : self.plugin.update(other_sheet, other_sheet.df.loc[[eid]])
-        other_sheet.notifier.add_watcher('set_entry', fs)
-
-        # TODO: better to transmit entry_df for all notifications of entry modification
-        #       -> set_entry & appended_entry
-        fd = lambda entry_df: self.plugin.update(other_sheet, entry_df, deletion=True)
-        other_sheet.notifier.add_watcher('deleted_entry', fd)
-
     def refresh_data(self):
         """
         Refresh data based on external file changes.
-        Note: a dynamical sheet is not refreshed here.
         """
         logger.debug('Refresh data for sheet %s', self.label)
-        if not self.dynamic_only and self.filesystem is not None:
+        if self.filesystem is not None:
             modified_files, new_files, deleted_files = \
                 self.filesystem.external_changes()
             logger.debug('Files externally added: %s', new_files)
@@ -1833,8 +1905,6 @@ class DataSheet:
         if self.filesystem is None:
             raise IOError('Cannot save data of sheet %s (no associated '\
                           'filesystem)')
-        if self.dynamic_only:
-            self.filesystem.save('dynamic_only', '', overwrite=True)
 
         if not self.filesystem.exists('data'):
             self.filesystem.makedirs('data')
@@ -1851,7 +1921,7 @@ class DataSheet:
     def save_all_data(self, *args, **kwargs):
         # TODO: better API, without ignoring input args
         # TODO: admin role + lock !
-        if not self.dynamic_only and self.df is not None:
+        if self.df is not None:
             main_data_fn = 'main.csv'
             if not self.filesystem.exists('data'):
                 logger.info('Sheet %s: Create data folder', self.label)
@@ -2008,7 +2078,7 @@ class DataSheet:
     def validate_plugin(self, plugin):
         msg = ''
         try:
-            views = plugin.views()
+            views = plugin.views(self.base_views())
             if not isinstance(views, Mapping):
                 msg = 'plugin.views() must return a dict-like object mapping '\
                     'view labels to callable(dataframe)'
@@ -2029,7 +2099,7 @@ class DataSheet:
                             view_df = view_func(self.df)
                         except Exception as e:
                             msg = 'Error while getting view "%s":\n%s'%\
-                                (view_label, e)
+                                (view_label, repr(e))
                         else:
                             if view_df is None:
                                 msg = 'view "%s" is None. It should be a '\
@@ -2057,21 +2127,20 @@ class DataSheet:
 
         return msg if msg != '' else 'ok'
 
-    def set_plugin(self, plugin, workbook=None, overwrite=False):
+    def set_plugin(self, plugin, overwrite=None):
         plugin_str = None
         if isinstance(plugin, str):
             plugin_str = plugin
-            plugin = module_from_code_str(plugin).CustomSheetPlugin(self,
-                                                                    workbook)
-        # TODO: plugin is not validated yet-> fix while cleaning whole plugin design
-        if self.dynamic_only:
-            plugin.compute()
+            plugin = (module_from_code_str(plugin)
+                      .CustomSheetPlugin(self))
         validation_msg = self.validate_plugin(plugin)
         if validation_msg == 'ok':
             self.plugin = plugin
+            # cached views invalidated there:
+            views = plugin.views(self.base_views())
             logger.debug('Sheet %s, load plugin views: %s',
-                         self.label, ','.join(plugin.views()))
-            self.add_views(plugin.views()) # cached views invalidated there
+                         self.label, ','.join(views))
+            self.set_views(views)
             default_view = plugin.default_view()
             if default_view is not None:
                 self.set_default_view(default_view)
@@ -2080,7 +2149,9 @@ class DataSheet:
         else:
             raise InvalidSheetPlugin(validation_msg)
 
-    def view_validity(self, view_label=None):
+        self.plugin.set_workbook(self.workbook)
+
+    def view_validity(self, view_label=None, for_display=False):
         if view_label is None:
             view_label = self.default_view
         if self.cached_validity[view_label] is None:
@@ -2093,7 +2164,9 @@ class DataSheet:
             else:
                 logger.warning('Update cached  view validity "%s": None',
                                view_label)
-            if not self.dynamic_only:
+            if self.df is not None:
+                # IMPORTANT: ASSUME that validity_df aligns with self.df...
+                # but that may not be the case -> TODO clarify
                 try:
                     inconsistent_ids = (self.inconsistent_entries()
                                         .intersection(validity_df.index))
@@ -2101,7 +2174,10 @@ class DataSheet:
                 except Exception as e:
                     from IPython import embed; embed()
             self.cached_validity[view_label] = validity_df
-        return self.cached_validity[view_label]
+        view = self.cached_validity[view_label]
+        if for_display and self.plugin.reset_view_index_for_display():
+            view = view.reset_index()
+        return view
 
     def __eq__(self, other):
         # TODO add sort by column in plugin
@@ -2155,7 +2231,7 @@ class DataSheet:
 
     def df_to_str(self, df=None):
         df = df if df is not None else self.df
-        if df is None:
+        if df is None or df.shape[0]==0:
             return ''
         if '__origin_id__' in df.columns:
             if df.dtypes['__origin_id__'] != np.int64:
@@ -2184,10 +2260,8 @@ class DataSheet:
             self.cached_validity[view] = None
             self.cached_inconsistent_entries = None
 
-    def get_df_view(self, view_label=None):
+    def get_df_view(self, view_label=None, for_display=False):
 
-        if self.df is None:
-            return None
         if view_label is None:
             view_label = self.default_view
         if self.cached_views[view_label] is None:
@@ -2196,9 +2270,13 @@ class DataSheet:
                 logger.info('Update cached view "%s". Got columns: %s',
                             view_label, ', '.join(view_df.columns))
             else:
-                logger.warning('Update cached view "%s": None', view_label)
+                logger.info('Update cached view "%s": None', view_label)
             self.cached_views[view_label] = view_df
-        return self.cached_views[view_label]
+        view = self.cached_views[view_label]
+        if view is not None and for_display and \
+           self.plugin.reset_view_index_for_display():
+            view = view.reset_index()
+        return view
 
     def set_default_view(self, view_label):
         if view_label not in self.views:
@@ -2207,13 +2285,17 @@ class DataSheet:
         self.default_view = view_label
 
     def add_views(self, views_getters):
+        self.views.update(views_getters)
+        self.invalidate_cached_views()
+
+    def set_views(self, views_getters):
         """
         Args:
             - views_getters (dict str:callable):
             Map a view label to a callable that computes the view
             Signature is callable(dataframe)
         """
-        self.views.update(views_getters)
+        self.views = views_getters
         self.invalidate_cached_views()
 
     def is_valid(self):
@@ -2509,11 +2591,11 @@ class DataSheet:
         entry_df[other_cols] = entry_df[other_cols].fillna(pd.NA)
         entry_df[datetime_cols] = entry_df[datetime_cols].fillna(pd.NaT)
 
+        logger.debug('Sheet %s: entry_df to add: index=%s, cols=%s',
+                     self.label, entry_df.index.name,
+                     ','.join(entry_df.columns))
         # Inject entry in current dataframe
-        #if self.df is not None:
         process_entry_df(entry_df)
-        #else:
-        #    self.df = entry_df.copy()
 
         # Save to file if needed
         save_func(entry_id, entry_df)
@@ -2566,7 +2648,7 @@ class DataSheet:
                                      self.df_to_str(self.df),
                                      overwrite=True)
 
-        self.notifier.notify('deleted_entry', deleted_entry)
+        self.notifier.notify('deleted_entry', entry_df=deleted_entry)
         self.invalidate_cached_views()
 
     def set_entry(self, entry_dict, entry_id):
@@ -2585,7 +2667,7 @@ class DataSheet:
         else:
             self.df = self.df.append(entry_df)
         logger.debug('Entry has been appended to sheet %s', self.label)
-        logger.debug('Resulting df has columns: %s)', ','.join(entry_df.columns))
+        logger.debug('Resulting df has columns: %s)', ','.join(self.df.columns))
         self.notifier.notify('appended_entry')
         self.invalidate_cached_views()
 
@@ -2614,7 +2696,7 @@ class DataSheet:
                 print('set_entry after update: Error __origin_id__')
                 from IPython import embed; embed()
 
-        self.notifier.notify('entry_set', entry_df.index[0])
+        self.notifier.notify('entry_set', entry_id=entry_df.index[0])
         self.invalidate_cached_views()
 
     def import_df(self, imported_df):
@@ -2760,12 +2842,6 @@ class TestDataSheet(unittest.TestCase):
         logger.debug('--------------------')
         logger.debug('utest setUp finished')
 
-    @staticmethod
-    def ts_data_latest(df):
-        max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
-        df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
-        return df
-
     def test_df_weak_equal(self):
         df1 = pd.DataFrame(OrderedDict([
             ('Participant_ID', ['CE0004', 'CE0004', 'CE0006']),
@@ -2891,7 +2967,6 @@ class TestDataSheet(unittest.TestCase):
         sheet = DataSheet('Participant_info',
                           Form.from_dict(self.form_def_ts_data),
                           df=self.data_df_ts_data)
-        sheet.add_views({'latest' : TestDataSheet.ts_data_latest})
         sheet.set_default_view('latest')
         self.assertTrue(sheet.is_valid())
         df_latest = sheet.get_df_view()
@@ -2935,39 +3010,39 @@ class TestDataSheet(unittest.TestCase):
         # TODO: test against all versions of plugin API (may change overtime)
 
         class Plugin(SheetPlugin):
-            def views(self):
-                return {'latest' : TestDataSheet.ts_data_latest}
+            def views(self, base_views):
+                base_views.update({'young' : lambda df: df[df.Age<50]})
+                return base_views
             def default_view(self):
                 return 'latest'
             def view_validity(self, df, view):
                 return pd.DataFrame(index=df.index, columns=df.columns,
                                     data=np.ones(df.shape, dtype=bool))
 
-        self.sheet_ts.set_plugin(Plugin(self))
-        df_latest = self.sheet_ts.get_df_view()
-        mask = df_latest.Participant_ID=='CE0004'
-        self.assertEqual(df_latest.loc[mask, 'Age'].values[0], 50)
-        validity = self.sheet_ts.view_validity('latest')
-        self.assertEqual(validity.shape, df_latest.shape)
+        self.sheet_ts.set_plugin(Plugin(self.sheet_ts))
+        df_young = self.sheet_ts.get_df_view('young')
+        mask = df_young.Participant_ID=='CE0004'
+        self.assertEqual(df_young.loc[mask, 'Age'].values[0], 22)
+        validity = self.sheet_ts.view_validity('young')
+        self.assertEqual(validity.shape, df_young.shape)
         self.assertTrue((validity.dtypes == bool).all())
 
     def test_plugin_validate(self):
         # TODO: Marshal should check for duplicate entry_id
         # TODO: do not import data when there are duplicate entry ids
         class SheetPluginOk(SheetPlugin):
-            def views(self):
-                return {'latest' : TestDataSheet.ts_data_latest}
+            def views(self, base_views):
+                return {'latest' : ts_data_latest}
             def default_view(self):
                 return 'latest'
             def view_validity(self, df, view):
                 return pd.DataFrame(index=df.index, columns=df.columns,
                                     data=np.ones(df.shape, dtype=bool))
-
-        self.assertEqual(self.sheet_ts.validate_plugin(SheetPluginOk(self)),
-                         'ok')
+        plugin = SheetPluginOk(self.sheet_ts)
+        self.assertEqual(self.sheet_ts.validate_plugin(plugin), 'ok')
 
         class SheetPluginBadViews(SheetPlugin):
-            def views(self):
+            def views(self, base_views):
                 return {'latest' : lambda df: np.ones(5)}
             def default_view(self):
                 return 'latest'
@@ -2976,8 +3051,8 @@ class TestDataSheet(unittest.TestCase):
                                     data=np.ones(df.shape, dtype=bool))
 
         class SheetPluginBadDefaultView(SheetPlugin):
-            def views(self):
-                return {'latest' : TestDataSheet.ts_data_latest}
+            def views(self, base_views):
+                return {'latest' : ts_data_latest}
             def default_view(self):
                 return 'laaaaatest'
             def view_validity(self, df, view):
@@ -2986,15 +3061,18 @@ class TestDataSheet(unittest.TestCase):
 
         for PluginBad in [SheetPluginBadViews, SheetPluginBadDefaultView]:
             logger.debug('utest %s', PluginBad)
-            self.assertNotEqual(self.sheet_ts.validate_plugin(PluginBad(self)),
-                                'ok')
+            plugin = PluginBad(self.sheet_ts)
+            self.assertNotEqual(self.sheet_ts.validate_plugin(plugin), 'ok')
 
     def test_validity(self):
         class Plugin(SheetPlugin):
-            def views(self):
-                return {'latest' : TestDataSheet.ts_data_latest}
+
+            def views(self, base_views):
+                return base_views
+
             def default_view(self):
                 return 'latest'
+
             def view_validity(self, df, view):
                 validity = pd.DataFrame(index=df.index, columns=df.columns,
                                         dtype=bool)
@@ -3003,7 +3081,7 @@ class TestDataSheet(unittest.TestCase):
                     validity[col] = ~df[col].duplicated(keep=False).to_numpy()
                 return validity
 
-        self.sheet_ts.set_plugin(Plugin(self))
+        self.sheet_ts.set_plugin(Plugin(self.sheet_ts))
         # Check view validity
         view = self.sheet_ts.get_df_view('latest')
         validity = self.sheet_ts.view_validity('latest')
@@ -3024,20 +3102,19 @@ class TestDataSheet(unittest.TestCase):
         assert_frame_equal(validity, expected_validity)
 
 
-    def test_plugin_compute(self):
+    def __test_plugin_compute(self):
         class Plugin(SheetPlugin):
-            def views(self):
+            def views(self, base_views):
                 return {'base' :
                         lambda df: df[~df.Participant_ID.str.startswith('CE9')]}
             def default_view(self):
                 return 'base'
-
             def compute(self):
-                self.sheet.df = pd.DataFrame(OrderedDict([
+                self.df = pd.DataFrame(OrderedDict([
                     ('Participant_ID', ['CE0004', 'CE0004', 'CE9006']),
                     ('Age', pd.array([22, 50, None], dtype=pd.Int64Dtype()))]))
 
-        sheet = DataSheet(self.sheet_id, dynamic_only=True)
+        sheet = DataSheet(self.sheet_id)
         sheet.set_plugin(Plugin(sheet))
         self.assertEqual(sheet.df.shape, (3,2))
         sheet.df.iloc[2,0] == 'CE9006'
@@ -3049,7 +3126,7 @@ class TestDataSheet(unittest.TestCase):
         base_df.iloc[1,0] == 'CE0004'
 
     def test_data_io(self):
-        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+        self.sheet_ts.add_views({'latest' : ts_data_latest})
         form = self.sheet_ts.form_new_entry()
         entry = {'Participant_ID' : '"', 'Age' : 43,
                  'Taille' : 1.4, 'Comment' : '\t', 'Flag' : True,
@@ -3078,7 +3155,7 @@ class TestDataSheet(unittest.TestCase):
                          entry['Date'])
 
     def test_form_new_entry(self):
-        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+        self.sheet_ts.add_views({'latest' : ts_data_latest})
 
         watched_entry = []
         def watch_entry():
@@ -3113,7 +3190,7 @@ class TestDataSheet(unittest.TestCase):
     def test_form_entry_update(self):
         # Add a new entry from an existing one
 
-        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+        self.sheet_ts.add_views({'latest' : ts_data_latest})
 
         watched_entry = []
         def watch_entry():
@@ -3155,7 +3232,7 @@ class TestDataSheet(unittest.TestCase):
 
         self.assertTrue(self.sheet_ts.df.groupby('Participant_ID')
                         .__origin_id__.nunique().eq(1).all())
-        
+
         self.assertEqual(self.sheet_ts.df.tail(1)['__update_idx__'].iat[0],
                          previous_update_idx + np.int64(1))
         entry_id = form['section1']['__entry_id__'].get_value()
@@ -3171,7 +3248,7 @@ class TestDataSheet(unittest.TestCase):
                          entry['Age'])
 
     def test_entry_update_from_plugin_action(self):
-        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+        self.sheet_ts.add_views({'latest' : ts_data_latest})
 
         entry_to_update = self.sheet_ts.df.iloc[1].name
 
@@ -3192,7 +3269,7 @@ class TestDataSheet(unittest.TestCase):
     def test_form_entry_set(self):
         # Change the content of an entry
         # All values can change
-        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+        self.sheet_ts.add_views({'latest' : ts_data_latest})
         entry_to_modify = self.sheet_ts.df.iloc[1].name
 
         watched_entry = []
@@ -3237,7 +3314,7 @@ class TestDataSheet(unittest.TestCase):
 
     def test_set_entry_file_update(self):
 
-        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+        self.sheet_ts.add_views({'latest' : ts_data_latest})
         entry_to_modify = self.sheet_ts.df.iloc[1].name
         logger.debug('-------------------------')
         logger.debug('utest: create set form')
@@ -3258,7 +3335,7 @@ class TestDataSheet(unittest.TestCase):
 
 
     def test_form_folder_removal(self):
-        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+        self.sheet_ts.add_views({'latest' : ts_data_latest})
 
         form_id = 1
         form = self.sheet_ts.form_new_entry(form_id=form_id)
@@ -3298,7 +3375,7 @@ class TestDataSheet(unittest.TestCase):
                                 Form.from_dict(self.form_def_ts_data),
                                 self.data_df_ts_data,
                                 self.user, self.filesystem)
-        sh1.add_views({'latest' : TestDataSheet.ts_data_latest})
+        sh1.add_views({'latest' : ts_data_latest})
 
         form_id = 1
         form = sh1.form_new_entry(form_id=form_id)
@@ -3319,7 +3396,7 @@ class TestDataSheet(unittest.TestCase):
         self.assertFalse(sh2.filesystem.exists(sh2.get_live_form_folder(form_id)))
 
     def test_refresh_sheet(self):
-        self.sheet_ts.add_views({'latest' : TestDataSheet.ts_data_latest})
+        self.sheet_ts.add_views({'latest' : ts_data_latest})
         sheet_ts2 = DataSheet(self.sheet_id,
                               Form.from_dict(self.form_def_ts_data),
                               self.data_df_ts_data,
@@ -3708,9 +3785,8 @@ class WorkBook:
     SHEET_FOLDER = 'sheets'
     ENCRYPTION_FN = 'encryption.json'
 
-    def __init__(self, label, data_folder, filesystem,
-                 password_vault=None, linked_book_fns=None,
-                 load_linked=True):
+    def __init__(self, label, data_folder, filesystem, password_vault=None,
+                 linked_book_fns=None, load_linked=True):
         """
         Create workbook from basic configuration: where is the main data folder
         and password checksums for every role.
@@ -3835,7 +3911,8 @@ class WorkBook:
         wb_cfg_folder = op.normpath(op.dirname(workbook_fn))
         filesystem = filesystem.change_dir(wb_cfg_folder)
         if filesystem.exists(cfg['data_folder']):
-            crypt_cfg_rel_fn = op.join(cfg['data_folder'], WorkBook.ENCRYPTION_FN)
+            crypt_cfg_rel_fn = op.join(cfg['data_folder'],
+                                       WorkBook.ENCRYPTION_FN)
             crypt_cfg_full_fn = filesystem.full_path(crypt_cfg_rel_fn)
             # TODO: PasswordVauld should work from file system, not full path
             password_vault = PasswordVault.from_file(crypt_cfg_full_fn)
@@ -4059,15 +4136,6 @@ class WorkBook:
                                                        progress_callback,
                                                        parent_workbook=self))
 
-        for sheet in self.sheets.values():
-            if sheet.dynamic_only:
-                logger.debug('WorkBook %s: Setup dynamic sheet %s',
-                             self.label, sheet.label)
-                sheet.plugin.compute()
-                for other_sheet in self.sheets.values():
-                    if not other_sheet.dynamic_only:
-                        sheet.watch_other_sheet_changes(other_sheet)
-
     def load_plugin(self):
         plugin_module = 'plugin_common'
         plugin_fn = op.join(self.data_folder, '%s.py' % plugin_module)
@@ -4123,6 +4191,8 @@ class WorkBook:
             if sheet_label not in sheet_list:
                 sheet_list.append(sheet_label)
 
+        logger.debug('WorkBook %s: sheets to load from files: %s',
+                     self.label, sheet_list)
         for sheet_label in sheet_list:
             if not self.filesystem.exists(op.join(sheet_folder,
                                                   sheet_label)):
@@ -4135,7 +4205,7 @@ class WorkBook:
                 # TODO: specify role here?
                 sh_fs = self.filesystem.change_dir(op.join(sheet_folder,
                                                            sheet_label))
-                # TODO: sheet watchers?
+
                 sh = DataSheet.from_files(self.user, sh_fs,
                                           workbook=parent_workbook)
                 sheets[sheet_label] = sh
@@ -4175,11 +4245,7 @@ class WorkBook:
         sheet.set_filesystem(self.filesystem.change_dir(sheet_folder))
         sheet.save()
 
-        if sheet.dynamic_only:
-            for other_sheet in self.sheets.values():
-                if not other_sheet.dynamic_only:
-                    sheet.watch_other_sheet_changes(other_sheet)
-
+        sheet.set_workbook(self)
         self.sheets[sheet.label] = sheet
 
     @check_role(UserRole.EDITOR)
@@ -4297,11 +4363,6 @@ class TestWorkBook(unittest.TestCase):
                     title={'French':'Titre de formulaire'})
         sh1 = DataSheet(sheet_id, form, user=user)
 
-        def ts_data_latest(df):
-            max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
-            df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
-            df.set_index('Participant_ID', inplace=True)
-            return df
         sh1.add_views({'latest' : ts_data_latest})
         sh1.set_default_view('latest')
         # Add sheet to workbook (auto save)
@@ -4460,11 +4521,6 @@ class TestWorkBook(unittest.TestCase):
                     title={'French':'Titre de formulaire'})
         sh1 = DataSheet(sheet_id, form, user=user)
 
-        def ts_data_latest(df):
-            max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
-            df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
-            df.set_index('Participant_ID', inplace=True)
-            return df
         sh1.add_views({'latest' : ts_data_latest})
         sh1.set_default_view('latest')
 
@@ -4535,7 +4591,6 @@ class TestWorkBook(unittest.TestCase):
         # Create new workbook from scratch
         wb_id = 'Participant_info'
         user = 'me'
-        user_roles = {user : UserRole.ADMIN}
         data_folder = 'pinfo_files'
         wb = WorkBook(wb_id, data_folder, fs)
         wb.set_access_password(self.access_pwd)
@@ -4569,9 +4624,9 @@ class TestWorkBook(unittest.TestCase):
         # Create data sheet evaluation with outcome = OK or FAIL
         sheet_id = 'Evaluation'
         items = [FormItem({'Participant_ID' :
-                   {'French':'Code Participant'}},
-                          default_language='French',
-                          supported_languages={'French'}),
+                           {'French':'Code Participant'}},
+                        default_language='French',
+                        supported_languages={'French'}),
                  FormItem(keys={'Planned':None},
                           vtype='boolean', supported_languages={'French'},
                           default_language='French',
@@ -4598,33 +4653,27 @@ class TestWorkBook(unittest.TestCase):
 
         # Create dashboard sheet that gets list of participants from p_info
         # and compute evaluation status. Action is a string report.
-        class Dashboard(SheetPlugin):
-            def __init__(self, sheet, workbook=None):
-                super(Dashboard, self).__init__(sheet, workbook)
-                self.pp = workbook['Participant']
-                self.eval = workbook['Evaluation']
-                sheet.df = pd.DataFrame(columns=['Participant_ID', 'Eval'])
+        class Dashboard(LescaDashboard):
+            def sheets_to_watch(self):
+                return super(Dashboard, self).sheets_to_watch() + ['Evaluation']
 
-            def compute(self):
-                if self.pp.df is not None:
-                    self.sheet.df = (self.pp.df[['Participant_ID']]
-                                     .sort_values(by='Participant_ID')
-                                     .reset_index(drop=True))
-                    self.sheet.df.set_index('Participant_ID', inplace=True)
-                self.refresh_entries(self.sheet.df.index)
+            def set_workbook(self, workbook):
+                super(Dashboard, self).set_workbook(workbook)
+                if workbook is not None:
+                    self.eval = workbook['Evaluation']
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
 
-                self.sheet.df.loc[pids, 'Eval'] = 'eval_todo'
+                self.df.loc[pids, 'Eval'] = 'eval_todo'
                 eval_df = self.eval.get_df_view('latest')
                 if eval_df is not None:
                     common_index = (set(pids)
-                                    .intersection(self.sheet.df.index)
+                                    .intersection(self.df.index)
                                     .intersection(eval_df.index))
                     eval_df = eval_df.loc[common_index, :]
 
-                    map_set(self.sheet.df, 'Eval',
+                    map_set(self.df, 'Eval',
                             {'eval_OK':
                              And((eval_df, 'Planned', [True]),
                                  (eval_df, 'Outcome', ['OK'])),
@@ -4632,43 +4681,33 @@ class TestWorkBook(unittest.TestCase):
                              Or((eval_df, 'Planned', [False]),
                                 (eval_df, 'Outcome', ['FAIL']))
                              })
-
-            def update(self, sheet_source, entry_df, deletion=False):
-                if sheet_source.label == self.pp.label and deletion:
-                    self.sheet.df.drop(index=entry_df.Participant_ID.iat[0],
-                                       inplace=True)
-                    return
-
-                entry_df = entry_df.set_index('Participant_ID')
-
-                if sheet_source.label == self.pp.label and \
-                   entry_df.index.array[0] not in self.sheet.df.index:
-                    empty_df = pd.DataFrame([], index=entry_df.index)
-                    self.sheet.df = self.sheet.df.append(empty_df)
-                self.refresh_entries(entry_df.index)
             # TODO action
 
-        sh_dashboard = DataSheet('Dashboard', dynamic_only=True)
-        sh_dashboard.set_plugin(Dashboard(sh_dashboard, wb))
+        logger.debug('utest: Create dashboard')
+        sh_dashboard = DataSheet('Dashboard')
+        sh_dashboard.set_plugin(Dashboard(sh_dashboard))
         wb.add_sheet(sh_dashboard)
 
-        self.assertEqual(set(wb['Dashboard'].df.index.values),
+        dashboard_df = sh_dashboard.get_df_view()
+        self.assertEqual(set(dashboard_df.index.values),
                          set(pp_df['Participant_ID']))
-        self.assertTrue((wb['Dashboard'].df['Eval'] == 'eval_todo').all())
+        self.assertTrue((dashboard_df['Eval'] == 'eval_todo').all())
 
+        logger.debug('utest: Add new participant CE90002')
         # Add new pp
         form = sh_pp.form_new_entry()
-        form.set_values_from_entry({'Participant_ID' : 'CE4444',
+        form.set_values_from_entry({'Participant_ID' : 'CE90002',
                                     'Secure_ID' : '5432524'})
         form.submit()
 
-        last_dashboard_entry = wb['Dashboard'].df.tail(1)
-        self.assertEqual(last_dashboard_entry.index[0],
-                         'CE4444')
-        self.assertEqual(last_dashboard_entry['Eval'].iat[0],
-                         'eval_todo')
+        dashboard_df = sh_dashboard.get_df_view()
+        last_dashboard_entry = dashboard_df.tail(1)
+        self.assertEqual(last_dashboard_entry.index[0], 'CE90002')
+        self.assertEqual(last_dashboard_entry['Eval'].iat[0], 'eval_todo')
 
         # Add new eval
+        logger.debug('utest: Add evaluation for CE4444 '\
+                     '(not in participants list)')
         pid = 'CE4444'
         form = sh_eval.form_new_entry()
         form.set_values_from_entry({'Participant_ID' : pid,
@@ -4676,8 +4715,21 @@ class TestWorkBook(unittest.TestCase):
                                     'Outcome' : 'FAIL',
                                     'Timestamp' : datetime.now()})
         form.submit()
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
-                         'eval_FAIL')
+        dashboard_df = sh_dashboard.get_df_view()
+        self.assertNotIn(pid, dashboard_df.index)
+
+        # Add new eval
+        logger.debug('utest: Add evaluation for CE90002 '\
+                     '(not in participants list)')
+        pid = 'CE90002'
+        form = sh_eval.form_new_entry()
+        form.set_values_from_entry({'Participant_ID' : pid,
+                                    'Planned' : True,
+                                    'Outcome' : 'FAIL',
+                                    'Timestamp' : datetime.now()})
+        form.submit()
+        dashboard_df = sh_dashboard.get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_FAIL')
 
         time.sleep(0.01)
         logger.debug('-------------- Add working entry ------------------')
@@ -4687,18 +4739,13 @@ class TestWorkBook(unittest.TestCase):
                                     'Outcome' : 'OK',
                                     'Timestamp' : datetime.now()})
         form.submit()
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
-                         'eval_OK')
+        dashboard_df = sh_dashboard.get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_OK')
 
-        print("wb['Dashboard'].df (%s) before delete_entry:" % \
-              str(wb['Dashboard'].df.shape))
-        print(wb['Dashboard'].df)
         sh_pp.delete_entry(sh_pp.df.iloc[1].name)
-        print("wb['Dashboard'].df (%s) after delete_entry:" % \
-              str(wb['Dashboard'].df.shape))
-        print(wb['Dashboard'].df)
+        dashboard_df = sh_dashboard.get_df_view()
 
-        self.assertEqual(wb['Dashboard'].df.shape, (2,1))
+        self.assertEqual(dashboard_df.shape, (2,1))
 
     def test_dashboard_interview_track(self):
         # Create empty workbook
@@ -4707,7 +4754,6 @@ class TestWorkBook(unittest.TestCase):
         # Create new workbook from scratch
         wb_id = 'Participant_info'
         user = 'me'
-        user_roles = {user : UserRole.ADMIN}
         data_folder = 'pinfo_files'
         wb = WorkBook(wb_id, data_folder, fs)
         wb.set_access_password(self.access_pwd)
@@ -4716,12 +4762,6 @@ class TestWorkBook(unittest.TestCase):
         wb.decrypt(self.access_pwd)
         wb.set_user(user, UserRole.ADMIN)
         wb.user_login(user, self.admin_pwd)
-
-        def ts_data_latest(df):
-            max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
-            df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
-            df.set_index('Participant_ID', inplace=True)
-            return df
 
         # Create data sheet participant info (no form)
         sheet_id = 'Participant'
@@ -4857,39 +4897,23 @@ class TestWorkBook(unittest.TestCase):
 
         # Create dashboard sheet that gets list of participants from p_info
         # and compute evaluation status. Action is a string report.
-        class Dashboard(SheetPlugin):
-            def __init__(self, sheet, workbook=None):
-                super(Dashboard, self).__init__(sheet, workbook)
-                self.pp = workbook['Participant']
-
-            def compute(self):
-                if self.pp.df is not None:
-                    self.sheet.df = (self.pp.df[['Participant_ID']]
-                                     .sort_values(by='Participant_ID')
-                                     .reset_index(drop=True))
-                    self.sheet.df.set_index('Participant_ID', inplace=True)
-                self.refresh_entries(self.sheet.df.index)
+        class Dashboard(LescaDashboard):
+            def sheets_to_watch(self):
+                return super(Dashboard, self).sheets_to_watch() + \
+                    [DEFAULT_INTERVIEW_PLAN_SHEET_LABEL, 'Eval']
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
-                track_interview(self.sheet.df, 'Eval', self.workbook, pids)
+                track_interview(self.df, 'Eval', self.workbook, pids)
 
-            def update(self, sheet_source, entry):
-                entry = entry.set_index('Participant_ID')
-                if sheet_source.label == self.pp.label and \
-                   entry.index.array[0] not in self.sheet.df.index:
-                    # Add an empty line for the new entry index:
-                    empty_df = pd.DataFrame([], index=entry.index)
-                    self.sheet.df = self.sheet.df.append(empty_df)
-                self.refresh_entries(entry.index)
-
-        sh_dashboard = DataSheet('Dashboard', dynamic_only=True)
-        sh_dashboard.set_plugin(Dashboard(sh_dashboard, wb))
+        sh_dashboard = DataSheet('Dashboard')
+        sh_dashboard.set_plugin(Dashboard(sh_dashboard))
         wb.add_sheet(sh_dashboard)
 
-        self.assertEqual(set(wb['Dashboard'].df.index.values),
+        df = wb['Dashboard'].get_df_view()
+        self.assertEqual(set(df.index.values),
                          set(pp_df['Participant_ID']))
-        self.assertTrue((wb['Dashboard'].df['Eval'] == 'eval_not_scheduled').all())
+        self.assertTrue((df['Eval'] == 'eval_not_scheduled').all())
 
         from .plugin_tools import DATE_FMT
         pid = 'CE0001'
@@ -4903,11 +4927,11 @@ class TestWorkBook(unittest.TestCase):
                                'Availability' : None,
                                'Send_Email' : True,
                                'Timestamp' : ts})
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
-                         'eval_not_scheduled')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+        df = wb['Dashboard'].get_df_view()
+        self.assertEqual(df.loc[pid, 'Eval'], 'eval_not_scheduled')
+        self.assertEqual(df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertTrue(pd.isna(wb['Dashboard'].df.loc[pid, 'Eval_Date']))
+        self.assertTrue(df.loc[pid, 'Eval_Date'])
 
         logger.debug('------- Plan interview for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
@@ -4920,11 +4944,12 @@ class TestWorkBook(unittest.TestCase):
                               'Availability' : None,
                               'Send_Email' : False,
                               'Timestamp' : ts})
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+        df = wb['Dashboard'].get_df_view()
+        self.assertEqual(df.loc[pid, 'Eval'],
                          'eval_scheduled')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+        self.assertEqual(df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+        self.assertEqual(df.loc[pid, 'Eval_Date'],
                          idate.strftime(DATE_FMT))
 
         logger.debug('------- Plan availability for %s --------' % pid)
@@ -4938,12 +4963,11 @@ class TestWorkBook(unittest.TestCase):
                               'Availability' : 'parfois',
                               'Send_Email' : False,
                               'Timestamp' : ts})
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
-                         'eval_scheduled')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
-                         'Thomas Vincent')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
-                         'parfois')
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_scheduled')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'parfois')
+
         # TODO: test competing entries plan/interview with different timestamp
 
         logger.debug('------- Plan interview email for %s --------' % pid)
@@ -4958,11 +4982,12 @@ class TestWorkBook(unittest.TestCase):
                               'Send_Email' : True,
                               'Email_Status' : 'to_send',
                               'Timestamp' : ts})
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_email_pending')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
                          idate.strftime(DATE_FMT))
 
         logger.debug('------- Interview email sent for %s --------' % pid)
@@ -4977,11 +5002,12 @@ class TestWorkBook(unittest.TestCase):
                               'Send_Email' : True,
                               'Email_Status' : 'sent',
                               'Timestamp' : ts})
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_email_sent')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
                          idate.strftime(DATE_FMT))
 
 
@@ -4996,11 +5022,12 @@ class TestWorkBook(unittest.TestCase):
                               'Send_Email' : True,
                               'Email_Status' : 'error',
                               'Timestamp' : ts})
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_email_error')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
                          idate.strftime(DATE_FMT))
 
         logger.debug('------- Interview done for %s --------' % pid)
@@ -5011,11 +5038,11 @@ class TestWorkBook(unittest.TestCase):
                                'Staff' : 'Thomas Vincent',
                                'Session_Status' : 'done',
                                'Timestamp' : ts})
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
-                         'eval_ok')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_ok')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
                          ts.strftime(DATE_FMT))
 
         logger.debug('------- Interview to redo for %s --------' % pid)
@@ -5026,11 +5053,12 @@ class TestWorkBook(unittest.TestCase):
                                'Staff' : 'Thomas Vincent',
                               'Session_Status' : 'redo',
                               'Timestamp' : ts})
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_redo')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
                          ts.strftime(DATE_FMT))
 
         logger.debug('------- Interview cancelled for %s --------' % pid)
@@ -5040,14 +5068,12 @@ class TestWorkBook(unittest.TestCase):
                               'Staff' : 'Thomas Vincent',
                               'Session_Action' : 'cancel_session',
                               'Timestamp' : ts})
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval'],
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_cancelled')
-        self.assertEqual(wb['Dashboard'].df.loc[pid, 'Eval_Staff'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertTrue(pd.isna(wb['Dashboard'].df.loc[pid, 'Eval_Date']))
-
-    def test_view_on_dynamic_sheet(self):
-        pass
+        self.assertTrue(pd.isna(dashboard_df.loc[pid, 'Eval_Date']))
 
     def test_workbook_version(self):
         # TODO: enable version tracking while loading a workbook
@@ -5213,7 +5239,7 @@ class FormItem:
         choices : dict(key:dict(language:showntext))
         """
         # TODO: remove unique_view
-        logger.debug('Create FormItem keys: %s, title: %s', keys, title)
+        logger.debug('Create FormItem with keys: %s, title: %s', keys, title)
         self.notifier = Notifier(watchers if watchers is not None else {})
 
         self.keys = keys if keys is not None else {}
@@ -5243,11 +5269,8 @@ class FormItem:
         self.invalid_vtype_format_message = vtype_tools['message invalid format']
         self.dtype_pd = vtype_tools['dtype_pd']
 
-        # logger.debug('Compile regexp: %s', regexp)
-        self.regexp = re.compile(regexp)
-        self.regexp_invalid_message = regexp_invalid_message \
-            if len(regexp_invalid_message)>0 else \
-            'Invalid format, must verify regexp "%s"' % regexp
+        self.set_regexp(regexp, regexp_invalid_message)
+
         self.choices = None
         self.set_choices(choices, other_choice_label)
 
@@ -5272,7 +5295,7 @@ class FormItem:
         self.hidden = hidden
         self.nb_lines = nb_lines
 
-        self.init_values = init_values
+        self.set_init_values(init_values)
         self.values_str = {}
         self.generator = generator
 
@@ -5281,6 +5304,18 @@ class FormItem:
         self.validity = None
         self.reset(force=True)
 
+    def set_init_values(self, init_values):
+        if init_values is not None:
+            assert(isinstance(init_values, dict))
+            assert(all(k1==k2 for k1,k2 in zip(init_values.keys(),
+                                               self.keys.keys())))
+        self.init_values = init_values
+
+    def set_regexp(self, regexp_str, regexp_invalid_message=''):
+        self.regexp = re.compile(regexp_str)
+        self.regexp_invalid_message = regexp_invalid_message \
+            if len(regexp_invalid_message)>0 else \
+            'Invalid format, must verify regexp "%s"' % regexp_str
 
     @staticmethod
     def validate_key(key):
@@ -5291,20 +5326,27 @@ class FormItem:
                              'identifier and not be "__entry_id__", '\
                              '"__submission__" or "__origin_id__"' % key)
 
-    def set_choices(self, choices, other_choice_label):
+    def set_choices(self, choices, other_choice_label=None):
         if self.choices is not None:
             assert(len(self.choices)>0) # TODO insure this
             for value,label in self.choices.items():
                 self.tr.unregister(value) # TODO
-                self.tr.unregister('other_choice')
+        self.tr.unregister('other_choice')
 
         self.allow_other_choice = False
+        logger.debug('Set choice -- other_choice_label: %s',
+                     other_choice_label)
+        if isinstance(other_choice_label, dict) and \
+           all(len(tr)==0 for tr in other_choice_label.values()):
+            other_choice_label = None
         if choices is not None:
             for value,translation in choices.items():
                 self.tr.register(value, translation)
-            if other_choice_label is not None:
-                self.allow_other_choice = True
-                self.tr.register('other_choice', other_choice_label)
+            if other_choice_label is not None and len(other_choice_label)>0:
+                 self.allow_other_choice = True
+                 self.tr.register('other_choice', other_choice_label)
+            else:
+                self.tr.register('other_choice', '')
         else:
             self.tr.register('other_choice', '')
 
@@ -5447,17 +5489,19 @@ class FormItem:
             self._set_validity(True, '', key)
             return
 
-        if self.choices is not None and not self.allow_other_choice:
+        if self.choices is not None :
             current_choices = {self.tr[k]:k for k in self.choices}
-            if value_str not in current_choices:
-                choices_str = ', '.join(['"%s"' %c for c in current_choices])
+            if value_str not in current_choices and not self.allow_other_choice:
+                choices_str = ', '.join(["'%s'" %c for c in current_choices])
                 logger.debug('Value of %s not in choices (%s)', self,
                              choices_str)
                 self._set_validity(False, 'Value must be one of "%s"' % \
                                    choices_str, key)
                 return
             else:
-                value_str = current_choices[value_str]
+                value_str = (current_choices[value_str]
+                             if value_str in current_choices
+                             else value_str)
 
         if len(value_str)==0 and not self.allow_None:
             logger.debug('%s cannot be empty', self)
@@ -5509,7 +5553,6 @@ class FormItem:
     def set_value(self, key, value, force=False):
         if self.choices is not None and \
            str(value) in self.choices:
-            # from IPython import embed; embed()
             value_str = self.tr[str(value)]
         else:
             value_str = (self.format(value) \
@@ -6209,8 +6252,9 @@ class TestForm(unittest.TestCase):
                          },
                          'choices' : {
                              'choice 1' : {dlg : 'choice 1'},
-                             'choice 2' : {dlg : 'choice 2'}},
-                             'other_choice_label' : {dlg : 'Autre'},
+                             'choice 2' : {dlg : 'choice 2'}
+                         },
+                         'other_choice_label' : {dlg : 'Autre'},
                         },
                         {
                         'keys' : {
@@ -6264,8 +6308,12 @@ class TestForm(unittest.TestCase):
         form = Form.from_gform_json_file(gform_json_fn, 'French',
                                          use_item_title_as_key=True,
                                          paragraph_nb_lines=PARAGRAPH_NB_LINES)
+        mc_item = form['__section_0__']['multiple_choice']
+        self.assertTrue(mc_item.allow_other_choice)
+        dd_item = form['__section_0__']['dropdown']
+        self.assertFalse(dd_item.allow_other_choice)
 
-        if 0 and form != expected_form:
+        if form != expected_form:
             self.show_form_diff(form, expected_form)
         self.assertEqual(form, expected_form)
 
@@ -6484,15 +6532,6 @@ class TestFormSection(unittest.TestCase):
         section['Participant_ID'].set_input_str('??')
         self.assertEqual(received_signals, ['section_invalid'])
 
-
-class LazyFunc:
-    def __init__(self, func, *args, **kwargs):
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
-    def __call__(self, **kwargs):
-        return self.func(*self.args, **{**self.kwargs, **kwargs})
-
 class TestFormItem(unittest.TestCase):
 
     def setUp(self):
@@ -6609,7 +6648,7 @@ class TestFormItem(unittest.TestCase):
                                  'True':{'English':'Yep'}},
                         supported_languages={'English'},
                         default_language='English',
-                        init_values={'exclude' : 'False'})
+                        init_values={'exclude' : False})
         self.assertEqual(item.get_value(), False)
         item = FormItem(**item.to_dict())
         self.assertEqual(item.get_value(), False)
@@ -6803,10 +6842,11 @@ class TestFormItem(unittest.TestCase):
                         other_choice_label={'French' : 'Autre'},
                         supported_languages={'French'},
                         default_language='French')
-        item.set_input_str('epic_member')
+        item.set_input_str('Membre EPIC')
         self.assertTrue(item.is_valid())
         self.assertEqual(item.get_value(), 'epic_member')
         item.set_input_str('Dummy')
+        self.assertEqual(item.get_value(), 'Dummy')
         self.assertTrue(item.is_valid())
 
     def test_uuid_generation(self):
@@ -7027,34 +7067,22 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.sheet = data_sheet
 
     def rowCount(self, parent=None):
-        view_df = self.sheet.get_df_view()
+        view_df = self.sheet.get_df_view(for_display=True)
         if view_df is not None:
             return view_df.shape[0]
         else:
             return 0
 
-    def columnCount(self, parnet=None):
-        view_df = self.sheet.get_df_view()
+    def columnCount(self, parent=None):
+        view_df = self.sheet.get_df_view(for_display=True)
         count = 0
         if view_df is not None:
-            count = view_df.shape[1] + self.sheet.dynamic_only
+            count = view_df.shape[1]
         return count
-
-    def get_df_view(self):
-        view = self.sheet.get_df_view()
-        if self.sheet.dynamic_only:
-            view = view.reset_index()
-        return view
-
-    def view_validity(self):
-        validity = self.sheet.view_validity()
-        if self.sheet.dynamic_only:
-            validity = validity.reset_index()
-        return validity
 
     def data(self, index, role=QtCore.Qt.DisplayRole):
         if index.isValid():
-            view = self.get_df_view()
+            view = self.sheet.get_df_view(for_display=True)
             column = view.columns[index.column()]
             value = view.iloc[index.row(), index.column()]
             value_str = str(value) if not pd.isna(value) else ''
@@ -7062,8 +7090,8 @@ class DataSheetModel(QtCore.QAbstractTableModel):
                 return value_str
             else:
                 if role == QtCore.Qt.BackgroundRole:
-                    validity = self.view_validity().iloc[index.row(),
-                                                         index.column()]
+                    validity = (self.sheet.view_validity(for_display=True)
+                                .iloc[index.row(), index.column()])
                     if not validity:
                         return QtGui.QColor('#9C0006')
 
@@ -7081,14 +7109,14 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         return None
 
     def entry_id(self, index):
-        """ ASSUME: not called with dynamic sheet """
+        """ ASSUME: not called with "dynamic" sheet """
         if index.isValid():
-            return self.get_df_view().index[index.row()]
+            return self.sheet.get_df_view().index[index.row()]
         return None
 
     def headerData(self, col, orientation, role):
         if role==QtCore.Qt.DisplayRole:
-            df_view = self.get_df_view()
+            df_view = self.sheet.get_df_view()
             if orientation == QtCore.Qt.Horizontal:
                 return df_view.columns[col]
         return None
@@ -7109,7 +7137,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         return True
 
     def update_before_delete(self, entry_id):
-        view = self.get_df_view()
+        view = self.sheet.get_df_view()
         irow = view.index.get_loc(entry_id)
         logger.debug('before_delete(%d) -> irow = %d',
                      entry_id, irow)
@@ -7118,7 +7146,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
 
     @QtCore.pyqtSlot()
     def update_after_set(self, entry_id):
-        view = self.get_df_view()
+        view = self.sheet.get_df_view()
         irow = view.index.get_loc(entry_id)
         ncols = view.shape[1]
         self.dataChanged.emit(self.createIndex(irow,0),
@@ -7716,7 +7744,7 @@ class PiccelApp(QtWidgets.QApplication):
 
             model = DataSheetModel(sh)
             sh.notifier.add_watcher('appended_entry', model.update_after_append)
-            sh.notifier.add_watcher('set_entry', model.update_after_set)
+            sh.notifier.add_watcher('entry_set', model.update_after_set)
             sh.notifier.add_watcher('pre_delete_entry', model.update_before_delete)
             sh.notifier.add_watcher('deleted_entry', model.update_after_delete)
 
@@ -7759,7 +7787,7 @@ class PiccelApp(QtWidgets.QApplication):
                              idx.row(), entry_id)
                 sh.delete_entry(entry_id)
 
-            if not sh.dynamic_only: #TODO: and user is admin
+            if sh.form_master is not None: #TODO: and user is admin
                 _data_sheet_ui.button_edit_entry.clicked.connect(f_edit_entry)
             else:
                 _data_sheet_ui.button_edit_entry.hide()
@@ -7768,7 +7796,8 @@ class PiccelApp(QtWidgets.QApplication):
                                                       self._workbook_ui.tabWidget,
                                                       form=sh.form_new_entry())
 
-            if not sh.dynamic_only or not self.logic.workbook.has_write_access: #TODO: and user is admin
+            if sh.form_master is not None and \
+               self.logic.workbook.has_write_access: #TODO: and user is admin
                 _data_sheet_ui.button_new_entry.clicked.connect(f_new_entry)
                 (_data_sheet_ui.button_delete_entry
                  .clicked.connect(f_delete_entry))
@@ -7803,7 +7832,7 @@ class PiccelApp(QtWidgets.QApplication):
             if self.logic.workbook.user_role < UserRole.ADMIN:
                 _data_sheet_ui.button_edit_plugin.hide()
             if self.logic.workbook.user_role < UserRole.ADMIN or \
-               sh.dynamic_only:
+               sh.form_master is None:
                 _data_sheet_ui.button_edit_form.hide()
                 _data_sheet_ui.button_delete_entry.hide()
 
