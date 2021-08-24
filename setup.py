@@ -54,7 +54,7 @@ setup(name='piccel', version=version['__version__'],
       keywords='piccel spreadsheet data collection encryption',
       packages=find_packages(exclude=['test']),
       python_requires='>=3',
-      install_requires=['numpy', 'pandas', 'cryptography', 'appdirs',
+      install_requires=['packaging', 'numpy', 'pandas', 'cryptography', 'appdirs',
                         'beautifulsoup4', 'bcrypt', 'html5lib'],
       extras_require={"PDF":  ['weasyprint', 'PyPDF2']},
       entry_points={
