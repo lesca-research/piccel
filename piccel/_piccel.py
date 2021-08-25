@@ -1494,12 +1494,12 @@ class LocalFileSystem:
         os.remove(op.join(self.root_folder, fn))
         self.current_stats.pop(fn)
 
-    def save(self, fn, content_str='', overwrite=False):
+    def save(self, fn, content_str='', overwrite=False, crypt=True):
         fn = op.normpath(fn)
         afn = op.join(self.root_folder, fn)
         logger.debug('Filesystem - save to abs fn: %s', afn)
         logger.debug('Filesystem - working directory: %s', os.getcwd())
-        if self.encrypter is not None:
+        if self.encrypter is not None and crypt:
             content_str = self.encrypter.encrypt_str(content_str)
 
         if op.exists(afn) and not overwrite:
@@ -1750,7 +1750,6 @@ class DataSheet:
         self.df = None
         if form_master is not None:
             cols = ['__entry_id__', '__origin_id__', '__update_idx__']
-
             self.df = pd.DataFrame(columns=cols)
             self.df['__entry_id__'] = self.df['__entry_id__'].astype(np.int64)
             self.df['__origin_id__'] = self.df['__origin_id__'].astype(np.int64)
@@ -2313,7 +2312,7 @@ class DataSheet:
 
     def validate_unique(self, key, value, origin_id, update_idx, entry_id):
         logger.debug('Sheet %s: Validate uniqueness of %s', self.label, key)
-        if self.df is None:
+        if self.df is None or self.df.shape[0]==0:
             return True
         cols = [key, '__origin_id__', '__update_idx__']
         if entry_id not in self.df.index:
@@ -3698,7 +3697,7 @@ class WorkBook:
     ENCRYPTION_FN = 'encryption.json'
 
     def __init__(self, label, data_folder, filesystem, password_vault=None,
-                 linked_book_fns=None, load_linked=True):
+                 linked_book_fns=None):
         """
         Create workbook from basic configuration: where is the main data folder
         and password checksums for every role.
@@ -3758,10 +3757,9 @@ class WorkBook:
         # TODO: user role retrieval can only be done while decrypting!
         self.linked_books = []
         # TODO: utest linked workbook!
-        if load_linked:
-            for linked_workbook_fn in self.linked_book_fns.keys():
-                self.preload_linked_workbook(linked_workbook_fn)
-                # TODO: warning: prevent circular linkage!
+        for linked_workbook_fn in self.linked_book_fns.keys():
+            self.preload_linked_workbook(linked_workbook_fn)
+            # TODO: warning: prevent circular linkage!
 
         logger.debug('WorkBook %s init: root folder: %s',
                      self.label, self.filesystem.root_folder)
@@ -3804,10 +3802,11 @@ class WorkBook:
             }
         # TODO use normpath when actually reading/writing files/folders!
         logger.debug('Write WorkBook configuration file to %s', workbook_fn)
-        self.filesystem.save(workbook_fn, json.dumps(cfg))
+        self.filesystem.save(workbook_fn, json.dumps(cfg), overwrite=True,
+                             crypt=False)
 
     @staticmethod
-    def from_configuration_file(workbook_fn, filesystem=None, load_linked=True):
+    def from_configuration_file(workbook_fn, filesystem=None):
         """
         workbook_file is a json file:
         {
@@ -3840,8 +3839,7 @@ class WorkBook:
 
         return WorkBook(cfg['workbook_label'], cfg['data_folder'],
                         filesystem, password_vault=password_vault,
-                        linked_book_fns=cfg.get('linked_sheets', None),
-                        load_linked=load_linked)
+                        linked_book_fns=cfg['linked_sheets'])
 
     def set_password(self, role, pwd, old_pwd=''):
         assert(role in UserRole)
@@ -4044,7 +4042,8 @@ class WorkBook:
 
         # ASSUME all sheet labels are unique
         self.sheets = self.load_sheets(parent_workbook=self)
-        logger.debug('WorkBook %s: Load linked workbooks', self.label)
+        logger.debug('WorkBook %s: Load linked workbooks: %s',
+                     self.label, ','.join('"%s"'%l for l,b in self.linked_books))
         for linked_book, sheet_regexp in self.linked_books:
             self.sheets.update(linked_book.load_sheets(sheet_regexp,
                                                        progress_callback,
@@ -4052,6 +4051,8 @@ class WorkBook:
         self.after_workbook_load()
 
     def after_workbook_load(self):
+        logger.debug('Workbook %s: call after_workbook_load on all sheets',
+                     self.label)
         for sheet in self.sheets.values():
             sheet.after_workbook_load()
 
@@ -4577,8 +4578,8 @@ class TestWorkBook(unittest.TestCase):
                 return super(Dashboard, self).sheets_to_watch() + ['Evaluation']
 
             def after_workbook_load(self):
-                super(Dashboard, self).after_workbook_load()
                 self.eval = self.workbook['Evaluation']
+                super(Dashboard, self).after_workbook_load()
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)

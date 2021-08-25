@@ -12,29 +12,40 @@ class LescaDashboard(SheetPlugin):
     def after_workbook_load(self):
         super(LescaDashboard, self).after_workbook_load()
         self.pp = self.workbook['Participants']
+        self.df = pd.DataFrame()
 
-    def sheets_to_watch(self):
-        return ['Participants']
-
-    def get_data(self):
-        logger.debug('Plugin of sheet %s, get_data: self.df=%s, '\
-                     'self.pp.df=%s', self.sheet.label,
-                     self.df.shape if self.df is not None else 'None',
-                     self.pp.df.shape if self.pp.df is not None \
-                     else 'None')
-        if self.df is None and self.pp.df is not None:
+        if self.pp.df is not None and self.pp.df.shape[0] > 0:
             self.df = (self.pp.df[['Participant_ID']]
                        .sort_values(by='Participant_ID')
                        .reset_index(drop=True))
             self.df.set_index('Participant_ID', inplace=True)
             self.refresh_entries(self.df.index)
-        return self.df
+        else:
+            self.df = (pd.DataFrame(columns=['Participant_ID'])
+                       .set_index('Participant_ID'))
+
+    def sheets_to_watch(self):
+        return ['Participants']
+
+    # def get_data(self):
+    #     logger.debug('Plugin of sheet %s, get_data: self.df=%s, '\
+    #                  'self.pp.df=%s', self.sheet.label,
+    #                  self.df.shape if self.df is not None else 'None',
+    #                  self.pp.df.shape if self.pp.df is not None \
+    #                  else 'None')
+    #     if self.df is None and self.pp.df is not None:
+    #         self.df = (self.pp.df[['Participant_ID']]
+    #                    .sort_values(by='Participant_ID')
+    #                    .reset_index(drop=True))
+    #         self.df.set_index('Participant_ID', inplace=True)
+    #         self.refresh_entries(self.df.index)
+    #     return self.df
 
     def refresh_entries(self, pids):
         raise NotImplementedError('Must be implemented in subclass')
 
     def views(self, base_views):
-        return {'full' : lambda df: self.get_data()}
+        return {'full' : lambda df: self.df}
 
     def default_view(self):
         return 'full'
@@ -51,6 +62,7 @@ class LescaDashboard(SheetPlugin):
            entry_df.index.array[0] not in self.df.index:
             empty_df = pd.DataFrame([], index=entry_df.index)
             self.df = self.df.append(empty_df)
+            self.df.sort_index(inplace=True)
         if entry_df.index.values[0] in self.df.index:
             self.refresh_entries(entry_df.index)
         else:
@@ -304,7 +316,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     column_staff = '%s_Staff' % interview_label
     if column_staff not in dashboard_df.columns:
-        dashboard_df[column_staff] = ''
+        dashboard_df[column_staff] = pd.NA
 
     column_date = '%s_Date' % interview_label
     if column_date not in dashboard_df.columns:
