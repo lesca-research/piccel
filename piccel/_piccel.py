@@ -1800,6 +1800,8 @@ class DataSheet:
     def latest_update_df(self, df=None):
         if df is None:
             df = self.df
+        if df is None or df.shape[0]==0:
+            return None
         max_uidx = lambda x: (x.loc[x['__update_idx__'] == \
                                     x['__update_idx__'].max()])
         return (df.groupby(by='__origin_id__', group_keys=False)
@@ -2075,81 +2077,28 @@ class DataSheet:
             raise InvalidSheetLabel("Sheet label %s has invalid format")
         return label
 
-    def validate_plugin(self, plugin):
-        msg = ''
-        try:
-            views = plugin.views(self.base_views())
-            if not isinstance(views, Mapping):
-                msg = 'plugin.views() must return a dict-like object mapping '\
-                    'view labels to callable(dataframe)'
-            else:
-                default_view = plugin.default_view()
-                if default_view is not None and default_view not in views and\
-                   default_view not in self.views:
-                    msg = 'View "%s" returned by plugin.default_view() is not '\
-                        'in available views: %s' % \
-                          (default_view, ', '.join(chain(views, self.views)))
-
-                if self.df is None:
-                    logger.warning('Cannot check plugin views because data '\
-                                   'is empty')
-                else:
-                    for view_label, view_func in views.items():
-                        try:
-                            view_df = view_func(self.df)
-                        except Exception as e:
-                            msg = 'Error while getting view "%s":\n%s'%\
-                                (view_label, repr(e))
-                        else:
-                            if view_df is None:
-                                msg = 'view "%s" is None. It should be a '\
-                                    'panda.DataFrame object.' %  view_label
-                            else:
-                                try:
-                                    validity = plugin.view_validity(view_df,
-                                                                    view_label)
-                                except Exception as e:
-                                    msg = 'Error while getting view validity %s:\n%s'%\
-                                        (view_label, e)
-                                else:
-                                    if validity is None:
-                                        msg = 'view validity "%s" is None. It '\
-                                            'should be a panda.DataFrame object.' %\
-                                            view_label
-                                    elif validity.shape != view_df.shape:
-                                        msg = 'Shape of view validity for "%s" %s '\
-                                            'not consistent with view shape %s' % \
-                                            (view_label, validity.shape,
-                                             view_df.shape)
-        except AttributeError as e:
-            func_name = e.args[0].split('attribute')[1].strip().strip("'")
-            msg = 'Function %s not found in plugin' % func_name
-
-        return msg if msg != '' else 'ok'
-
     def set_plugin(self, plugin, overwrite=None):
         plugin_str = None
         if isinstance(plugin, str):
             plugin_str = plugin
             plugin = (module_from_code_str(plugin)
                       .CustomSheetPlugin(self))
-        validation_msg = self.validate_plugin(plugin)
-        if validation_msg == 'ok':
-            self.plugin = plugin
-            # cached views invalidated there:
-            views = plugin.views(self.base_views())
-            logger.debug('Sheet %s, load plugin views: %s',
-                         self.label, ','.join(views))
-            self.set_views(views)
-            default_view = plugin.default_view()
-            if default_view is not None:
-                self.set_default_view(default_view)
-            if plugin_str is not None:
-                self.dump_plugin_code(plugin_str, overwrite=overwrite)
-        else:
-            raise InvalidSheetPlugin(validation_msg)
+        self.plugin = plugin
+        # cached views invalidated there:
+        views = plugin.views(self.base_views())
+        logger.debug('Sheet %s, load plugin views: %s',
+                     self.label, ','.join(views))
+        self.set_views(views)
+        default_view = plugin.default_view()
+        if default_view is not None:
+            self.set_default_view(default_view)
+        if plugin_str is not None:
+            self.dump_plugin_code(plugin_str, overwrite=overwrite)
 
         self.plugin.set_workbook(self.workbook)
+
+    def after_workbook_load(self):
+        self.plugin.after_workbook_load()
 
     def view_validity(self, view_label=None, for_display=False):
         if view_label is None:
@@ -3027,43 +2976,6 @@ class TestDataSheet(unittest.TestCase):
         self.assertEqual(validity.shape, df_young.shape)
         self.assertTrue((validity.dtypes == bool).all())
 
-    def test_plugin_validate(self):
-        # TODO: Marshal should check for duplicate entry_id
-        # TODO: do not import data when there are duplicate entry ids
-        class SheetPluginOk(SheetPlugin):
-            def views(self, base_views):
-                return {'latest' : ts_data_latest}
-            def default_view(self):
-                return 'latest'
-            def view_validity(self, df, view):
-                return pd.DataFrame(index=df.index, columns=df.columns,
-                                    data=np.ones(df.shape, dtype=bool))
-        plugin = SheetPluginOk(self.sheet_ts)
-        self.assertEqual(self.sheet_ts.validate_plugin(plugin), 'ok')
-
-        class SheetPluginBadViews(SheetPlugin):
-            def views(self, base_views):
-                return {'latest' : lambda df: np.ones(5)}
-            def default_view(self):
-                return 'latest'
-            def view_validity(self, df, view):
-                return pd.DataFrame(index=df.index, columns=df.columns,
-                                    data=np.ones(df.shape, dtype=bool))
-
-        class SheetPluginBadDefaultView(SheetPlugin):
-            def views(self, base_views):
-                return {'latest' : ts_data_latest}
-            def default_view(self):
-                return 'laaaaatest'
-            def view_validity(self, df, view):
-                return pd.DataFrame(index=df.index, columns=df.columns,
-                                    data=np.ones(df.shape, dtype=bool))
-
-        for PluginBad in [SheetPluginBadViews, SheetPluginBadDefaultView]:
-            logger.debug('utest %s', PluginBad)
-            plugin = PluginBad(self.sheet_ts)
-            self.assertNotEqual(self.sheet_ts.validate_plugin(plugin), 'ok')
-
     def test_validity(self):
         class Plugin(SheetPlugin):
 
@@ -3876,6 +3788,9 @@ class WorkBook:
 
     def __getitem__(self, sheet_label):
         assert(self.logged_in)
+        if sheet_label not in self.sheets:
+            logger.error('WorkBook %s: cannot find sheet %s in %s',
+                         self.label, sheet_label, ', '.join(self.sheets))
         return self.sheets[sheet_label]
 
     def has_sheet(self, sheet_label):
@@ -4116,7 +4031,6 @@ class WorkBook:
             self.dump_default_plugin(plugin_fn)
         self.load_plugin()
 
-        sheet_folder = op.join(self.data_folder, WorkBook.SHEET_FOLDER)
         # TODO: sort out sheet filtering
         # Get number of element to load:
         if progress_callback is not None:
@@ -4135,6 +4049,11 @@ class WorkBook:
             self.sheets.update(linked_book.load_sheets(sheet_regexp,
                                                        progress_callback,
                                                        parent_workbook=self))
+        self.after_workbook_load()
+
+    def after_workbook_load(self):
+        for sheet in self.sheets.values():
+            sheet.after_workbook_load()
 
     def load_plugin(self):
         plugin_module = 'plugin_common'
@@ -4601,7 +4520,7 @@ class TestWorkBook(unittest.TestCase):
         wb.user_login(user, self.admin_pwd)
 
         # Create data sheet participant info (no form)
-        sheet_id = 'Participant'
+        sheet_id = 'Participants'
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE90001'],
                               'Secure_ID' : ['452164532', '5R32141']})
         items = [FormItem({'Participant_ID' :
@@ -4657,10 +4576,9 @@ class TestWorkBook(unittest.TestCase):
             def sheets_to_watch(self):
                 return super(Dashboard, self).sheets_to_watch() + ['Evaluation']
 
-            def set_workbook(self, workbook):
-                super(Dashboard, self).set_workbook(workbook)
-                if workbook is not None:
-                    self.eval = workbook['Evaluation']
+            def after_workbook_load(self):
+                super(Dashboard, self).after_workbook_load()
+                self.eval = self.workbook['Evaluation']
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
@@ -4687,6 +4605,8 @@ class TestWorkBook(unittest.TestCase):
         sh_dashboard = DataSheet('Dashboard')
         sh_dashboard.set_plugin(Dashboard(sh_dashboard))
         wb.add_sheet(sh_dashboard)
+
+        wb.after_workbook_load()
 
         dashboard_df = sh_dashboard.get_df_view()
         self.assertEqual(set(dashboard_df.index.values),
@@ -4764,7 +4684,7 @@ class TestWorkBook(unittest.TestCase):
         wb.user_login(user, self.admin_pwd)
 
         # Create data sheet participant info (no form)
-        sheet_id = 'Participant'
+        sheet_id = 'Participants'
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002']})
         items = [FormItem({'Participant_ID' :
                    {'French':'Code Participant'}},
@@ -4909,6 +4829,8 @@ class TestWorkBook(unittest.TestCase):
         sh_dashboard = DataSheet('Dashboard')
         sh_dashboard.set_plugin(Dashboard(sh_dashboard))
         wb.add_sheet(sh_dashboard)
+
+        wb.after_workbook_load()
 
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(set(df.index.values),

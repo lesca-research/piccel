@@ -3,6 +3,9 @@ import numpy as np
 
 from piccel.core import LazyFunc
 
+import logging
+logger = logging.getLogger('piccel')
+
 class SheetPlugin:
 
     def __init__(self, data_sheet):
@@ -29,10 +32,14 @@ class SheetPlugin:
         self._watch_sheets([data_sheet])
 
     def set_workbook(self, workbook):
+        logger.debug('Plugin of sheet %s, set workbook: %s',
+                     self.sheet.label, workbook.label \
+                     if workbook is not None else 'None')
         self.workbook = workbook
-        if workbook is not None:
-            self._watch_sheets([self.workbook[l] \
-                                for l in self.sheets_to_watch()])
+
+    def after_workbook_load(self):
+        self._watch_sheets([self.workbook[l] \
+                            for l in self.sheets_to_watch()])
 
     def _on_entry_append(self, sheet):
         self.update(sheet, sheet.df.tail(1))

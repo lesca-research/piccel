@@ -9,16 +9,12 @@ class LescaDashboard(SheetPlugin):
         super(LescaDashboard, self).__init__(sheet)
         self.df = None
 
-    def set_workbook(self, workbook):
-        super(LescaDashboard, self).set_workbook(workbook)
-        logger.debug('Plugin of sheet %s, set workbook: %s',
-                     self.sheet.label, workbook.label \
-                     if workbook is not None else 'None')
-        if workbook is not None:
-            self.pp = workbook['Participant']
+    def after_workbook_load(self):
+        super(LescaDashboard, self).after_workbook_load()
+        self.pp = self.workbook['Participants']
 
     def sheets_to_watch(self):
-        return ['Participant']
+        return ['Participants']
 
     def get_data(self):
         logger.debug('Plugin of sheet %s, get_data: self.df=%s, '\
