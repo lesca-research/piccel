@@ -20,12 +20,16 @@ class LescaDashboard(SheetPlugin):
                        .reset_index(drop=True))
             self.df.set_index('Participant_ID', inplace=True)
             self.refresh_entries(self.df.index)
+            self.sheet.invalidate_cached_views()
         else:
             self.df = (pd.DataFrame(columns=['Participant_ID'])
                        .set_index('Participant_ID'))
 
     def sheets_to_watch(self):
         return ['Participants']
+
+    def reset_view_index_for_display(self):
+        return True
 
     # def get_data(self):
     #     logger.debug('Plugin of sheet %s, get_data: self.df=%s, '\
@@ -42,18 +46,24 @@ class LescaDashboard(SheetPlugin):
     #     return self.df
 
     def refresh_entries(self, pids):
-        raise NotImplementedError('Must be implemented in subclass')
+        logger.warning('refresh_entries not implement in plugin of sheet %s',
+                       self.sheet.label)
 
-    def views(self, base_views):
-        return {'full' : lambda df: self.df}
+    def views(self, base_views, for_display=False):
+        return {'full' :
+                lambda df: self.df.reset_index() if for_display else self.df}
 
     def default_view(self):
         return 'full'
 
     def update(self, sheet_source, entry_df, deletion=False):
         if sheet_source.label == self.pp.label and deletion:
+            self.sheet.notifier.notify('pre_delete_entry',
+                                       entry_id=entry_df.index[0])
             self.df.drop(index=entry_df.Participant_ID.iat[0],
                          inplace=True)
+            self.sheet.invalidate_cached_views()
+            self.sheet.notifier.notify('deleted_entry', entry_df=entry_df)
             return
 
         entry_df = entry_df.set_index('Participant_ID')
@@ -62,13 +72,17 @@ class LescaDashboard(SheetPlugin):
            entry_df.index.array[0] not in self.df.index:
             empty_df = pd.DataFrame([], index=entry_df.index)
             self.df = self.df.append(empty_df)
-            self.df.sort_index(inplace=True)
-        if entry_df.index.values[0] in self.df.index:
+            self.sheet.invalidate_cached_views()
+            self.sheet.notifier.notify('appended_entry')
+            # self.df.sort_index(inplace=True) # TODO: handle in UI view
+        if entry_df.index[0] in self.df.index:
             self.refresh_entries(entry_df.index)
+            self.sheet.invalidate_cached_views()
+            self.sheet.notifier.notify('entry_set', entry_id=entry_df.index[0])
         else:
             logger.warning('Update plugin of sheet %s: '\
-                           'New entry for %s not in index',
-                           self.sheet.label,
+                           'udpated entry from %s with id=%d is not in index',
+                           self.sheet.label, sheet_source.label,
                            entry_df.index.values[0])
 
     def action(self):
@@ -187,12 +201,12 @@ def filter_indexes(filter_def):
 
 def interview_action(entry_df, interview_column, workbook):
 
-
     value = entry_df[interview_column].iat[0]
     if value=='' or pd.isna(value) or value is None:
         return None
 
     form = None
+    action_label = ''
     if interview_column.endswith('_Date'):
         # if value.endswith('_not_scheduled') or value.endswith('_cancelled'):
         # elif value.endswith('_scheduled') or value.endswith('_email_pending') or \
@@ -214,8 +228,8 @@ def interview_action(entry_df, interview_column, workbook):
             'Session_Action' : 'do_session',
             'Staff' : interview_sheet.user
         })
-
-    return form
+        action_label = '%s | New' % interview_sheet.label
+    return form, action_label
 
 DATE_FMT = '%Y-%m-%d %H:%M:%S'
 DEFAULT_INTERVIEW_PLAN_SHEET_LABEL = 'Interview_Plan'
@@ -426,11 +440,8 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print(plan_df)
 
     dashboard_df.loc[common_index, column_staff] = ''
-    try:
-        dashboard_df.loc[pids_plan, column_staff] = \
-            plan_df.loc[pids_plan, 'Staff']
-    except ValueError:
-        from IPython import embed; embed()
+    dashboard_df.loc[pids_plan, column_staff] = \
+        plan_df.loc[pids_plan, 'Staff']
 
     dashboard_df.loc[pids_interview, column_staff] = \
         interview_df.loc[pids_interview, 'Staff']

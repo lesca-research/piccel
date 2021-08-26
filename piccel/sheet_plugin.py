@@ -29,7 +29,7 @@ class SheetPlugin:
            - df = sheet.get_df_view(view_label)
         """
         self.sheet = data_sheet
-        self._watch_sheets([data_sheet])
+        # self._watch_sheets([data_sheet])
 
     def set_workbook(self, workbook):
         logger.debug('Plugin of sheet %s, set workbook: %s',
@@ -127,7 +127,8 @@ class SheetPlugin:
 
         Return: None | Form | html str | Plotter | svg str
         """
-        return self.sheet.form_update_entry(entry_df.index.values[0])
+        label = '%s | update' % self.sheet
+        return self.sheet.form_update_entry(entry_df.index.values[0]), label
 
     def hint(self, column, value):
         """

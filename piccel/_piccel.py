@@ -74,6 +74,22 @@ console_handler.setFormatter(logging.Formatter(fmt=fmt,
                                                datefmt='%Y-%m-%d %H:%M:%S'))
 logger.addHandler(console_handler)
 
+DEBUG_LEVEL2_NUM = 9
+logging.addLevelName(DEBUG_LEVEL2_NUM, "DEBUG2")
+def debug2(self, message, *args, **kws):
+    if self.isEnabledFor(DEBUG_LEVEL2_NUM):
+        # Yes, logger takes its '*args' as 'args'.
+        self._log(DEBUG_LEVEL2_NUM, message, args, **kws)
+logging.Logger.debug2 = debug2
+
+DEBUG_LEVEL3_NUM = 8
+logging.addLevelName(DEBUG_LEVEL3_NUM, "DEBUG3")
+def debug3(self, message, *args, **kws):
+    if self.isEnabledFor(DEBUG_LEVEL3_NUM):
+        # Yes, logger takes its '*args' as 'args'.
+        self._log(DEBUG_LEVEL3_NUM, message, args, **kws)
+logging.Logger.debug3 = debug3
+
 # For DataSheet export to pdf:
 HTML_TOP = '''
 <html>
@@ -512,13 +528,11 @@ function snakeCaseToCamelCase(s) {
                 next_section = (section_names[i_section+1]
                                 if i_section+1 < len(section_names)
                                 else '__submit__')
-                logger.debug('Set default next section of %s to %s',
+                logger.debug2('Set default next section of %s to %s',
                              section_name, next_section)
                 section.set_next_section_definition(next_section)
-                print('!!!! section.next_section_predicates:',
-                      section.next_section_predicates)
             else:
-                logger.debug('Kept next section definition for %s: %s',
+                logger.debug2('Kept next section definition for %s: %s',
                              section_name, section.next_section_definition)
 
             for item in section.items:
@@ -775,32 +789,11 @@ function snakeCaseToCamelCase(s) {
         return json.dumps(self.to_dict(), indent=4)
 
     def set_input_callback(self, callback):
-        """ callback(section, key, input_string) """
+        """ callback(form_section, item_key, input_str) """
         for section_label, section in self.sections.items():
             for item in section.items:
-                item_callback = lambda key, s: callback(section_label, key, s)
+                item_callback = LazyFunc(callback, form_section=section_label)
                 item.set_input_callback(item_callback)
-
-    def __attach_sheet(self, sheet):
-        # TODO: remove. It has been replaced with set_unique_validator
-
-        # df = get_data_df()
-        # if sheet.df is None:
-        #     logger.warning('No data to attach to (form %s) in sheet', self.tr['title'])
-        #     return
-
-        # if df.index.name is not None and self.index_key is None:
-        #     raise InconsistentIndex('No index found in form but df has one (%s)',
-        #                             df.index.name)
-        # if df.index.name is None and self.index_key is not None:
-        #     raise InconsistentIndex('No index in df but form has one (%s)',
-        #                             df.index.name, self.index_key)
-
-        for section in self.sections.values():
-            for item in section.items:
-                item.attach_sheet(sheet)
-
-        self.sheet = sheet
 
     def to_next_section(self):
         if self.current_section == None:
@@ -851,14 +844,14 @@ function snakeCaseToCamelCase(s) {
         return 'Form{%s}' % self.tr['title']
 
     def on_section_is_valid(self, section_name, section):
-        logger.debug('%s is notified that section %s is valid',
+        logger.debug2('%s is notified that section %s is valid',
                      self, section_name)
         self.nb_valid_sections = min(len(self.section_path),
                                      self.nb_valid_sections+1)
         self.validate()
 
     def on_section_is_invalid(self, section_name, section):
-        logger.debug('%s is notified that section %s is invalid',
+        logger.debug2('%s is notified that section %s is invalid',
                      self, section_name)
         self.nb_valid_sections = max(0, self.nb_valid_sections-1)
         self.validate()
@@ -869,26 +862,26 @@ function snakeCaseToCamelCase(s) {
         #     current_section_is_final
         validity = current_section_is_final and \
             all(self[s].is_valid() for s in self.section_path)
-        logger.debug('%s: validity is %s (ccurrent_section=%s, is_final=%s, '\
+        logger.debug2('%s: validity is %s (ccurrent_section=%s, is_final=%s, '\
                      'nb_valid_sections=%s, section_path=%s)', self, validity,
                      self.current_section_name, current_section_is_final,
                      self.nb_valid_sections, ', '.join(self.section_path))
         signal = ['not_ready_to_submit', 'ready_to_submit'][validity]
-        logger.debug('%s notifies %s', self, signal)
+        logger.debug2('%s notifies %s', self, signal)
         self.notifier.notify(signal)
 
         if current_section_is_final or not self.current_section.is_valid():
             signal = 'next_section_not_available'
         else:
             signal = 'next_section_available'
-        logger.debug('%s notifies %s', self, signal)
+        logger.debug2('%s notifies %s', self, signal)
         self.notifier.notify(signal)
 
         if self.previous_section() is None:
             signal = 'previous_section_not_available'
         else:
             signal = 'previous_section_available'
-        logger.debug('%s notifies %s', self, signal)
+        logger.debug2('%s notifies %s', self, signal)
         self.notifier.notify(signal)
 
         self.validity = validity
@@ -1150,13 +1143,13 @@ class FormSection:
     def check_validity(self):
         # self.validity = self.nb_valid_items==len(self.items)
         self.validity = all(i.is_valid() for i in self.items)
-        logger.debug('%s - validity:  %s', self, self.validity)
+        logger.debug2('%s - validity:  %s', self, self.validity)
         if not self.validity:
             for i in self.items:
                 if not i.is_valid():
-                    logger.debug('item %s is invalid', i)
+                    logger.debug2('item %s is invalid', i)
         signal = ['section_invalid', 'section_valid'][self.validity]
-        logger.debug('%s notifies %s', self, signal)
+        logger.debug2('%s notifies %s', self, signal)
         self.notifier.notify(signal)
 
     def to_dict(self):
@@ -1167,7 +1160,7 @@ class FormSection:
                 'next_section_definition' : self.next_section_definition}
 
     def set_language(self, language):
-        logger.debug('Set %s as section language', language)
+        logger.debug2('Set %s as section language', language)
         self.tr.set_language(language)
         for item in self.items:
             item.set_language(language)
@@ -1178,7 +1171,7 @@ class FormSection:
     def is_valid(self):
         if not self.validity:
             for i in self.get_invalid_items():
-                logger.debug('item %s is invalid', i)
+                logger.debug2('item %s is invalid', i)
         return self.validity
 
     def get_invalid_items(self):
@@ -1194,19 +1187,19 @@ class FormSection:
             for item in self.items:
                 current_items.update(item.get_items())
         except InvalidValue:
-            logger.debug('Section is invalid, no transition')
+            logger.debug2('Section is invalid, no transition')
             return None
 
         for section_label, predicate in self.next_section_predicates:
             if predicate(current_items):
-                logger.debug('Conditional transition to %s because '\
+                logger.debug2('Conditional transition to %s because '\
                              '"%s" matched', section_label, predicate.code)
                 return section_label
             else:
-                logger.debug('No conditional transition to %s because '\
+                logger.debug2('No conditional transition to %s because '\
                              '"%s" did not match', section_label, predicate.code)
 
-        logger.debug('No matching transition criterion')
+        logger.debug2('No matching transition criterion')
         return None
 
     def submit(self):
@@ -1420,9 +1413,9 @@ class LocalFileSystem:
     def makedirs(self, folder):
         full_folder = op.join(self.root_folder, folder)
         if op.exists(full_folder):
-            logger.debug('Folder %s already exists', full_folder)
+            logger.debug2('Folder %s already exists', full_folder)
             return
-        logger.debug('Create folder %s', full_folder)
+        logger.debug2('Create folder %s', full_folder)
         os.makedirs(full_folder)
         assert(op.exists(full_folder))
 
@@ -1457,7 +1450,7 @@ class LocalFileSystem:
     def rmtree(self, folder):
         full_folder = op.join(self.root_folder, folder)
         if not op.exists(full_folder):
-            logger.debug('rmtree: Folder %s does not exist', full_folder)
+            logger.debug2('rmtree: Folder %s does not exist', full_folder)
             return
 
         for wroot, dirs, files in os.walk(op.join(self.root_folder, folder)):
@@ -1466,7 +1459,7 @@ class LocalFileSystem:
                 fn = op.normpath(op.join(rdir, bfn))
                 self.current_stats.pop(fn)
 
-        logger.debug('Remove folder %s', full_folder)
+        logger.debug2('Remove folder %s', full_folder)
         shutil.rmtree(full_folder)
 
     def copy_to_tmp(self, fn, decrypt=False, tmp_dir=None):
@@ -1490,15 +1483,15 @@ class LocalFileSystem:
         self.save(dest_rfn, content, overwrite=overwrite)
 
     def remove(self, fn):
-        logger.debug('Remove file %s', fn)
+        logger.debug2('Remove file %s', fn)
         os.remove(op.join(self.root_folder, fn))
         self.current_stats.pop(fn)
 
     def save(self, fn, content_str='', overwrite=False, crypt=True):
         fn = op.normpath(fn)
         afn = op.join(self.root_folder, fn)
-        logger.debug('Filesystem - save to abs fn: %s', afn)
-        logger.debug('Filesystem - working directory: %s', os.getcwd())
+        logger.debug2('Filesystem - save to abs fn: %s', afn)
+        logger.debug2('Filesystem - working directory: %s', os.getcwd())
         if self.encrypter is not None and crypt:
             content_str = self.encrypter.encrypt_str(content_str)
 
@@ -1742,7 +1735,10 @@ class DataSheet:
         self.views = {}
 
         self.cached_views = defaultdict(lambda: None)
+        self.cached_views_for_display = defaultdict(lambda: None)
         self.cached_validity = defaultdict(lambda: None)
+        self.cached_validity_for_display = defaultdict(lambda: None)
+
         self.cached_inconsistent_entries = None
 
         self.notifier = Notifier(watchers if watchers is not None else {})
@@ -1955,8 +1951,8 @@ class DataSheet:
                     try:
                         self.filesystem.rmtree(live_form_folder)
                     except Exception as e:
-                        logger.error('Error while deleting live form folder %s',
-                                     live_form_folder)
+                        logger.error('Error while deleting live form '\
+                                     'folder %s: %s', live_form_folder, repr(e))
                     continue
                 saved_entries = defaultdict(dict)
                 for entry_fn in self.filesystem.listdir(live_form_folder):
@@ -1964,7 +1960,7 @@ class DataSheet:
                                                            entry_fn))
                     section, key, value_str = json.loads(content)
                     saved_entries[section][key] = value_str
-                logger.debug('Create live form %s with %d saved entries',
+                logger.debug2('Create live form %s with %d saved entries',
                              form_id_str, len(saved_entries))
                 first_section = self.form_master.first_section()
 
@@ -1980,7 +1976,7 @@ class DataSheet:
                     submission = (saved_entries[first_section]
                                   .pop('__submission__'))
 
-                    logger.debug('Loaded from live from file: %s '\
+                    logger.debug2('Loaded from live from file: %s '\
                                  '__entry_id__ = %s, __origin_id__ = %s, '\
                                  '__update_idx__ = %s ', entry_id_str,
                                  origin_id_str, update_idx_str)
@@ -1993,11 +1989,14 @@ class DataSheet:
                     # From this point form input saving callback is active
                     for section, entries in saved_entries.items():
                         for key, value_str in entries.items():
-                            live_form[section][key].set_input_str(value_str,
-                                                                  use_callback=False,
-                                                                  force=True)
+                            try:
+                                live_form[section][key].set_input_str(value_str,
+                                                                      use_callback=False,
+                                                                      force=True)
+                            except KeyError:
+                                from IPython import embed; embed()
                     first_section = live_form[live_form.first_section()]
-                    logger.debug('IDs after live form input: __entry_id__=%d, '\
+                    logger.debug2('IDs after live form input: __entry_id__=%d, '\
                                  '__origin_id__=%d',
                                  first_section['__entry_id__'].get_value(),
                                  first_section['__origin_id__'].get_value(),
@@ -2007,7 +2006,7 @@ class DataSheet:
                 else:
                     logger.error('Cannot load live form %s', form_id_str)
         else:
-            logger.debug('Live form folder %s is empty', top_folder)
+            logger.debug2('Live form folder %s is empty', top_folder)
 
     def save_form_master(self, overwrite=False):
         if self.filesystem is None:
@@ -2085,7 +2084,7 @@ class DataSheet:
         self.plugin = plugin
         # cached views invalidated there:
         views = plugin.views(self.base_views())
-        logger.debug('Sheet %s, load plugin views: %s',
+        logger.debug2('Sheet %s, load plugin views: %s',
                      self.label, ','.join(views))
         self.set_views(views)
         default_view = plugin.default_view()
@@ -2102,7 +2101,12 @@ class DataSheet:
     def view_validity(self, view_label=None, for_display=False):
         if view_label is None:
             view_label = self.default_view
-        if self.cached_validity[view_label] is None:
+
+        cached_validity = self.cached_validity_for_display if for_display \
+            else self.cached_validity
+
+        validity_df = cached_validity[view_label]
+        if validity_df is None:
             validity_df = self.plugin.view_validity(self.get_df_view(view_label),
                                                     view_label)
             if validity_df is not None:
@@ -2115,17 +2119,13 @@ class DataSheet:
             if self.df is not None:
                 # IMPORTANT: ASSUME that validity_df aligns with self.df...
                 # but that may not be the case -> TODO clarify
-                try:
-                    inconsistent_ids = (self.inconsistent_entries()
-                                        .intersection(validity_df.index))
-                    validity_df.loc[inconsistent_ids, :] = False
-                except Exception as e:
-                    from IPython import embed; embed()
-            self.cached_validity[view_label] = validity_df
-        view = self.cached_validity[view_label]
-        if for_display and self.plugin.reset_view_index_for_display():
-            view = view.reset_index()
-        return view
+                inconsistent_ids = (self.inconsistent_entries()
+                                    .intersection(validity_df.index))
+                validity_df.loc[inconsistent_ids, :] = False
+            if for_display and self.plugin.reset_view_index_for_display():
+                validity_df = validity_df.reset_index()
+            cached_validity[view_label] = validity_df
+        return validity_df
 
     def __eq__(self, other):
         # TODO add sort by column in plugin
@@ -2189,7 +2189,7 @@ class DataSheet:
         df = df.copy()
         for col in df.columns:
             if col not in ['__entry_id__', '__origin_id__', '__update_idx__']:
-                logger.debug('df_to_str: format column %s', col)
+                logger.debug2('df_to_str: format column %s', col)
                 f = lambda v: self.form_master.format(col,v) \
                     if not pd.isna(v) else ''
                 df[[col]] = df[[col]].applymap(f)
@@ -2205,26 +2205,30 @@ class DataSheet:
     def invalidate_cached_views(self):
         for view in self.views:
             self.cached_views[view] = None
+            self.cached_views_for_display[view] = None
             self.cached_validity[view] = None
+            self.cached_validity_for_display[view] = None
             self.cached_inconsistent_entries = None
 
     def get_df_view(self, view_label=None, for_display=False):
 
         if view_label is None:
             view_label = self.default_view
-        if self.cached_views[view_label] is None:
+        cached_views = self.cached_views_for_display if for_display \
+            else self.cached_views
+
+        view_df = cached_views[view_label]
+        if view_df is None:
             view_df = self.views[view_label](self.df)
             if view_df is not None:
                 logger.info('Update cached view "%s". Got columns: %s',
                             view_label, ', '.join(view_df.columns))
             else:
                 logger.info('Update cached view "%s": None', view_label)
-            self.cached_views[view_label] = view_df
-        view = self.cached_views[view_label]
-        if view is not None and for_display and \
-           self.plugin.reset_view_index_for_display():
-            view = view.reset_index()
-        return view
+            if for_display and self.plugin.reset_view_index_for_display():
+                view_df = view_df.reset_index()
+            cached_views[view_label] = view_df
+        return view_df
 
     def set_default_view(self, view_label):
         if view_label not in self.views:
@@ -2311,7 +2315,7 @@ class DataSheet:
         return ids_of_conflicts
 
     def validate_unique(self, key, value, origin_id, update_idx, entry_id):
-        logger.debug('Sheet %s: Validate uniqueness of %s', self.label, key)
+        logger.debug2('Sheet %s: Validate uniqueness of %s', self.label, key)
         if self.df is None or self.df.shape[0]==0:
             return True
         cols = [key, '__origin_id__', '__update_idx__']
@@ -2383,7 +2387,7 @@ class DataSheet:
         else:
             to_ignore = None
 
-        logger.debug('Sheet %s: fork from master', self.label)
+        logger.debug2('Sheet %s: fork from master', self.label)
         form = self.form_master.new()
         forms_folder = self.get_live_forms_folder()
 
@@ -2399,6 +2403,7 @@ class DataSheet:
                                self.label)
                     form_id = uuid1().int
 
+
         if self.filesystem is not None:
             if not self.filesystem.exists(forms_folder):
                 self.filesystem.makedirs(forms_folder)
@@ -2406,15 +2411,16 @@ class DataSheet:
             form_folder = op.join(forms_folder, '%d' % form_id)
             self.filesystem.makedirs(form_folder)
 
-            f = lambda sec, k, s: self.save_live_form_input(form_id, sec, k, s)
-            form.set_input_callback(f)
+            # f = lambda sec, k, s: self.save_live_form_input(form_id, sec, k, s)
+            form.set_input_callback(LazyFunc(self.save_live_form_input,
+                                             form_id=form_id))
 
         entry_id = entry_id if entry_id is not None else self.new_entry_id()
         origin_id = origin_id if origin_id is not None else entry_id
 
         form.set_values_from_entry(entry_dict)
 
-        logger.debug('Sheet %s: set unique validator for items %s',
+        logger.debug2('Sheet %s: set unique validator for items %s',
                      self.label, ', '.join(['%s'%i for i in form.unique_items]))
 
         for item in form.unique_items:
@@ -2426,7 +2432,7 @@ class DataSheet:
         entry_id_str = str(entry_id)
         origin_id_str = str(origin_id)
         update_idx_str = str(update_idx)
-        logger.debug('Sheet %s: prepend entry id %d, origin id %d, update idx %s '\
+        logger.debug2('Sheet %s: prepend entry id %d, origin id %d, update idx %s '\
                      'and submission mode %s', self.label, entry_id, origin_id,
                      update_idx, submission)
         form._prepend('__entry_id__', entry_id, 'int64')
@@ -2445,7 +2451,7 @@ class DataSheet:
             self.save_live_form_input(form_id, first_section,
                                       '__submission__', submission)
 
-        logger.debug('Sheet %s: call form.set_on_submission', self.label)
+        logger.debug2('Sheet %s: call form.set_on_submission', self.label)
         form.set_on_submission(LazyFunc(self.on_submitted_entry, form_id=form_id))
         form.set_on_cancel(LazyFunc(self.clean_live_form, form_id=form_id))
 
@@ -2457,7 +2463,7 @@ class DataSheet:
     def save_live_form_input(self, form_id, form_section, item_key, input_str):
         fn = self.get_live_form_entry_fn(form_id, form_section,
                                          item_key, input_str)
-        logger.debug('Save input of form %d, section "%s" and key "%s" to '\
+        logger.debug2('Save input of form %d, section "%s" and key "%s" to '\
                      'file %s', form_id, form_section, item_key, fn)
         entry = (form_section, item_key, input_str)
         self.filesystem.save(fn, json.dumps(entry), overwrite=True)
@@ -2488,7 +2494,7 @@ class DataSheet:
         entry_dict = entry_dict.copy()
         submission_mode = entry_dict.pop('__submission__')
         entry_id = entry_dict.pop('__entry_id__')
-        logger.debug('Processing submission of entry %d (origin id: %d, '\
+        logger.debug2('Processing submission of entry %d (origin id: %d, '\
                      'update idx: %d), mode: %s',
                      entry_id, entry_dict['__origin_id__'],
                      entry_dict['__update_idx__'], submission_mode)
@@ -2512,7 +2518,7 @@ class DataSheet:
             logger.error('Error while deleting live form folder %s', form_folder)
 
         self.live_forms.pop(form_id)
-        logger.debug('Sheet %s: Popped form_id %s -> remaining forms: %s',
+        logger.debug2('Sheet %s: Popped form_id %s -> remaining forms: %s',
                      self.label, form_id,
                      ', '.join(str(fid) for fid in self.live_forms))
 
@@ -2555,12 +2561,12 @@ class DataSheet:
         if self.filesystem is not None:
             entry_rfn = '%d.csv' % entry_id
             entry_fn = op.join('data', entry_rfn)
-            logger.debug('Sheet %s: save entry %d to %s',
+            logger.debug2('Sheet %s: save entry %d to %s',
                          self.label, entry_id, entry_fn)
             self.filesystem.save(entry_fn, self.df_to_str(entry_df))
             return [entry_rfn], []
         else:
-            logger.debug('Sheet %s: entry %d not saved (no associated filesystem)',
+            logger.debug2('Sheet %s: entry %d not saved (no associated filesystem)',
                          self.label, entry_id)
         return [], []
 
@@ -2582,7 +2588,7 @@ class DataSheet:
         self.notifier.notify('pre_delete_entry', entry_id)
         self.df.drop(entry_id, inplace=True)
 
-        logger.debug('Sheet %s: df shape after deletion: %s',
+        logger.debug2('Sheet %s: df shape after deletion: %s',
                      self.label, self.df.shape)
 
         if self.filesystem is not None:
@@ -2596,8 +2602,8 @@ class DataSheet:
                                      self.df_to_str(self.df),
                                      overwrite=True)
 
-        self.notifier.notify('deleted_entry', entry_df=deleted_entry)
         self.invalidate_cached_views()
+        self.notifier.notify('deleted_entry', entry_df=deleted_entry)
 
     def set_entry(self, entry_dict, entry_id):
         """ WARNING: this is an admin feature, not conflict-free! """
@@ -2614,10 +2620,10 @@ class DataSheet:
             self.df = entry_df.copy()
         else:
             self.df = self.df.append(entry_df)
-        logger.debug('Entry has been appended to sheet %s', self.label)
-        logger.debug('Resulting df has columns: %s)', ','.join(self.df.columns))
-        self.notifier.notify('appended_entry')
+        logger.debug2('Entry has been appended to sheet %s', self.label)
+        logger.debug2('Resulting df has columns: %s)', ','.join(self.df.columns))
         self.invalidate_cached_views()
+        self.notifier.notify('appended_entry')
 
     def set_entry_df(self, entry_df):
         logger.debug('Set df entry %d in sheet "%s" (index: %s, origin_id: %d, '\
@@ -2644,14 +2650,15 @@ class DataSheet:
                 print('set_entry after update: Error __origin_id__')
                 from IPython import embed; embed()
 
-        self.notifier.notify('entry_set', entry_id=entry_df.index[0])
         self.invalidate_cached_views()
+        self.notifier.notify('entry_set', entry_id=entry_df.index[0])
+
 
     def import_df(self, imported_df):
         """ """
         assert('__entry_id__' not in imported_df.columns)
         if imported_df.index.name != '__entry_id__':
-            logger.debug('Generate entry uuids for index of sheet %s',
+            logger.debug2('Generate entry uuids for index of sheet %s',
                          self.label)
             nb_rows = imported_df.shape[0]
             ids = np.array([self.new_entry_id() \
@@ -3165,8 +3172,8 @@ class TestDataSheet(unittest.TestCase):
 
         logger.debug('-------------------------')
         logger.debug('utest: create update form')
-        form = self.sheet_ts.plugin.action(self.sheet_ts.df.iloc[[1]],
-                                           'Participant_ID')
+        form, alabel = self.sheet_ts.plugin.action(self.sheet_ts.df.iloc[[1]],
+                                                   'Participant_ID')
         self.assertEqual(form['section1']['__submission__'].get_value(),
                          'append')
         self.assertNotEqual(form['section1']['__entry_id__'].get_value(),
@@ -4195,9 +4202,8 @@ class WorkBook:
 
         form = sheet.new_live_form(entry_dict=entry_dict, watchers=watchers)
         logger.debug('Make form input callback for form %s', form_id)
-        f = lambda sec, k, s: self.save_live_form_input(sheet_label, form_id,
-                                                        sec, k, s)
-        form.set_input_callback(f)
+        form_callback = LazyFunc(self.save_live_form_input, form_id=form_id)
+        form.set_input_callback(form_callback)
         self.live_forms_by_sheet[sheet_label][form_id] = form
         self.live_forms_by_id[form_id] = form
         return form, form_id
@@ -5162,7 +5168,7 @@ class FormItem:
         choices : dict(key:dict(language:showntext))
         """
         # TODO: remove unique_view
-        logger.debug('Create FormItem with keys: %s, title: %s', keys, title)
+        logger.debug2('Create FormItem with keys: %s, title: %s', keys, title)
         self.notifier = Notifier(watchers if watchers is not None else {})
 
         self.keys = keys if keys is not None else {}
@@ -5257,8 +5263,8 @@ class FormItem:
         self.tr.unregister('other_choice')
 
         self.allow_other_choice = False
-        logger.debug('Set choice -- other_choice_label: %s',
-                     other_choice_label)
+        logger.debug2('Set choice -- other_choice_label: %s',
+                      other_choice_label)
         if isinstance(other_choice_label, dict) and \
            all(len(tr)==0 for tr in other_choice_label.values()):
             other_choice_label = None
@@ -5287,11 +5293,11 @@ class FormItem:
     def validate_unique(self, key, value):
         if self.unique:
             if self.unique_validator is None:
-                logger.debug('Cannot check uniqueness of %s (no validator set)',
+                logger.debug2('Cannot check uniqueness of %s (no validator set)',
                              key)
                 return True
             else:
-                logger.debug('Check uniqueness of %s', key)
+                logger.debug2('Check uniqueness of %s', key)
                 if not self.unique_validator(key=key, value=value):
                     self._set_validity(False, 'Duplicate entry', key)
                     return False
@@ -5345,7 +5351,7 @@ class FormItem:
         self.editable = flag
 
     def reset(self, force=False):
-        logger.debug('Reset %s (force=%s)', self, force)
+        logger.debug2('Reset %s (force=%s)', self, force)
 
         if len(self.keys) == 0:
             self.validity = True
@@ -5355,7 +5361,7 @@ class FormItem:
             for key in self.keys:
                 if self.generator is not None and \
                    not self.generator.endswith('submission'):
-                    logger.debug('%s: Use generator %s for key %s',
+                    logger.debug2('%s: Use generator %s for key %s',
                                  self, self.generator, key)
                     self.set_input_str(FormItem.GENERATORS[self.generator](),
                                        key, force=force)
@@ -5385,21 +5391,21 @@ class FormItem:
         return 'item(%s)' % ','.join(self.keys)
 
     def set_language(self, language):
-        logger.debug('Set %s as language for %s', language, self)
+        logger.debug2('Set %s as language for %s', language, self)
         self.tr.set_language(language)
 
     def _set_validity(self, validity, message, key=None):
 
         if not validity:
-            logger.debug(message + (' for key: '+key \
-                                    if key is not None else ''))
+            logger.debug2(message + (' for key: '+key \
+                                     if key is not None else ''))
         # logger.debug('%s - validity: %s', self, validity)
 
         self.validity = validity
         self.validity_message = message
 
         signal = ['item_invalid', 'item_valid'][validity]
-        logger.debug('%s notifies %s', self, signal)
+        logger.debug2('%s notifies %s', self, signal)
         self.notifier.notify(signal)
 
     def validate(self, key):
@@ -5416,7 +5422,7 @@ class FormItem:
             current_choices = {self.tr[k]:k for k in self.choices}
             if value_str not in current_choices and not self.allow_other_choice:
                 choices_str = ', '.join(["'%s'" %c for c in current_choices])
-                logger.debug('Value of %s not in choices (%s)', self,
+                logger.debug2('Value of %s not in choices (%s)', self,
                              choices_str)
                 self._set_validity(False, 'Value must be one of "%s"' % \
                                    choices_str, key)
@@ -5427,7 +5433,7 @@ class FormItem:
                              else value_str)
 
         if len(value_str)==0 and not self.allow_None:
-            logger.debug('%s cannot be empty', self)
+            logger.debug2('%s cannot be empty', self)
             self._set_validity(False, 'A value is required', key)
             return
 
@@ -5538,7 +5544,7 @@ class FormItem:
 
     def set_input_str(self, s, key=None, use_callback=True,
                       force=False):
-        logger.debug('%s: set input str of key %s', self, key)
+        logger.debug2('%s: set input str of key %s', self, key)
 
         if key is None:
             assert(len(self.keys)==1)
@@ -5552,11 +5558,11 @@ class FormItem:
         self.validate(key)
 
         if use_callback and self.input_callback is not None:
-            logger.debug('Calling callback after setting input of %s', key)
-            self.input_callback(key, s)
+            logger.debug2('Calling callback after setting input of %s', key)
+            self.input_callback(item_key=key, input_str=s)
 
     def set_input_callback(self, callback):
-        """ callback(key, input_string) """
+        """ callback(item_key, input_str) """
         self.input_callback = callback
 
     def is_valid(self):
@@ -7039,7 +7045,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
 
     def headerData(self, col, orientation, role):
         if role==QtCore.Qt.DisplayRole:
-            df_view = self.sheet.get_df_view()
+            df_view = self.sheet.get_df_view(for_display=True)
             if orientation == QtCore.Qt.Horizontal:
                 return df_view.columns[col]
         return None
@@ -7070,7 +7076,10 @@ class DataSheetModel(QtCore.QAbstractTableModel):
     @QtCore.pyqtSlot()
     def update_after_set(self, entry_id):
         view = self.sheet.get_df_view()
-        irow = view.index.get_loc(entry_id)
+        try:
+            irow = view.index.get_loc(entry_id)
+        except KeyError:
+            from IPython import embed; embed()
         ncols = view.shape[1]
         self.dataChanged.emit(self.createIndex(irow,0),
                               self.createIndex(irow,ncols-1))
@@ -7324,6 +7333,8 @@ class PiccelApp(QtWidgets.QApplication):
         self.role_pwd = role_pwd
         self.access_pwd = access_pwd
 
+        self.tab_indexes = {}
+
         if cfg_fn is not None:
             self.open_configuration_file(cfg_fn)
             if self.logic.workbook is not None and self.access_pwd is not None:
@@ -7528,8 +7539,8 @@ class PiccelApp(QtWidgets.QApplication):
         _text_editor_ui.button_apply.clicked.connect(_apply)
         _text_editor_ui.button_ok.clicked.connect(ok)
 
-    def make_form_tab(self, sheet_name, sheet_model, sheet_ui, tab_widget,
-                      form):
+    def make_form_tab(self, tab_name, sheet_model, sheet_ui, tab_widget,
+                      tab_idx, form):
         sections = {}
         form_widget = QtWidgets.QWidget()
         _form_ui = ui.form_ui.Ui_Form()
@@ -7585,7 +7596,7 @@ class PiccelApp(QtWidgets.QApplication):
             #self.current_section_widget.show()
 
         set_section_ui(form.current_section_name, form.current_section)
-        tab_idx = tab_widget.addTab(form_widget, sheet_name)
+        tab_idx = tab_widget.insertTab(tab_idx, form_widget, tab_name)
         tab_icon = QtGui.QIcon(':/icons/form_input_icon')
         tab_widget.setTabIcon(tab_idx, tab_icon)
         tab_widget.setCurrentIndex(tab_idx)
@@ -7645,6 +7656,7 @@ class PiccelApp(QtWidgets.QApplication):
 
     def show_workbook_screen(self):
         self._workbook_ui.tabWidget.clear()
+        self.tab_indexes.clear()
 
         def make_tab_sheet(sh_name, sh):
             sheet_widget = QtWidgets.QWidget()
@@ -7678,10 +7690,12 @@ class PiccelApp(QtWidgets.QApplication):
             def f_cell_action(idx):
                 row_df = sh.get_df_view().iloc[[idx.row()]]
                 column = row_df.columns[idx.column()-(row_df.index.name is not None)]
-                action_result = sh.plugin.action(row_df, column)
+                # TODO: action_label
+                action_result, action_label = sh.plugin.action(row_df, column)
                 if isinstance(action_result, Form):
-                    self.make_form_tab(sh_name, model, _data_sheet_ui,
+                    self.make_form_tab(action_label, model, _data_sheet_ui,
                                        self._workbook_ui.tabWidget,
+                                       tab_idx=self.tab_indexes[sh_name]+1,
                                        form=action_result)
                 else:
                     print('action result:', action_result)
@@ -7701,6 +7715,7 @@ class PiccelApp(QtWidgets.QApplication):
                              idx.row(), entry_id)
                 self.make_form_tab(sh_name, model, _data_sheet_ui,
                                    self._workbook_ui.tabWidget,
+                                   tab_idx=self.tab_indexes[sh_name]+1,
                                    form=sh.form_set_entry(entry_id))
 
             def f_delete_entry():
@@ -7715,9 +7730,11 @@ class PiccelApp(QtWidgets.QApplication):
             else:
                 _data_sheet_ui.button_edit_entry.hide()
 
-            f_new_entry = lambda : self.make_form_tab(sh_name, model, _data_sheet_ui,
-                                                      self._workbook_ui.tabWidget,
-                                                      form=sh.form_new_entry())
+            f_new_entry = lambda : \
+                self.make_form_tab(sh_name, model, _data_sheet_ui,
+                                   self._workbook_ui.tabWidget,
+                                   tab_idx=self.tab_indexes[sh_name]+1,
+                                   form=sh.form_new_entry())
 
             if sh.form_master is not None and \
                self.logic.workbook.has_write_access: #TODO: and user is admin
@@ -7736,7 +7753,8 @@ class PiccelApp(QtWidgets.QApplication):
             f = SheetViewChanger(_data_sheet_ui.comboBox_view, model)
             _data_sheet_ui.comboBox_view.currentIndexChanged.connect(f)
 
-            self._workbook_ui.tabWidget.addTab(sheet_widget, sh_name)
+            self.tab_indexes[sh_name] = (self._workbook_ui.tabWidget
+                                         .addTab(sheet_widget, sh_name))
 
             _data_sheet_ui.button_edit_form.clicked.connect(
                 lambda: self.make_text_editor(self._workbook_ui.tabWidget,
@@ -7763,7 +7781,8 @@ class PiccelApp(QtWidgets.QApplication):
                 logger.info('Load pending form "%s" (%s)',
                             form.tr['title'], form_id)
                 self.make_form_tab(sh_name, model, _data_sheet_ui,
-                                   self._workbook_ui.tabWidget, form)
+                                   self._workbook_ui.tabWidget,
+                                   self.tab_indexes[sh_name]+1, form)
 
         if len(self.logic.workbook.sheets) > 0:
             # TODO: handle tab order
