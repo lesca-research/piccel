@@ -81,9 +81,10 @@ class LescaDashboard(SheetPlugin):
             self.sheet.notifier.notify('entry_set', entry_id=entry_df.index[0])
         else:
             logger.warning('Update plugin of sheet %s: '\
-                           'udpated entry from %s with id=%d is not in index',
+                           'udpated entry from %s with id=%s is not in index',
                            self.sheet.label, sheet_source.label,
                            entry_df.index.values[0])
+            
 
     def action(self):
         raise NotImplementedError('TODO: default action')
@@ -216,19 +217,23 @@ def interview_action(entry_df, interview_column, workbook):
     elif interview_column.endswith('_Staff'):
         raise NotImplementedError()
     else:
-
-        # TODO: create gform for Pre_Screening_Session and import it
-
         interview_label = interview_column
         interview_sheet = workbook[interview_label]
-        form = interview_sheet.form_new_entry()
         participant_id = entry_df.index.values[0]
+        interview_df = interview_sheet.get_df_view('latest')
+        selection = interview_df[interview_df.Participant_Id == participant_id]
+        if selection.shape[0] == 0:
+            form = interview_sheet.form_new_entry()
+            form.set_values_from_entry({'Participant_ID' : participant_id})
+            action_label = '%s | New' % interview_sheet.label
+        else:
+            assert(selection.shape[0] == 1)
+            form = interview_sheet.form_update_entry(selection.index[0])
+            action_label = '%s | Update' % interview_sheet.label
         form.set_values_from_entry({
-            'Participant_ID' : participant_id,
             'Session_Action' : 'do_session',
             'Staff' : interview_sheet.user
         })
-        action_label = '%s | New' % interview_sheet.label
     return form, action_label
 
 DATE_FMT = '%Y-%m-%d %H:%M:%S'
@@ -347,20 +352,21 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
                     if workbook.has_sheet(plan_sheet_label) else None)
 
     if interview_df is None:
-        interview_df = (pd.DataFrame(columns=['Participant_ID', 'Staff',
+        interview_df = pd.DataFrame(columns=['Participant_ID', 'Staff',
                                              'Session_Action', 'Session_Status',
                                              'Timestamp'])
-                        .set_index('Participant_ID'))
+    interview_df = interview_df.set_index('Participant_ID')
+
     plan_df = (workbook[plan_sheet_label].get_df_view('latest') \
                if workbook.has_sheet(plan_sheet_label) else None)
 
     if plan_df is None:
-        plan_df = (pd.DataFrame(columns=['Participant_ID', 'Staff', 'Plan_Action',
-                                         'Interview_Type', 'Interview_Date',
-                                         'Availability', 'Send_Email',
-                                         'Email_Schedule', 'Email_Template',
-                                         'Email_Status', 'Timestamp'])
-                   .set_index('Participant_ID'))
+        plan_df = pd.DataFrame(columns=['Participant_ID', 'Staff', 'Plan_Action',
+                                        'Interview_Type', 'Interview_Date',
+                                        'Availability', 'Send_Email',
+                                        'Email_Schedule', 'Email_Template',
+                                        'Email_Status', 'Timestamp'])
+    plan_df = plan_df.set_index('Participant_ID')
     plan_df = plan_df[plan_df['Interview_Type'] == interview_label]
 
     common_index = (set(pids)
@@ -414,8 +420,11 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print('common_pids')
         print(common_pids)
 
-    mask = (plan_df.loc[common_pids, 'Timestamp'] > \
-            interview_df.loc[common_pids, 'Timestamp'])
+    try:
+        mask = (plan_df.loc[common_pids, 'Timestamp'] > \
+                interview_df.loc[common_pids, 'Timestamp'])
+    except ValueError:
+        from IPython import embed; embed()
     mask = mask[mask]
     pids_plan_more_recent = plan_df.loc[mask.index].index
 
@@ -442,7 +451,6 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
     dashboard_df.loc[common_index, column_staff] = ''
     dashboard_df.loc[pids_plan, column_staff] = \
         plan_df.loc[pids_plan, 'Staff']
-
     dashboard_df.loc[pids_interview, column_staff] = \
         interview_df.loc[pids_interview, 'Staff']
 
@@ -455,7 +463,8 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     plan_df_selected = plan_df.loc[pids_plan, :]
 
-    logger.debug('Set interview status from %s', plan_sheet_label)
+    logger.debug('Set interview status from %s (selected pids=%s)',
+                 plan_sheet_label, pids_plan)
     map_set(dashboard_df, column_status,
             {'%s_scheduled' % interview_tag:
              And((plan_df_selected, 'Plan_Action', ['plan']),
@@ -496,7 +505,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print(dashboard_df)
 
 
-def ts_data_latest(df):
+def ts_data_latest_by_pid(df):
     if df is None or df.shape[0]==0:
         return None
     max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]

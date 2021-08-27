@@ -36,7 +36,7 @@ from . import sheet_plugin_template
 from . import workbook_plugin_template
 from .sheet_plugin_template import CustomSheetPlugin
 from .plugin_tools import map_set, And, Or #, Less, LessEqual, Greater, GreaterEqual
-from .plugin_tools import (ts_data_latest, LescaDashboard, track_interview,
+from .plugin_tools import (LescaDashboard, track_interview,
                            DEFAULT_INTERVIEW_PLAN_SHEET_LABEL)
 
 import unittest
@@ -942,6 +942,7 @@ function snakeCaseToCamelCase(s) {
         Section path is evaluated again because a value may change during
         submission (eg timestamp_submission) so transitions may differ
         """
+        # TODO: utest form submitted twice and item with unique constraint !!
         if not self.is_valid():
             invalid_sections = []
             for section_name in self.section_path:
@@ -1989,12 +1990,9 @@ class DataSheet:
                     # From this point form input saving callback is active
                     for section, entries in saved_entries.items():
                         for key, value_str in entries.items():
-                            try:
-                                live_form[section][key].set_input_str(value_str,
-                                                                      use_callback=False,
-                                                                      force=True)
-                            except KeyError:
-                                from IPython import embed; embed()
+                            live_form[section][key].set_input_str(value_str,
+                                                                  use_callback=False,
+                                                                  force=True)
                     first_section = live_form[live_form.first_section()]
                     logger.debug2('IDs after live form input: __entry_id__=%d, '\
                                  '__origin_id__=%d',
@@ -2574,6 +2572,7 @@ class DataSheet:
         form = self.form_new_entry()
         form.set_values_from_entry(entry_dict)
         form.submit()
+        return form
 
     def append_entry(self, entry_dict, entry_id=None):
         if entry_id is None:
@@ -3044,7 +3043,6 @@ class TestDataSheet(unittest.TestCase):
         base_df.iloc[1,0] == 'CE0004'
 
     def test_data_io(self):
-        self.sheet_ts.add_views({'latest' : ts_data_latest})
         form = self.sheet_ts.form_new_entry()
         entry = {'Participant_ID' : '"', 'Age' : 43,
                  'Taille' : 1.4, 'Comment' : '\t', 'Flag' : True,
@@ -3073,7 +3071,6 @@ class TestDataSheet(unittest.TestCase):
                          entry['Date'])
 
     def test_form_new_entry(self):
-        self.sheet_ts.add_views({'latest' : ts_data_latest})
 
         watched_entry = []
         def watch_entry():
@@ -3107,8 +3104,6 @@ class TestDataSheet(unittest.TestCase):
 
     def test_form_entry_update(self):
         # Add a new entry from an existing one
-
-        self.sheet_ts.add_views({'latest' : ts_data_latest})
 
         watched_entry = []
         def watch_entry():
@@ -3166,7 +3161,6 @@ class TestDataSheet(unittest.TestCase):
                          entry['Age'])
 
     def test_entry_update_from_plugin_action(self):
-        self.sheet_ts.add_views({'latest' : ts_data_latest})
 
         entry_to_update = self.sheet_ts.df.iloc[1].name
 
@@ -3187,7 +3181,6 @@ class TestDataSheet(unittest.TestCase):
     def test_form_entry_set(self):
         # Change the content of an entry
         # All values can change
-        self.sheet_ts.add_views({'latest' : ts_data_latest})
         entry_to_modify = self.sheet_ts.df.iloc[1].name
 
         watched_entry = []
@@ -3232,7 +3225,6 @@ class TestDataSheet(unittest.TestCase):
 
     def test_set_entry_file_update(self):
 
-        self.sheet_ts.add_views({'latest' : ts_data_latest})
         entry_to_modify = self.sheet_ts.df.iloc[1].name
         logger.debug('-------------------------')
         logger.debug('utest: create set form')
@@ -3253,7 +3245,6 @@ class TestDataSheet(unittest.TestCase):
 
 
     def test_form_folder_removal(self):
-        self.sheet_ts.add_views({'latest' : ts_data_latest})
 
         form_id = 1
         form = self.sheet_ts.form_new_entry(form_id=form_id)
@@ -3293,7 +3284,6 @@ class TestDataSheet(unittest.TestCase):
                                 Form.from_dict(self.form_def_ts_data),
                                 self.data_df_ts_data,
                                 self.user, self.filesystem)
-        sh1.add_views({'latest' : ts_data_latest})
 
         form_id = 1
         form = sh1.form_new_entry(form_id=form_id)
@@ -3314,7 +3304,6 @@ class TestDataSheet(unittest.TestCase):
         self.assertFalse(sh2.filesystem.exists(sh2.get_live_form_folder(form_id)))
 
     def test_refresh_sheet(self):
-        self.sheet_ts.add_views({'latest' : ts_data_latest})
         sheet_ts2 = DataSheet(self.sheet_id,
                               Form.from_dict(self.form_def_ts_data),
                               self.data_df_ts_data,
@@ -4288,8 +4277,6 @@ class TestWorkBook(unittest.TestCase):
                     supported_languages={'French'},
                     title={'French':'Titre de formulaire'})
         sh1 = DataSheet(sheet_id, form, user=user)
-
-        sh1.add_views({'latest' : ts_data_latest})
         sh1.set_default_view('latest')
         # Add sheet to workbook (auto save)
         logger.debug('utest: add sheet1 to workbook1')
@@ -4447,7 +4434,6 @@ class TestWorkBook(unittest.TestCase):
                     title={'French':'Titre de formulaire'})
         sh1 = DataSheet(sheet_id, form, user=user)
 
-        sh1.add_views({'latest' : ts_data_latest})
         sh1.set_default_view('latest')
 
         # Add sheet to workbook (auto save)
@@ -4572,8 +4558,6 @@ class TestWorkBook(unittest.TestCase):
                     title={'French':'Evaluation'})
         sh_eval = DataSheet(sheet_id, form, user=user)
 
-        sh_eval.add_views({'latest' : ts_data_latest})
-
         wb.add_sheet(sh_eval)
         wb.add_sheet(sh_pp)
 
@@ -4581,7 +4565,8 @@ class TestWorkBook(unittest.TestCase):
         # and compute evaluation status. Action is a string report.
         class Dashboard(LescaDashboard):
             def sheets_to_watch(self):
-                return super(Dashboard, self).sheets_to_watch() + ['Evaluation']
+                return super(Dashboard, self).sheets_to_watch() + \
+                    ['Evaluation']
 
             def after_workbook_load(self):
                 self.eval = self.workbook['Evaluation']
@@ -4593,6 +4578,7 @@ class TestWorkBook(unittest.TestCase):
                 self.df.loc[pids, 'Eval'] = 'eval_todo'
                 eval_df = self.eval.get_df_view('latest')
                 if eval_df is not None:
+                    eval_df = eval_df.set_index('Participant_ID')
                     common_index = (set(pids)
                                     .intersection(self.df.index)
                                     .intersection(eval_df.index))
@@ -4606,7 +4592,28 @@ class TestWorkBook(unittest.TestCase):
                              Or((eval_df, 'Planned', [False]),
                                 (eval_df, 'Outcome', ['FAIL']))
                              })
-            # TODO action
+            def action(self, entry_df, selected_column):
+                logger.debug('plugin.action: entry_df=%s, selected_column=%s',
+                             entry_df, selected_column)
+                form, action_label = None, None
+                if selected_column.startswith('Eval'):
+                    participant_id = entry_df.index[0]
+                    eval_df = self.eval.get_df_view('latest')
+                    selection = eval_df[eval_df.Participant_ID == participant_id]
+                    if selection.shape[0] == 0:
+                        form = self.eval.form_new_entry()
+                        form.set_values_from_entry({'Participant_ID' :
+                                                    participant_id})
+                        action_label = '%s | New' % self.eval.label
+                    else:
+                        assert(selection.shape[0] == 1)
+                        form = self.eval.form_update_entry(selection.index[0])
+                        action_label = '%s | Update' % self.eval.label
+                    form.set_values_from_entry({
+                        'Session_Action' : 'do_session',
+                        'Staff' : self.eval.user
+                    })
+                return form, action_label
 
         logger.debug('utest: Create dashboard')
         sh_dashboard = DataSheet('Dashboard')
@@ -4646,12 +4653,13 @@ class TestWorkBook(unittest.TestCase):
         self.assertNotIn(pid, dashboard_df.index)
 
         # Add new eval
-        logger.debug('utest: Add evaluation for CE90002 '\
-                     '(not in participants list)')
+        logger.debug('utest: Add first evaluation for CE90002')
         pid = 'CE90002'
-        form = sh_eval.form_new_entry()
-        form.set_values_from_entry({'Participant_ID' : pid,
-                                    'Planned' : True,
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval')
+        self.assertTrue(action_label.endswith('New'))
+        self.assertTrue(action_label.startswith(sh_eval.label))
+        form.set_values_from_entry({'Planned' : True,
                                     'Outcome' : 'FAIL',
                                     'Timestamp' : datetime.now()})
         form.submit()
@@ -4659,10 +4667,12 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_FAIL')
 
         time.sleep(0.01)
-        logger.debug('-------------- Add working entry ------------------')
-        form = sh_eval.form_new_entry()
-        form.set_values_from_entry({'Participant_ID' : pid,
-                                    'Planned' : True,
+        logger.debug('utest: Add entry for participant who already passed eval')
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith(sh_eval.label))
+        form.set_values_from_entry({'Planned' : True,
                                     'Outcome' : 'OK',
                                     'Timestamp' : datetime.now()})
         form.submit()
@@ -4710,7 +4720,9 @@ class TestWorkBook(unittest.TestCase):
         sheet_id = 'Interview_Plan'
         items = [FormItem({'Participant_ID' :
                            {'French':'Code Participant'}},
+                          unique=True,
                           default_language='French',
+                          freeze_on_update=True,
                           supported_languages={'French'}),
                  FormItem({'Staff' : None},
                           default_language='French',
@@ -4781,13 +4793,14 @@ class TestWorkBook(unittest.TestCase):
                     supported_languages={'French'},
                     title={'French':'Plannification'})
         sh_plan = DataSheet(sheet_id, form, user=user)
-        sh_plan.add_views({'latest' : ts_data_latest})
 
         # Create evaluation sheet
         sheet_id = 'Eval'
         items = [FormItem({'Participant_ID' :
                            {'French':'Code Participant'}},
+                          unique=True,
                           default_language='French',
+                          freeze_on_update=True,
                           supported_languages={'French'}),
                  FormItem({'Staff' : None},
                           default_language='French',
@@ -4816,7 +4829,6 @@ class TestWorkBook(unittest.TestCase):
                     supported_languages={'French'},
                     title={'French':'Evaluation'})
         sh_eval = DataSheet(sheet_id, form, user=user)
-        sh_eval.add_views({'latest' : ts_data_latest})
 
         wb.add_sheet(sh_plan)
         wb.add_sheet(sh_eval)
@@ -4848,14 +4860,14 @@ class TestWorkBook(unittest.TestCase):
         pid = 'CE0001'
         logger.debug('------- Assign staff for %s --------' % pid)
         ts = datetime(2021,9,10,10,10)
-        sh_plan.add_new_entry({'Participant_ID' : pid,
-                               'Plan_Action' : 'assign_staff',
-                               'Staff' : 'Thomas Vincent',
-                               'Interview_Type' : 'Eval',
-                               'Interview_Date' : None,
-                               'Availability' : None,
-                               'Send_Email' : True,
-                               'Timestamp' : ts})
+        form = sh_plan.add_new_entry({'Participant_ID' : pid,
+                                      'Plan_Action' : 'assign_staff',
+                                      'Staff' : 'Thomas Vincent',
+                                      'Interview_Type' : 'Eval',
+                                      'Interview_Date' : None,
+                                      'Availability' : None,
+                                      'Send_Email' : True,
+                                      'Timestamp' : ts})
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(df.loc[pid, 'Eval'], 'eval_not_scheduled')
         self.assertEqual(df.loc[pid, 'Eval_Staff'],
@@ -4865,14 +4877,17 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Plan interview for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11)
-        sh_plan.add_new_entry({'Participant_ID' : pid,
-                              'Plan_Action' : 'plan',
-                              'Staff' : 'Thomas Vincent',
-                              'Interview_Type' : 'Eval',
-                              'Interview_Date' : idate,
-                              'Availability' : None,
-                              'Send_Email' : False,
-                              'Timestamp' : ts})
+
+        entry_id = form['section1']['__entry_id__'].get_value()
+        form = sh_plan.form_update_entry(entry_id)
+        form.set_values_from_entry({'Plan_Action' : 'plan',
+                                    'Staff' : 'Thomas Vincent',
+                                    'Interview_Type' : 'Eval',
+                                    'Interview_Date' : idate,
+                                    'Availability' : None,
+                                    'Send_Email' : False,
+                                    'Timestamp' : ts})
+        form.submit()
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(df.loc[pid, 'Eval'],
                          'eval_scheduled')
@@ -4884,14 +4899,16 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Plan availability for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11,30)
-        sh_plan.add_new_entry({'Participant_ID' : pid,
-                              'Plan_Action' : 'plan',
-                              'Staff' : 'Thomas Vincent',
-                              'Interview_Type' : 'Eval',
-                              'Interview_Date' : None,
-                              'Availability' : 'parfois',
-                              'Send_Email' : False,
-                              'Timestamp' : ts})
+        entry_id = form['section1']['__entry_id__'].get_value()
+        form = sh_plan.form_update_entry(entry_id)
+        form.set_values_from_entry({'Plan_Action' : 'plan',
+                                    'Staff' : 'Thomas Vincent',
+                                    'Interview_Type' : 'Eval',
+                                    'Interview_Date' : None,
+                                    'Availability' : 'parfois',
+                                    'Send_Email' : False,
+                                    'Timestamp' : ts})
+        form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_scheduled')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
@@ -4902,15 +4919,17 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Plan interview email for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,12)
-        sh_plan.add_new_entry({'Participant_ID' : pid,
-                              'Plan_Action' : 'plan',
-                              'Staff' : 'Thomas Vincent',
-                              'Interview_Type' : 'Eval',
-                              'Interview_Date' : idate,
-                              'Availability' : None,
-                              'Send_Email' : True,
-                              'Email_Status' : 'to_send',
-                              'Timestamp' : ts})
+        entry_id = form['section1']['__entry_id__'].get_value()
+        form = sh_plan.form_update_entry(entry_id)
+        form.set_values_from_entry({'Plan_Action' : 'plan',
+                                    'Staff' : 'Thomas Vincent',
+                                    'Interview_Type' : 'Eval',
+                                    'Interview_Date' : idate,
+                                    'Availability' : None,
+                                    'Send_Email' : True,
+                                    'Email_Status' : 'to_send',
+                                    'Timestamp' : ts})
+        form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_email_pending')
@@ -4922,15 +4941,17 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview email sent for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,13)
-        sh_plan.add_new_entry({'Participant_ID' : pid,
-                              'Plan_Action' : 'plan',
-                              'Staff' : 'Thomas Vincent',
-                              'Interview_Type' : 'Eval',
-                              'Interview_Date' : idate,
-                              'Availability' : None,
-                              'Send_Email' : True,
-                              'Email_Status' : 'sent',
-                              'Timestamp' : ts})
+        entry_id = form['section1']['__entry_id__'].get_value()
+        form = sh_plan.form_update_entry(entry_id)
+        form.set_values_from_entry({'Plan_Action' : 'plan',
+                                    'Staff' : 'Thomas Vincent',
+                                    'Interview_Type' : 'Eval',
+                                    'Interview_Date' : idate,
+                                    'Availability' : None,
+                                    'Send_Email' : True,
+                                    'Email_Status' : 'sent',
+                                    'Timestamp' : ts})
+        form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_email_sent')
@@ -4943,14 +4964,16 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview email error for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,14)
-        sh_plan.add_new_entry({'Participant_ID' : pid,
-                              'Plan_Action' : 'plan',
-                              'Staff' : 'Thomas Vincent',
-                              'Interview_Type' : 'Eval',
-                              'Interview_Date' : idate,
-                              'Send_Email' : True,
-                              'Email_Status' : 'error',
-                              'Timestamp' : ts})
+        entry_id = form['section1']['__entry_id__'].get_value()
+        form_plan = sh_plan.form_update_entry(entry_id)
+        form_plan.set_values_from_entry({'Plan_Action' : 'plan',
+                                         'Staff' : 'Thomas Vincent',
+                                         'Interview_Type' : 'Eval',
+                                         'Interview_Date' : idate,
+                                         'Send_Email' : True,
+                                         'Email_Status' : 'error',
+                                         'Timestamp' : ts})
+        form_plan.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_email_error')
@@ -4962,11 +4985,11 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview done for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,16)
-        sh_eval.add_new_entry({'Participant_ID' : pid,
-                               'Session_Action' : 'do_session',
-                               'Staff' : 'Thomas Vincent',
-                               'Session_Status' : 'done',
-                               'Timestamp' : ts})
+        form_eval = sh_eval.add_new_entry({'Participant_ID' : pid,
+                                           'Session_Action' : 'do_session',
+                                           'Staff' : 'Thomas Vincent',
+                                           'Session_Status' : 'done',
+                                           'Timestamp' : ts})
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_ok')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
@@ -4977,11 +5000,13 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview to redo for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,17)
-        sh_eval.add_new_entry({'Participant_ID' : pid,
-                               'Session_Action' : 'do_session',
-                               'Staff' : 'Thomas Vincent',
-                              'Session_Status' : 'redo',
-                              'Timestamp' : ts})
+        entry_id = form_eval['section1']['__entry_id__'].get_value()
+        form_eval = sh_eval.form_update_entry(entry_id)
+        form_eval.set_values_from_entry({'Session_Action' : 'do_session',
+                                         'Staff' : 'Thomas Vincent',
+                                         'Session_Status' : 'redo',
+                                         'Timestamp' : ts})
+        form_eval.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_redo')
@@ -4993,10 +5018,12 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview cancelled for %s --------' % pid)
         idate = datetime(2021,10,11,10,10)
         ts = datetime(2021,9,10,10,18)
-        sh_eval.add_new_entry({'Participant_ID' : pid,
-                              'Staff' : 'Thomas Vincent',
-                              'Session_Action' : 'cancel_session',
-                              'Timestamp' : ts})
+        entry_id = form_eval['section1']['__entry_id__'].get_value()
+        form_eval = sh_eval.form_update_entry(entry_id)
+        form_eval.set_values_from_entry({'Staff' : 'Thomas Vincent',
+                                         'Session_Action' : 'cancel_session',
+                                         'Timestamp' : ts})
+        form_eval.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_cancelled')
@@ -7076,10 +7103,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
     @QtCore.pyqtSlot()
     def update_after_set(self, entry_id):
         view = self.sheet.get_df_view()
-        try:
-            irow = view.index.get_loc(entry_id)
-        except KeyError:
-            from IPython import embed; embed()
+        irow = view.index.get_loc(entry_id)
         ncols = view.shape[1]
         self.dataChanged.emit(self.createIndex(irow,0),
                               self.createIndex(irow,ncols-1))
