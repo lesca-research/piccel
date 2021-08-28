@@ -4,6 +4,7 @@ from .sheet_plugin import SheetPlugin
 
 logger = logging.getLogger('piccel')
 
+class DataDefinitionError(Exception): pass
 class LescaDashboard(SheetPlugin):
     def __init__(self, sheet):
         super(LescaDashboard, self).__init__(sheet)
@@ -14,16 +15,25 @@ class LescaDashboard(SheetPlugin):
         self.pp = self.workbook['Participants']
         self.df = pd.DataFrame()
 
+        for sheet_label in self.sheets_to_watch():
+            if not (self.workbook[sheet_label].form_master
+                    .has_key('Participant_ID')):
+                raise DataDefinitionError('Participant_ID not found in '\
+                                          'keys of sheet %s' % sheet_label)
+
+        self.reset_data()
+
+    def reset_data(self):
         if self.pp.df is not None and self.pp.df.shape[0] > 0:
             self.df = (self.pp.df[['Participant_ID']]
                        .sort_values(by='Participant_ID')
                        .reset_index(drop=True))
             self.df.set_index('Participant_ID', inplace=True)
             self.refresh_entries(self.df.index)
-            self.sheet.invalidate_cached_views()
         else:
             self.df = (pd.DataFrame(columns=['Participant_ID'])
                        .set_index('Participant_ID'))
+        self.sheet.invalidate_cached_views()
 
     def sheets_to_watch(self):
         return ['Participants']
@@ -31,41 +41,36 @@ class LescaDashboard(SheetPlugin):
     def reset_view_index_for_display(self):
         return True
 
-    # def get_data(self):
-    #     logger.debug('Plugin of sheet %s, get_data: self.df=%s, '\
-    #                  'self.pp.df=%s', self.sheet.label,
-    #                  self.df.shape if self.df is not None else 'None',
-    #                  self.pp.df.shape if self.pp.df is not None \
-    #                  else 'None')
-    #     if self.df is None and self.pp.df is not None:
-    #         self.df = (self.pp.df[['Participant_ID']]
-    #                    .sort_values(by='Participant_ID')
-    #                    .reset_index(drop=True))
-    #         self.df.set_index('Participant_ID', inplace=True)
-    #         self.refresh_entries(self.df.index)
-    #     return self.df
-
     def refresh_entries(self, pids):
         logger.warning('refresh_entries not implement in plugin of sheet %s',
                        self.sheet.label)
 
+    def get_full_view(self, df, for_display=False):
+        df = self.df.sort_index()
+        return df.reset_index() if for_display else df
+
     def views(self, base_views, for_display=False):
-        return {'full' :
-                lambda df: self.df.reset_index() if for_display else self.df}
+        return {'full' : self.get_full_view}
 
     def default_view(self):
         return 'full'
 
-    def update(self, sheet_source, entry_df, deletion=False):
-        if sheet_source.label == self.pp.label and deletion:
-            self.sheet.notifier.notify('pre_delete_entry',
-                                       entry_id=entry_df.index[0])
-            self.df.drop(index=entry_df.Participant_ID.iat[0],
-                         inplace=True)
-            self.sheet.invalidate_cached_views()
-            self.sheet.notifier.notify('deleted_entry', entry_df=entry_df)
-            return
-
+    def update(self, sheet_source, entry_df, deletion=False, clear=False):
+        if sheet_source.label == self.pp.label:
+            if clear:
+                self.df = (pd.DataFrame(columns=['Participant_ID'])
+                           .set_index('Participant_ID'))
+                self.sheet.invalidate_cached_views()
+                self.sheet.notifier.notify('cleared_data')
+                return
+            if deletion:
+                deleted_pid = entry_df.Participant_ID.iat[0]
+                self.sheet.notifier.notify('pre_delete_entry',
+                                           entry_id=deleted_pid)
+                self.df.drop(index=deleted_pid, inplace=True)
+                self.sheet.invalidate_cached_views()
+                self.sheet.notifier.notify('deleted_entry', entry_df=entry_df)
+                return
         entry_df = entry_df.set_index('Participant_ID')
 
         if sheet_source.label == self.pp.label and \
@@ -84,7 +89,7 @@ class LescaDashboard(SheetPlugin):
                            'udpated entry from %s with id=%s is not in index',
                            self.sheet.label, sheet_source.label,
                            entry_df.index.values[0])
-            
+
 
     def action(self):
         raise NotImplementedError('TODO: default action')
@@ -129,6 +134,8 @@ def map_set(dest_df, dest_column, conditions):
         if len(extra) > 0:
             logger.warning('Index values in source df but not in selection: %s',
                            ', '.join(['%s' % e for e in extra]))
+        if dest_column not in dest_df.columns:
+            raise DestColumnNotFound(dest_column)
         dest_df.loc[selector.index, dest_column] = dest_value
 
 def set_intersection(s, s_other):
@@ -177,9 +184,15 @@ class LessEqual(Comparator): pass
 class Greater(Comparator): pass
 class GreaterEqual(Comparator): pass
 
+class SrcColumnNotFound(Exception): pass
+class DestColumnNotFound(Exception): pass
+
 def filter_indexes(filter_def):
 
     src_df, src_col, predicate_def = filter_def
+
+    if src_col not in src_df.columns:
+        raise SrcColumnNotFound(src_col)
 
     if isinstance(predicate_def, list):
         mask = lambda src_df, src_col: src_df[src_col].isin(predicate_def)
@@ -194,7 +207,7 @@ def filter_indexes(filter_def):
     elif isinstance(predicate_def, GreaterEqual):
         mask = lambda src_df, src_col: src_df[src_col] >= predicate_def.value
     elif callable(predicate_def):
-        mask = predicate_def
+        mask = predicate_def()
     else:
         raise Exception('Invalid predicate_def %s' % predicate_def)
     return src_df[mask(src_df, src_col)].index
@@ -221,7 +234,8 @@ def interview_action(entry_df, interview_column, workbook):
         interview_sheet = workbook[interview_label]
         participant_id = entry_df.index.values[0]
         interview_df = interview_sheet.get_df_view('latest')
-        selection = interview_df[interview_df.Participant_Id == participant_id]
+        selection = interview_df[interview_df.Participant_Id == participant_id] \
+            if interview_df is not None else pd.DataFrame([])
         if selection.shape[0] == 0:
             form = interview_sheet.form_new_entry()
             form.set_values_from_entry({'Participant_ID' : participant_id})
@@ -420,11 +434,8 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print('common_pids')
         print(common_pids)
 
-    try:
-        mask = (plan_df.loc[common_pids, 'Timestamp'] > \
-                interview_df.loc[common_pids, 'Timestamp'])
-    except ValueError:
-        from IPython import embed; embed()
+    mask = (plan_df.loc[common_pids, 'Timestamp'] > \
+            interview_df.loc[common_pids, 'Timestamp'])
     mask = mask[mask]
     pids_plan_more_recent = plan_df.loc[mask.index].index
 
@@ -465,23 +476,30 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     logger.debug('Set interview status from %s (selected pids=%s)',
                  plan_sheet_label, pids_plan)
-    map_set(dashboard_df, column_status,
-            {'%s_scheduled' % interview_tag:
-             And((plan_df_selected, 'Plan_Action', ['plan']),
-                 (plan_df_selected, 'Send_Email', [False])),
-             '%s_email_pending' % interview_tag:
-             And((plan_df_selected, 'Plan_Action', ['plan']),
-                 (plan_df_selected, 'Send_Email', [True]),
-                 (plan_df_selected, 'Email_Status', ['to_send'])),
-             '%s_email_sent' % interview_tag:
-             And((plan_df_selected, 'Plan_Action', ['plan']),
-                 (plan_df_selected, 'Send_Email', [True]),
-                 (plan_df_selected, 'Email_Status', ['sent'])),
-             '%s_email_error' % interview_tag:
-             And((plan_df_selected, 'Plan_Action', ['plan']),
-                 (plan_df_selected, 'Send_Email', [True]),
-                 (plan_df_selected, 'Email_Status', ['error'])),
-            })
+    try:
+        map_set(dashboard_df, column_status,
+                {'%s_scheduled' % interview_tag:
+                 And((plan_df_selected, 'Plan_Action', ['plan']),
+                     (plan_df_selected, 'Send_Email', [False])),
+                 '%s_email_pending' % interview_tag:
+                 And((plan_df_selected, 'Plan_Action', ['plan']),
+                     (plan_df_selected, 'Send_Email', [True]),
+                     (plan_df_selected, 'Email_Status', ['to_send'])),
+                 '%s_email_sent' % interview_tag:
+                 And((plan_df_selected, 'Plan_Action', ['plan']),
+                     (plan_df_selected, 'Send_Email', [True]),
+                     (plan_df_selected, 'Email_Status', ['sent'])),
+                 '%s_email_error' % interview_tag:
+                 And((plan_df_selected, 'Plan_Action', ['plan']),
+                     (plan_df_selected, 'Send_Email', [True]),
+                     (plan_df_selected, 'Email_Status', ['error'])),
+                })
+    except SrcColumnNotFound as e:
+        msg = 'Column %s not found in df of sheet %s' % (e.msg, plan_sheet_label)
+        raise SrcColumnNotFound(msg) from e
+    except DestColumnNotFound as e:
+        msg = 'Column %s not found in dashboard df' % e.msg
+        raise DestColumnNotFound(msg) from e
 
     if 1:
         print('dashboard_df after map_set from plan_df')
@@ -490,20 +508,28 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
     interview_df_selected = interview_df.loc[pids_interview, :]
 
     logger.debug('Set interview status from %s', interview_label)
-    map_set(dashboard_df, column_status,
-            {'%s_ok' % interview_tag:
-             And((interview_df_selected, 'Session_Action', ['do_session']),
-                 (interview_df_selected, 'Session_Status', ['done'])),
-             '%s_redo' % interview_tag:
-             And((interview_df_selected, 'Session_Action', ['do_session']),
-                 (interview_df_selected, 'Session_Status', ['redo'])),
-             '%s_cancelled' % interview_tag:
-             (interview_df_selected, 'Session_Action', ['cancel_session'])
-            })
+    try:
+        map_set(dashboard_df, column_status,
+                {'%s_ok' % interview_tag:
+                 And((interview_df_selected, 'Session_Action', ['do_session']),
+                     (interview_df_selected, 'Session_Status', ['done'])),
+                 '%s_redo' % interview_tag:
+                 And((interview_df_selected, 'Session_Action', ['do_session']),
+                     (interview_df_selected, 'Session_Status', ['redo'])),
+                 '%s_cancelled' % interview_tag:
+                 (interview_df_selected, 'Session_Action', ['cancel_session'])
+                })
+    except SrcColumnNotFound as e:
+        msg = 'Column %s not found in df of sheet %s' % \
+            (e.msg, interview_sheet_label)
+        raise SrcColumnNotFound(msg) from e
+    except DestColumnNotFound as e:
+        msg = 'Column %s not found in dashboard df' % e.msg
+        raise DestColumnNotFound(msg) from e
+
     if 1:
         print('dashboard_df after map_set from interview_df')
         print(dashboard_df)
-
 
 def ts_data_latest_by_pid(df):
     if df is None or df.shape[0]==0:

@@ -569,6 +569,9 @@ function snakeCaseToCamelCase(s) {
         self.on_cancel = None
         self.to_next_section()
 
+    def has_key(self, key):
+        return key in self.key_to_items
+
     def format(self, key, value):
         return self.key_to_items[key][0].format(value)
 
@@ -620,9 +623,6 @@ function snakeCaseToCamelCase(s) {
                             or (next_section_label=='__submit__')
                             or (next_section_label in self.sections))
             self[section_name].set_next_section_definition(section_transitions)
-
-    def first_section(self):
-        return next(iter(self.sections))
 
     def first_section(self):
         return next(iter(self.sections))
@@ -1863,10 +1863,14 @@ class DataSheet:
                              self.label, '\n'.join(data_bfns))
             if len(data_bfns) > 0:
                 self.df = None
+                self.notifier.notify('cleared_data')
+                # Associated view will be cleared
+                # Expect watchers to react
                 for data_bfn in data_bfns:
                     data_fn = op.join(data_folder, data_bfn)
                     logger.debug('Load sheet data item from %s', data_fn)
                     df_content = self.filesystem.load(data_fn)
+                    # _append_df will notify 'append_entry'
                     self._append_df(self.df_from_str(df_content))
                 self.invalidate_cached_views()
             else:
@@ -2108,9 +2112,9 @@ class DataSheet:
             validity_df = self.plugin.view_validity(self.get_df_view(view_label),
                                                     view_label)
             if validity_df is not None:
-                logger.info('Update cached validity for view "%s". '\
-                            'Got columns: %s', view_label,
-                            ', '.join(validity_df.columns))
+                logger.debug('Update cached validity for view "%s". '\
+                             'Got columns: %s', view_label,
+                             ', '.join(validity_df.columns))
             else:
                 logger.warning('Update cached  view validity "%s": None',
                                view_label)
@@ -2219,10 +2223,11 @@ class DataSheet:
         if view_df is None:
             view_df = self.views[view_label](self.df)
             if view_df is not None:
-                logger.info('Update cached view "%s". Got columns: %s',
-                            view_label, ', '.join(view_df.columns))
+                logger.debug('Sheet %s: Update cached view "%s". Shape%s. '\
+                             'Columns: %s', self.label, view_label, view_df.shape,
+                             ', '.join(view_df.columns))
             else:
-                logger.info('Update cached view "%s": None', view_label)
+                logger.debug('Update cached view "%s": None', view_label)
             if for_display and self.plugin.reset_view_index_for_display():
                 view_df = view_df.reset_index()
             cached_views[view_label] = view_df
@@ -7085,13 +7090,6 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.endInsertRows()
         return True
 
-    @QtCore.pyqtSlot()
-    def update_after_delete(self, deleted_entry_df):
-        # TODO: proper callback to actual data change here
-        self.endRemoveRows()
-        self.layoutChanged.emit()
-        return True
-
     def update_before_delete(self, entry_id):
         view = self.sheet.get_df_view()
         irow = view.index.get_loc(entry_id)
@@ -7099,6 +7097,24 @@ class DataSheetModel(QtCore.QAbstractTableModel):
                      entry_id, irow)
         self.layoutAboutToBeChanged.emit()
         self.beginRemoveRows(QtCore.QModelIndex(), irow, irow)
+
+    @QtCore.pyqtSlot()
+    def update_after_delete(self, deleted_entry_df):
+        # TODO: proper callback to actual data change here
+        self.endRemoveRows()
+        self.layoutChanged.emit()
+        return True
+
+    @QtCore.pyqtSlot()
+    def update_after_clear(self):
+        logger.debug('ItemModel of %s: Update_after_full_clear',
+                     self.sheet.label)
+        self.layoutAboutToBeChanged.emit()
+        self.beginResetModel()
+        self.endResetModel()
+        self.layoutChanged.emit()
+        return True
+
 
     @QtCore.pyqtSlot()
     def update_after_set(self, entry_id):
@@ -7476,7 +7492,8 @@ class PiccelApp(QtWidgets.QApplication):
                     logger.debug('Start data refresh timer with an interval of %d ms',
                                  self.refresh_rate_ms)
                     self.timer.setInterval(self.refresh_rate_ms)
-                    self.timer.timeout.connect(self.logic.workbook.refresh_all_data)
+                    self.timer.timeout.connect(self.logic.workbook
+                                               .refresh_all_data)
                     self.timer.start()
             except UnknownUser:
                 error_message = 'Unknown user: %s' %user
@@ -7706,6 +7723,7 @@ class PiccelApp(QtWidgets.QApplication):
             sh.notifier.add_watcher('entry_set', model.update_after_set)
             sh.notifier.add_watcher('pre_delete_entry', model.update_before_delete)
             sh.notifier.add_watcher('deleted_entry', model.update_after_delete)
+            sh.notifier.add_watcher('clear_data', model.update_after_clear)
 
             _data_sheet_ui.tableView.setModel(model)
             _data_sheet_ui.tableView.horizontalHeader().setMaximumSectionSize(500) # TODO expose param

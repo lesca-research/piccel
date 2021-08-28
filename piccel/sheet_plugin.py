@@ -43,15 +43,15 @@ class SheetPlugin:
 
     def _on_entry_append(self, sheet):
         self.update(sheet, sheet.df.tail(1))
-        self.sheet.invalidate_cached_views()
 
     def _on_entry_set(self, sheet, entry_id):
         self.update(sheet, sheet.df.loc[[entry_id]])
-        self.sheet.invalidate_cached_views()
 
     def _on_entry_deletion(self, sheet, entry_df):
         self.update(sheet, entry_df, deletion=True)
-        self.sheet.invalidate_cached_views()
+
+    def _on_clear(self, sheet):
+        self.update(sheet, None, clear=True)
 
     def _watch_sheets(self, sheets_to_watch):
         for sheet_to_watch in sheets_to_watch:
@@ -64,6 +64,9 @@ class SheetPlugin:
             # Watch deletion
             fd = LazyFunc(self._on_entry_deletion, sheet_to_watch)
             sheet_to_watch.notifier.add_watcher('deleted_entry', fd)
+            # Watch clear
+            fc = LazyFunc(self._on_clear, sheet_to_watch)
+            sheet_to_watch.notifier.add_watcher('cleared_data', fc)
 
     def reset_view_index_for_display(self):
         return False
@@ -112,7 +115,7 @@ class SheetPlugin:
         """
         return []
 
-    def update(self, sheet_source, changed_entry, deletion=False):
+    def update(self, sheet_source, changed_entry, deletion=False, clear=False):
         """
         Called when a watched sheet has been modified.
         Watch sheets comprise the associated sheet and sheets defined by
