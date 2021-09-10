@@ -36,8 +36,9 @@ from . import sheet_plugin_template
 from . import workbook_plugin_template
 from .sheet_plugin_template import CustomSheetPlugin
 from .plugin_tools import map_set, And, Or #, Less, LessEqual, Greater, GreaterEqual
-from .plugin_tools import (LescaDashboard, track_interview,
-                           DEFAULT_INTERVIEW_PLAN_SHEET_LABEL)
+from .plugin_tools import (LescaDashboard, track_interview, interview_action,
+                           DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
+                           track_emailled_poll, emailled_poll_action)
 
 import unittest
 import tempfile
@@ -46,6 +47,8 @@ import numpy as np
 from numpy.testing import assert_array_equal
 
 import pandas as pd
+import warnings
+
 from pandas.testing import assert_frame_equal, assert_series_equal
 
 from cryptography.fernet import Fernet
@@ -1396,6 +1399,10 @@ class LocalFileSystem:
         return LocalFileSystem(op.join(self.root_folder, folder),
                                self.encrypter, track_changes)
 
+    def clone(self):
+        return LocalFileSystem(self.root_folder, self.encrypter,
+                               self.track_changes)
+
     def set_encrypter(self, encrypter):
         self.encrypter = encrypter
 
@@ -1690,6 +1697,21 @@ class TestLocalFileSystem(unittest.TestCase):
         self.assertEqual(len(adds), 0)
         self.assertEqual(len(adds), 0)
 
+class NonUniqueIndexFromValues(Exception) : pass
+
+
+
+def df_index_from_value(df, value_dict):
+    if len(value_dict) == 0:
+            return []
+    iter_vd = iter(value_dict.items())
+    first_key, first_value = next(iter_vd)
+    m = df[first_key] == first_value
+    for key, value in iter_vd:
+        m &= (df[key] == value)
+    return df[m].index.to_list()
+
+
 class DataSheet:
     """
     Table data where entries where input is done with an associated form.
@@ -1702,7 +1724,8 @@ class DataSheet:
     SHEET_LABEL_RE = re.compile('[A-Za-z._-]+')
 
     def __init__(self, label, form_master=None, df=None, user=None,
-                 filesystem=None, live_forms=None, watchers=None, workbook=None):
+                 filesystem=None, live_forms=None, watchers=None,
+                 workbook=None):
         """
         filesystem.root is the sheet-specific folder where to save all data
         and pending forms
@@ -1710,7 +1733,6 @@ class DataSheet:
         self.label = self.validate_sheet_label(label)
 
         if df is not None and form_master is None:
-            # TODO: also check that all columns in df can be formatted using form
             raise Exception('Form master cannot be None if df is given')
 
         self.form_master = form_master
@@ -1746,16 +1768,21 @@ class DataSheet:
 
         self.df = None
         if form_master is not None:
-            cols = ['__entry_id__', '__origin_id__', '__update_idx__']
+            cols = ['__entry_id__', '__update_idx__', '__conflict_idx__', '__fn__']
             self.df = pd.DataFrame(columns=cols)
             self.df['__entry_id__'] = self.df['__entry_id__'].astype(np.int64)
-            self.df['__origin_id__'] = self.df['__origin_id__'].astype(np.int64)
             self.df['__update_idx__'] = (self.df['__update_idx__']
                                          .astype(np.int64))
-            self.df.set_index('__entry_id__', inplace=True)
+            self.df['__conflict_idx__'] = (self.df['__conflict_idx__']
+                                           .astype(np.int64))
+
+            self.df.set_index(['__entry_id__', '__update_idx__',
+                               '__conflict_idx__'], inplace=True)
 
         if df is not None:
             self.import_df(df)
+
+        self.entry_fns = {}
 
         if self.filesystem is not None and not self.filesystem.exists('data'):
             self.filesystem.makedirs('data')
@@ -1798,10 +1825,8 @@ class DataSheet:
             df = self.df
         if df is None or df.shape[0]==0:
             return None
-        max_uidx = lambda x: (x.loc[x['__update_idx__'] == \
-                                    x['__update_idx__'].max()])
-        return (df.groupby(by='__origin_id__', group_keys=False)
-                .apply(max_uidx))
+        fm = lambda x : x.loc[[x.index.max()]]
+        return df.groupby(level=0, group_keys=False).apply(fm)
 
     #@check_role(UserRole.ADMIN)
     def dump_plugin_code(self, plugin_code=None, overwrite=False):
@@ -1871,8 +1896,12 @@ class DataSheet:
                     logger.debug('Load sheet data item from %s', data_fn)
                     df_content = self.filesystem.load(data_fn)
                     # _append_df will notify 'append_entry'
-                    self._append_df(self.df_from_str(df_content))
-                self.invalidate_cached_views()
+                    entry_df = self.df_from_str(df_content)
+                    if not data_fn.endswith('main.csv'):
+                        entry_df['__fn__'] = data_fn
+                    self._append_df(entry_df)
+                    self.fix_conflicting_entries()
+                    self.invalidate_cached_views()
             else:
                 logger.debug('No sheet data to load in %s', data_folder)
             self.filesystem.accept_all_changes()
@@ -1896,12 +1925,84 @@ class DataSheet:
             else:
                 for data_fn in new_files:
                     df_content = self.filesystem.load(data_fn)
-                    self._append_df(self.df_from_str(df_content))
+                    entry_df = self.df_from_str(df_content)
+                    if not data_fn.endswith('main.csv'):
+                        entry_df['__fn__'] = data_fn
+                    self._append_df(entry_df)
                 self.filesystem.accept_all_changes()
 
     def set_form_master(self, form):
         # TODO: utest and check consistency with pending live forms
         self.form_master = form
+
+    def _remove_from_value_to_index(self, entry_df):
+        # TODO utest that value indexes are properly maintained
+        # after entry deletion
+        entry_cols_set = set(entry_df.columns)
+        for cols, value_to_index in self.value_to_index:
+            if entry_cols_set.issubset(cols):
+                for col_values, df_index in entry_df[list(cols)].groupby():
+                    pass
+
+    def _add_to_value_to_index(self):
+        pass
+
+    def __df_index_from_value_wip(self, value_dict, view=None,
+                                  full_mask_search=True):
+        # Trying to use a maintained mapping of values to index to speed up
+        # ...
+        if len(value_dict) == 0:
+            return None
+        view = view if view is not None else self.default_view
+        df = self.get_df_view(view)
+        if df is None or df.shape[0] == 0:
+            return None
+        sorted_cols = tuple(sorted(value_dict.keys()))
+        value_to_index = self.value_to_index[view]
+        matched_index = set()
+        if not full_mask_search:
+            if sorted_cols not in value_to_index:
+                logger.debug('Sheet %s view %s, build value index for columns %s',
+                             self.label, view, sorted_cols)
+                get_indexes = lambda x: set(x.index.to_list())
+                value_to_index[sorted_cols] = (df.groupby(by=list(sorted_cols))
+                                               .apply(get_indexes))
+            to_look_up = tuple(value_dict[k] for k in sorted_cols)
+            try:
+                matched_index = value_to_index[sorted_cols][to_look_up]
+            except KeyError:
+                pass
+        # from IPython import embed; embed()
+        matched_index = list(matched_index)
+
+        if full_mask_search or \
+            not all(df.loc[matched_index, col].all() for col in sorted_cols):
+            logger.warning('Value to index embarassingly failed from keys %s',
+                           sorted_cols)
+            # The check that does prevent missed values...
+            # Only insures that found index is actually associated with
+            # queried values
+            iter_vd = iter(value_dict.items())
+            first_key, first_value = next(iter_vd)
+            m = df[first_key] == first_value
+            for key, value in iter_vd:
+                m &= (df[key] == value)
+            matched_index = df[m].index.to_list()
+            logger.debug('Sheet %s, view %s: Index matching %s: %s',
+                         self.label, view, value_dict, matched_index)
+
+        return matched_index[0] if len(matched_index)==1 else matched_index
+
+
+    def df_index_from_value(self, value_dict, view=None):
+        view = view if view is not None else self.default_view
+        df = self.get_df_view(view)
+        if df is None or df.shape[0] == 0:
+            return []
+        matched_index = df_index_from_value(df, value_dict)
+        logger.debug('Sheet %s, view %s: Index matching %s: %s',
+                     self.label, view, value_dict, matched_index)
+        return matched_index
 
     def save(self):
         if self.filesystem is None:
@@ -1920,27 +2021,28 @@ class DataSheet:
                         self.save_live_form_input(form_id, section_name,
                                                   key, value_str)
 
-    def save_all_data(self, *args, **kwargs):
-        # TODO: better API, without ignoring input args
+    def save_all_data(self, entry_df=None):
         # TODO: admin role + lock !
-        if self.df is not None:
+        if self.df is not None and self.df.shape[0] > 0:
             main_data_fn = 'main.csv'
             if not self.filesystem.exists('data'):
                 logger.info('Sheet %s: Create data folder', self.label)
                 self.filesystem.makedirs('data')
-            logger.info('Sheet %s: Save all data of sheet', self.label)
+            logger.info('Sheet %s: Save all data', self.label)
             self.filesystem.save(op.join('data', main_data_fn),
                                  self.df_to_str(self.df),
                                  overwrite=True)
 
             logger.info('Remove all single data entries of sheet %s',
                         self.label)
-            deleted_fns = []
-            for data_bfn in self.filesystem.listdir('data'):
-                if data_bfn != main_data_fn:
-                    data_fn = op.join('data', data_bfn)
-                    logger.info('Delete entry file %s', data_fn)
+            for entry_idx, data_fn in self.df['__fn__'].iteritems():
+                if not pd.isna(data_fn):
+                    logger.info('Delete file of entry %s: %s', data_fn, entry_idx)
                     self.filesystem.remove(data_fn)
+                else:
+                    logger.info('No file to delete for entry %s', entry_idx)
+
+            self.df['__fn__'] = pd.NA
 
     def load_live_forms(self):
         # TODO: handle consistency with form master, + ustests
@@ -1973,8 +2075,6 @@ class DataSheet:
                     entry_id_str = (saved_entries[first_section]
                                     .pop('__entry_id__'))
                     entry_id = np.int64(entry_id_str)
-                    origin_id_str = (saved_entries[first_section]
-                                     .pop('__origin_id__'))
                     update_idx_str = (saved_entries[first_section]
                                       .pop('__update_idx__'))
 
@@ -1982,9 +2082,8 @@ class DataSheet:
                                   .pop('__submission__'))
 
                     logger.debug2('Loaded from live from file: %s '\
-                                 '__entry_id__ = %s, __origin_id__ = %s, '\
-                                 '__update_idx__ = %s ', entry_id_str,
-                                 origin_id_str, update_idx_str)
+                                 '__entry_id__ = %s, __update_idx__ = %s ',
+                                  entry_id_str, update_idx_str)
 
                     form_id = int(form_id_str) # TODO factorize
                     live_form = {'append' : self.form_new_entry,
@@ -1999,9 +2098,8 @@ class DataSheet:
                                                                   force=True)
                     first_section = live_form[live_form.first_section()]
                     logger.debug2('IDs after live form input: __entry_id__=%d, '\
-                                 '__origin_id__=%d',
+                                 '__update_idx__=%d',
                                  first_section['__entry_id__'].get_value(),
-                                 first_section['__origin_id__'].get_value(),
                                  first_section['__update_idx__'].get_value(),)
 
                     self.live_forms[form_id] = live_form
@@ -2036,7 +2134,7 @@ class DataSheet:
             logger.warning('No data to export')
             return
 
-        df = self.get_df_view(view).reset_index(drop=True) # get rid of __entry_id__
+        df = self.get_df_view(view).reset_index(drop=True)
         if columns is not None:
             df = df[columns]
 
@@ -2159,38 +2257,39 @@ class DataSheet:
                                                byteorder='big',
                                                signed=True) >> 64)
         if '__origin_id__' in df.columns:
-                df['__origin_id__'] = (df['__origin_id__']
-                                       .apply(hex_to_int)
-                                       .astype(np.int64))
-                if df.dtypes['__origin_id__'] != np.int64:
-                    print('df_from_str: Error __origin_id__')
-                    from IPython import embed; embed()
-
-        if '__entry_id__' in df.columns:
+            df['__entry_id__'] = (df['__origin_id__']
+                                  .apply(hex_to_int)
+                                  .astype(np.int64))
+        else:
             df['__entry_id__'] = (df['__entry_id__']
                                   .apply(hex_to_int)
                                   .astype(np.int64))
-            df.set_index('__entry_id__', inplace=True)
 
-            if '__update_idx__' in df.columns:
-                df['__update_idx__'] = (df['__update_idx__'].apply(int)
-                                        .astype(np.int64))
-        else:
-            logger.warning('Df converted from csv str has no __entry_id__')
+        if df.dtypes['__entry_id__'] != np.int64:
+            print('df_from_str: Error __entry_id__ from __origin_id__')
+            from IPython import embed; embed()
+
+        df['__update_idx__'] = (df['__update_idx__'].apply(int)
+                                .astype(np.int64))
+        df['__conflict_idx__'] = np.int64(0)
+        df.set_index(['__entry_id__', '__update_idx__', '__conflict_idx__'],
+                     inplace=True)
         return df
 
     def df_to_str(self, df=None):
         df = df if df is not None else self.df
         if df is None or df.shape[0]==0:
             return ''
+
         if '__origin_id__' in df.columns:
-            if df.dtypes['__origin_id__'] != np.int64:
-                print('df_to_str: Error __origin_id__')
-                from IPython import embed; embed()
+            df = df.drop(columns=['__origin_id__'])
+
+        if '__conflict_idx__' in df.columns:
+            df = df.drop(columns=['__conflict_idx__'])
 
         df = df.copy()
         for col in df.columns:
-            if col not in ['__entry_id__', '__origin_id__', '__update_idx__']:
+            if col not in ['__entry_id__', '__update_idx__']:
                 logger.debug2('df_to_str: format column %s', col)
                 f = lambda v: self.form_master.format(col,v) \
                     if not pd.isna(v) else ''
@@ -2198,7 +2297,6 @@ class DataSheet:
 
         df = df.reset_index()
         df['__entry_id__'] = df['__entry_id__'].apply(lambda x: hex(x))
-        df['__origin_id__'] = df['__origin_id__'].apply(lambda x: hex(x))
         df['__update_idx__'] = df['__update_idx__'].apply(str)
         content = df.to_csv(sep=DataSheet.CSV_SEPARATOR, index=False,
                             quoting=csv.QUOTE_NONNUMERIC)
@@ -2226,6 +2324,8 @@ class DataSheet:
                 logger.debug('Sheet %s: Update cached view "%s". Shape%s. '\
                              'Columns: %s', self.label, view_label, view_df.shape,
                              ', '.join(view_df.columns))
+                if '__fn__' in view_df.columns:
+                    view_df.drop(columns=['__fn__'], inplace=True)
             else:
                 logger.debug('Update cached view "%s": None', view_label)
             if for_display and self.plugin.reset_view_index_for_display():
@@ -2253,13 +2353,13 @@ class DataSheet:
         self.views = views_getters
         self.invalidate_cached_views()
 
-    def is_valid(self):
-        df = self.get_df_view()
-        if df is not None:
-            return all(df[col].is_unique \
-                       for col in self.form_master.unique_keys)
-        else:
-            return None
+    # def is_valid(self):
+    #     df = self.get_df_view('latest')
+    #     if df is not None:
+    #         return all(df[col].is_unique \
+    #                    for col in self.form_master.unique_keys)
+    #     else:
+    #         return True
 
     def inconsistent_entries(self):
         if self.cached_inconsistent_entries is None:
@@ -2282,113 +2382,109 @@ class DataSheet:
 
         if conflicting_ids is None:
             conflicting_ids = self.concurrent_updated_entries(df)
-        df = df.drop(conflicting_ids)
-
-        origin_ids_duplicates = set()
-        max_uidx = lambda x: (x.loc[x['__update_idx__'] == \
-                                    x['__update_idx__'].max()])
-
-        latest_df = (df.groupby(by='__origin_id__', group_keys=False)
-                     .apply(max_uidx))
+        if len(conflicting_ids) > 0:
+            df = df.drop(conflicting_ids)
+        ids_of_duplicates = set()
+        latest_df = self.latest_update_df(df)
         for col in cols_to_check:
             m = latest_df[col].duplicated(keep=False)
-            origin_ids_duplicates.update(latest_df.loc[m, '__origin_id__'])
-        m = df['__origin_id__'].isin(origin_ids_duplicates)
-        ids_of_duplicates = set(df[m].index)
+            ids_of_duplicates.update(latest_df[m].index)
         if len(ids_of_duplicates) > 0:
             logger.error('Duplicate entries for column(s) %s:\n %s',
-                         ', '.join(cols_to_check),
-                         df.loc[ids_of_duplicates, ['__origin_id__',
-                                                    '__update_idx__']])
+                         ', '.join(cols_to_check), ids_of_duplicates)
         return ids_of_duplicates
 
     def concurrent_updated_entries(self, df=None):
         df = df if df is not None else self.df
         if df is None:
             return set()
-        ids_of_conflicts = set()
-        for name, group in df.groupby('__origin_id__'):
-            m = group.__update_idx__.duplicated(keep=False)
-            ids_of_conflicts.update(group[m].index)
-
+        ids_of_conflicts = self.df.query('__conflict_idx__ > 0').index
         if len(ids_of_conflicts) > 0:
-            logger.error('Conflicting entries:\n %s',
-                         df.loc[ids_of_conflicts, ['__origin_id__',
-                                                   '__update_idx__']])
+            logger.warning('Sheet %s: Conflicting entries: %s', self.label,
+                           ids_of_conflicts.to_list())
         return ids_of_conflicts
 
-    def validate_unique(self, key, value, origin_id, update_idx, entry_id):
+    def validate_unique(self, key, value, update_idx, entry_id, conflict_idx):
         logger.debug2('Sheet %s: Validate uniqueness of %s', self.label, key)
         if self.df is None or self.df.shape[0]==0:
             return True
-        cols = [key, '__origin_id__', '__update_idx__']
-        if entry_id not in self.df.index:
+        def index_has_locs(index, seq):
+            try:
+                locs = index.get_locs(seq)
+                return len(locs) > 0
+            except KeyError:
+                return False
+
+        if entry_id not in self.df.index.get_level_values('__entry_id__'):
+            # Entry not there -> new one
             tmp_entry_id = self.new_entry_id()
-            tmp_entry_df = pd.DataFrame([[value, origin_id, update_idx]],
-                                        columns=cols, index=[tmp_entry_id])
-            tmp_entry_df.index.name = "__entry_id__"
-            tmp_df = self.df[cols].append(tmp_entry_df)
+            tmp_entry_df = (pd.DataFrame({key:[value],
+                                          '__entry_id__' : [tmp_entry_id],
+                                          '__update_idx__' : [0],
+                                          '__conflict_idx__' : [0]})
+                            .set_index(['__entry_id__', '__update_idx__',
+                                        '__conflict_idx__']))
+            tmp_df = self.df[[key]].append(tmp_entry_df)
+        elif index_has_locs(self.df.index, (entry_id, update_idx, conflict_idx)):
+            # Entry already there -> modification
+            tmp_df = self.df[[key]].copy()
+            tmp_df.loc[[(entry_id, update_idx, conflict_idx)], key] = value
         else:
-            tmp_df = self.df[cols].copy()
-            tmp_df.loc[entry_id, key] = value
-        duplicate_entry_ids = self.duplicate_entries(tmp_df, cols_to_check=[key])
-        duplicate_entry_ids.difference_update(self.inconsistent_entries())
+            # Entry to update
+            tmp_entry_df = (pd.DataFrame({key:[value],
+                                          '__entry_id__' : [entry_id],
+                                          '__update_idx__' : [update_idx],
+                                          '__conflict_idx__' : [0]})
+                            .set_index(['__entry_id__', '__update_idx__',
+                                        '__conflict_idx__']))
+            tmp_df = self.df[[key]].append(tmp_entry_df)
+        duplicate_entry_ids = self.duplicate_entries(tmp_df,
+                                                     cols_to_check=[key])
+        duplicate_entry_ids.difference_update(self.concurrent_updated_entries(tmp_df))
         unique_ok = len(duplicate_entry_ids) == 0
         if not unique_ok:
             logger.warning('Value %s for key %s is not unique', value, key)
         return unique_ok
 
-    def form_update_entry(self, entry_id, form_id=None):
+    def form_update_entry(self, entry_idx, form_id=None):
         """
         Create a form and fill it with content of an existing entry.
         Some item are disabled according to item.freeze_on_update
         """
         if self.form_master is not None and self.has_write_access:
-            entry_dict = self.df.loc[[entry_id]].to_dict('record')[0]
-            origin_id = entry_dict.pop('__origin_id__')
-            update_idx = entry_dict.pop('__update_idx__')
-            form = self._new_form('update', entry_dict=entry_dict,
-                                  form_id=form_id, entry_id=entry_id,
-                                  origin_id=origin_id,
-                                  update_idx=update_idx + np.int64(1))
+            entry_dict = self.df.loc[[entry_idx]].to_dict('record')[0]
+            new_update_idx = self.df.loc[entry_idx[0]].index.max()[0] + 1
+            form = self._new_form('append', entry_dict=entry_dict,
+                                  form_id=form_id, entry_id=entry_idx[0],
+                                  update_idx=new_update_idx)
             for item in form.to_freeze_on_update:
                 item.set_editable(False)
             return form
         else:
             return None
 
-    def form_new_entry(self, entry_id=None, form_id=None):
+    def form_new_entry(self, entry_idx=None, form_id=None):
         if not self.has_write_access:
             logger.error('Sheet %s: Cannot create form (no write access)',
                          self.label)
             return None
         return self._new_form('append', form_id=form_id)
 
-    def form_set_entry(self, entry_id, form_id=None):
+    def form_set_entry(self, entry_idx, form_id=None):
         if not self.has_write_access:
             return None
-        entry_dict = self.df.loc[[entry_id]].to_dict('record')[0]
-        origin_id = entry_dict.pop('__origin_id__')
-        update_idx = entry_dict.pop('__update_idx__')
+        entry_dict = self.df.loc[[entry_idx]].to_dict('record')[0]
         return self._new_form('set', entry_dict=entry_dict, form_id=form_id,
-                              entry_id=entry_id, update_idx=update_idx)
+                              entry_id=entry_idx[0], update_idx=entry_idx[1],
+                              conflict_idx=entry_idx[2])
 
     def _new_form(self, submission, entry_dict=None, entry_id=None,
-                  origin_id=None, form_id=None, update_idx=np.int64(0)):
+                  form_id=None, update_idx=np.int64(0), conflict_idx=np.int64(0)):
         if self.form_master is None:
             raise NoFormMasterError()
 
         entry_dict = entry_dict if entry_dict is not None else {}
-
-        # TODO: u bit ugly... to improve
-        if submission == 'update':
-            to_ignore = entry_id
-            entry_id = None
-            submission = 'append'
-        elif submission == 'set':
-            to_ignore = entry_id
-        else:
-            to_ignore = None
+        entry_dict.pop('__fn__', None)
 
         logger.debug2('Sheet %s: fork from master', self.label)
         form = self.form_master.new()
@@ -2406,7 +2502,6 @@ class DataSheet:
                                self.label)
                     form_id = uuid1().int
 
-
         if self.filesystem is not None:
             if not self.filesystem.exists(forms_folder):
                 self.filesystem.makedirs(forms_folder)
@@ -2419,7 +2514,6 @@ class DataSheet:
                                              form_id=form_id))
 
         entry_id = entry_id if entry_id is not None else self.new_entry_id()
-        origin_id = origin_id if origin_id is not None else entry_id
 
         form.set_values_from_entry(entry_dict)
 
@@ -2428,19 +2522,19 @@ class DataSheet:
 
         for item in form.unique_items:
             item.set_unique_validator(LazyFunc(self.validate_unique,
-                                               origin_id=origin_id,
                                                update_idx=update_idx,
-                                               entry_id=entry_id))
+                                               entry_id=entry_id,
+                                               conflict_idx=conflict_idx))
 
         entry_id_str = str(entry_id)
-        origin_id_str = str(origin_id)
         update_idx_str = str(update_idx)
-        logger.debug2('Sheet %s: prepend entry id %d, origin id %d, update idx %s '\
-                     'and submission mode %s', self.label, entry_id, origin_id,
+        conflict_idx_str = str(conflict_idx)
+        logger.debug2('Sheet %s: prepend entry id %d, update idx %s '\
+                     'and submission mode %s', self.label, entry_id,
                      update_idx, submission)
         form._prepend('__entry_id__', entry_id, 'int64')
-        form._prepend('__origin_id__', origin_id, 'int64')
         form._prepend('__update_idx__', update_idx, 'int64')
+        form._prepend('__conflict_idx__', conflict_idx, 'int64')
         form._prepend('__submission__', submission, 'text')
 
         if self.filesystem is not None:
@@ -2448,9 +2542,9 @@ class DataSheet:
             self.save_live_form_input(form_id, first_section,
                                       '__entry_id__', entry_id_str)
             self.save_live_form_input(form_id, first_section,
-                                      '__origin_id__', origin_id_str)
-            self.save_live_form_input(form_id, first_section,
                                       '__update_idx__', update_idx_str)
+            self.save_live_form_input(form_id, first_section,
+                                      '__conflict_idx__', conflict_idx_str)
             self.save_live_form_input(form_id, first_section,
                                       '__submission__', submission)
 
@@ -2497,19 +2591,21 @@ class DataSheet:
         entry_dict = entry_dict.copy()
         submission_mode = entry_dict.pop('__submission__')
         entry_id = entry_dict.pop('__entry_id__')
-        logger.debug2('Processing submission of entry %d (origin id: %d, '\
-                     'update idx: %d), mode: %s',
-                     entry_id, entry_dict['__origin_id__'],
-                     entry_dict['__update_idx__'], submission_mode)
+        update_idx = entry_dict.pop('__update_idx__')
+        conflict_idx = entry_dict.pop('__conflict_idx__')
+        logger.debug2('Processing submission of entry %d, '\
+                     'update idx: %d, mode: %s',
+                     entry_id, update_idx, submission_mode)
         if submission_mode == 'append':
-            self.append_entry(entry_dict, entry_id)
+            self.append_entry(entry_dict, (entry_id, update_idx, conflict_idx))
         elif submission_mode == 'set':
-            self.set_entry(entry_dict, entry_id)
+            self.set_entry(entry_dict, (entry_id, update_idx, conflict_idx))
         else:
             raise Exception('Unknown submission mode "%s"' % submission_mode)
 
         form_folder = self.get_live_form_folder(form_id)
-        self.filesystem.save(op.join(form_folder, 'TO_DELETE'), '', overwrite=True)
+        self.filesystem.save(op.join(form_folder, 'TO_DELETE'), '',
+                             overwrite=True)
         self.clean_live_form(form_id)
 
     def clean_live_form(self, form_id):
@@ -2518,29 +2614,31 @@ class DataSheet:
         try:
             self.filesystem.rmtree(form_folder)
         except Exception as e:
-            logger.error('Error while deleting live form folder %s', form_folder)
+            logger.error('Error while deleting live form folder %s: %s',
+                         form_folder, repr(e))
 
         self.live_forms.pop(form_id)
         logger.debug2('Sheet %s: Popped form_id %s -> remaining forms: %s',
                      self.label, form_id,
                      ', '.join(str(fid) for fid in self.live_forms))
 
-    def add_entry(self, entry_dict, entry_id, process_entry_df,
+    def add_entry(self, entry_dict, entry_idx, process_entry_df,
                   save_func=None):
         if save_func is None:
             save_func = self.save_single_entry
         if logger.level >= logging.DEBUG:
-            logger.debug('Sheet %s: Add entry %d (origin id: %d), (keys: %s)',
-                         self.label, entry_id, entry_dict['__origin_id__'],
-                         ','.join(entry_dict.keys()))
+            logger.debug('Sheet %s: Add entry %s, (keys: %s)',
+                         self.label, entry_idx, ','.join(entry_dict.keys()))
 
-
-        # Convert entry dict to pandas.DataFrame and fix types
-        index = pd.Int64Index(np.array([entry_id], dtype=np.int64),
-                              name='__entry_id__')
+        # Convert entry dict to pandas.DataFrame and set index
+        idx_arrays = [np.array([entry_idx[0]], dtype=np.int64),
+                      np.array([entry_idx[1]], dtype=np.int64),
+                      np.array([entry_idx[2]], dtype=np.int64)]
+        index = pd.MultiIndex.from_arrays(idx_arrays,
+                                          names=('__entry_id__',
+                                                 '__update_idx__',
+                                                 '__conflict_idx__'))
         entry_df = pd.DataFrame([entry_dict], index=index)
-        if self.df is not None:
-            ordered_columns = None
 
         dkeys = self.form_master.datetime_keys
         datetime_cols = list(set(entry_df.columns).intersection(dkeys))
@@ -2551,27 +2649,34 @@ class DataSheet:
         logger.debug('Sheet %s: entry_df to add: index=%s, cols=%s',
                      self.label, entry_df.index.name,
                      ','.join(entry_df.columns))
+
+
         # Inject entry in current dataframe
-        process_entry_df(entry_df)
+        # Index of entry may change because of conflicting entries
+        entry_idx = process_entry_df(entry_df)
 
         # Save to file if needed
-        save_func(entry_id, entry_df)
+        fn = save_func(entry_df)
+        if fn is not None:
+            self.df.loc[entry_idx, '__fn__'] = fn
 
         self.invalidate_cached_views()
         return entry_df
 
-    def save_single_entry(self, entry_id, entry_df):
+    def save_single_entry(self, entry_df):
         if self.filesystem is not None:
-            entry_rfn = '%d.csv' % entry_id
+            entry_rfn = '%d.csv' % uuid1().int
+            while self.filesystem.exists(op.join('data', entry_rfn)):
+                entry_rfn = '%d.csv' % uuid1().int
             entry_fn = op.join('data', entry_rfn)
-            logger.debug2('Sheet %s: save entry %d to %s',
-                         self.label, entry_id, entry_fn)
+            logger.debug('Sheet %s: save entry %s to %s',
+                         self.label, entry_df.index.to_list(), entry_fn)
             self.filesystem.save(entry_fn, self.df_to_str(entry_df))
-            return [entry_rfn], []
+            return entry_fn
         else:
-            logger.debug2('Sheet %s: entry %d not saved (no associated filesystem)',
-                         self.label, entry_id)
-        return [], []
+            logger.debug2('Sheet %s: entry %d not saved (no associated '\
+                          'filesystem)', self.label, entry_df.index.to_list())
+        return None
 
     def add_new_entry(self, entry_dict):
         form = self.form_new_entry()
@@ -2579,106 +2684,141 @@ class DataSheet:
         form.submit()
         return form
 
-    def append_entry(self, entry_dict, entry_id=None):
-        if entry_id is None:
-            entry_id = self.new_entry_id()
-        self.add_entry(entry_dict, entry_id, self._append_df)
+    def append_entry(self, entry_dict, entry_idx=None):
+        if entry_idx is None:
+            entry_idx = (self.new_entry_id(), 0)
+        self.add_entry(entry_dict, entry_idx, self._append_df)
 
     # TODO: admin feature!
-    def delete_entry(self, entry_id):
-        logger.debug('Sheet %s (df shape: %s): delete entry %d',
-                     self.label, self.df.shape, entry_id)
-        deleted_entry = self.df.loc[[entry_id]]
-        self.notifier.notify('pre_delete_entry', entry_id)
-        self.df.drop(entry_id, inplace=True)
+    def delete_entry(self, entry_idx):
+        logger.debug('Sheet %s (df shape: %s): delete entry %s',
+                     self.label, self.df.shape, entry_idx)
+        deleted_entry = self.df.loc[[entry_idx]]
+        self.notifier.notify('pre_delete_entry', entry_idx)
+        entry_fn = self.df.loc[entry_idx, '__fn__']
+        self.df.drop(entry_idx, inplace=True)
 
         logger.debug2('Sheet %s: df shape after deletion: %s',
                      self.label, self.df.shape)
 
         if self.filesystem is not None:
-            entry_bfn = '%d.csv' % entry_id
-            entry_fn = op.join('data', entry_bfn)
-            if self.filesystem.exists(entry_fn):
+            if not pd.isna(entry_fn):
                 self.filesystem.remove(entry_fn)
             else:
                 main_data_fn = 'main.csv'
-                self.filesystem.save(op.join('data', main_data_fn),
-                                     self.df_to_str(self.df),
+                df_str = self.df_to_str(self.df.drop(columns='__fn__'))
+                self.filesystem.save(op.join('data', main_data_fn), df_str,
                                      overwrite=True)
-
+        # TODO: update conflit idx!
+        self.resolve_conflicting_entries(entry_idx)
         self.invalidate_cached_views()
         self.notifier.notify('deleted_entry', entry_df=deleted_entry)
 
-    def set_entry(self, entry_dict, entry_id):
+    def set_entry(self, entry_dict, entry_idx):
         """ WARNING: this is an admin feature, not conflict-free! """
-        self.add_entry(entry_dict, entry_id, self.set_entry_df,
+        self.add_entry(entry_dict, entry_idx, self.set_entry_df,
                        save_func=self.save_all_data)
 
     def _append_df(self, entry_df):
-        """ ASSUME: entry_ids are properly set """
+        # TODO: use merge instead of append
+        # -> have to change notification and QListView
+        """ ASSUME: entry index is properly set """
         logger.debug('Append df to sheet "%s" (index: %s, columns: %s)',
-                     self.label, entry_df.index.name,
+                     self.label, entry_df.index.to_list(),
                      ','.join(entry_df.columns))
 
         if self.df is None:
             self.df = entry_df.copy()
         else:
             self.df = self.df.append(entry_df)
+        entry_index = self.fix_conflicting_entries(index_to_track=entry_df.index[0])
         logger.debug2('Entry has been appended to sheet %s', self.label)
         logger.debug2('Resulting df has columns: %s)', ','.join(self.df.columns))
         self.invalidate_cached_views()
         self.notifier.notify('appended_entry')
 
+        # Note: only the index of the first row of entry_df if returned.
+        # This is expected to work only for single entries
+        return entry_index
+
+    def resolve_conflicting_entries(self, entry_idx):
+        try:
+            locs = self.df.index.get_locs(entry_idx[:2])
+        except KeyError:
+            return
+        if len(locs) == 1:
+            new_index = self.df.index.to_list()
+            prev_idx = new_index[locs[0]]
+            new_index[locs[0]] = (prev_idx[0], prev_idx[1], 0)
+            self.df.set_index(pd.MultiIndex.from_tuples(new_index,
+                                                        names=self.df.index.names),
+                              inplace=True)
+
+    def fix_conflicting_entries(self, index_to_track=None):
+        new_tracked_index = index_to_track
+        index_to_track = index_to_track if index_to_track is not None else tuple()
+        ipos_to_fix = np.flatnonzero(self.df.index.duplicated(keep=False))
+        logger.debug('Check conflicting entries in %s',
+                     [self.df.index[i] for i in ipos_to_fix])
+        if len(ipos_to_fix) > 0:
+            new_index = self.df.index.to_list()
+            taken_cids = {}
+            for ipos in ipos_to_fix:
+                idx = self.df.index[ipos]
+                # idx[0] = entry_id, idx[1] = update_idx, idx[2] = conflict_idx
+                if idx[:2] not in taken_cids:
+                    locs = self.df.index.get_locs(idx[:2])
+                    taken_cids[idx[:2]] = set(self.df.index[locs]
+                                              .get_level_values('__conflict_idx__'))
+                cur_taken_ids = taken_cids[idx[:2]]
+                new_conflict_idx = idx[2] + 1
+                while new_conflict_idx in cur_taken_ids:
+                    new_conflict_idx += 1
+                cur_taken_ids.add(new_conflict_idx)
+                new_index_entry = (idx[0], idx[1], new_conflict_idx)
+                logger.info('Fix duplicate index %s -> %s', idx, new_index_entry)
+                if index_to_track == idx:
+                    new_tracked_index = new_index_entry
+                new_index[ipos] = new_index_entry
+            self.df.set_index(pd.MultiIndex.from_tuples(new_index,
+                                                        names=self.df.index.names),
+                              inplace=True)
+        return new_tracked_index
+
     def set_entry_df(self, entry_df):
-        logger.debug('Set df entry %d in sheet "%s" (index: %s, origin_id: %d, '\
-                     'update idx: %d, columns: %s)', entry_df.index.values[0],
-                     self.label, entry_df.index.name, entry_df['__origin_id__'],
-                     entry_df.index.name, entry_df['__update_idx__'],
+        logger.debug('Set df entry %s in sheet "%s" (index: %s, columns: %s)',
+                     entry_df.index[0], self.label, entry_df.index.names,
                      ','.join(entry_df.columns))
-        if self.df.dtypes['__origin_id__'] != np.int64:
-            print('set_entry before update: Error __origin_id__')
-            from IPython import embed; embed()
 
         self.df.update(entry_df)
-
-        if entry_df.dtypes['__origin_id__'] != np.int64:
-            print('set_entry after update: Error __origin_id__ in entry_df')
-            from IPython import embed; embed()
-
+        entry_index = self.fix_conflicting_entries(entry_df.index[0])
         # see: https://github.com/pandas-dev/pandas/pull/40219
         #      https://stackoverflow.com/questions/28217172/why-does-pandas-dataframe-update-change-the-dtypes-of-the-updated-dataframe
 
-        if self.df.dtypes['__origin_id__'] != np.int64:
-            self.df['__origin_id__'] = self.df['__origin_id__'].astype(np.int64)
-            if self.df.dtypes['__origin_id__'] != np.int64:
-                print('set_entry after update: Error __origin_id__')
-                from IPython import embed; embed()
-
         self.invalidate_cached_views()
-        self.notifier.notify('entry_set', entry_id=entry_df.index[0])
-
+        self.notifier.notify('entry_set', entry_idx=entry_index)
+        return entry_index
 
     def import_df(self, imported_df):
         """ """
         assert('__entry_id__' not in imported_df.columns)
-        if imported_df.index.name != '__entry_id__':
-            logger.debug2('Generate entry uuids for index of sheet %s',
+        assert('__update_idx__' not in imported_df.columns)
+        assert('__conflict_idx__' not in imported_df.columns)
+        if imported_df.index.names != ['__entry_id__', '__update_idx__',
+                                       '__conflict_idx__']:
+            logger.debug('Generate entry uuids for index of sheet %s',
                          self.label)
             nb_rows = imported_df.shape[0]
             ids = np.array([self.new_entry_id() \
                             for i in range(nb_rows)],
                            dtype=np.int64)
-            index = pd.Int64Index(ids, name='__entry_id__')
+            uidx = np.zeros(nb_rows, dtype=np.int64)
+            cidx = np.zeros(nb_rows, dtype=np.int64)
+            index = pd.MultiIndex.from_arrays([ids, uidx, cidx],
+                                              names=('__entry_id__',
+                                                     '__update_idx__',
+                                                     '__conflict_idx__'))
             imported_df.set_index(index, inplace=True)
-            if '__origin_id__' not in imported_df.columns:
-                imported_df['__origin_id__'] = ids
-                if imported_df.dtypes['__origin_id__'] != np.int64:
-                    print('df_from_str: Error __origin_id__')
-                    from IPython import embed; embed()
-
-            if '__update_idx__' not in imported_df.columns:
-                imported_df['__update_idx__'] = np.int64(0)
-
         self._append_df(imported_df)
 
 def shuffle_df_rows(df):
@@ -2707,6 +2847,7 @@ def df_weak_equal(df1, df2):
 
     diff_hash = set(hash1).symmetric_difference(hash2)
     if len(diff_hash) > 0:
+        
         mask_extra = hash1.isin(diff_hash).to_numpy()
         logger.debug('Entries in df1 and not in df2:\n%s',
                      df1[mask_extra])
@@ -2755,8 +2896,9 @@ class TestDataSheet(unittest.TestCase):
         }
         self.data_df_ts_data = pd.DataFrame(OrderedDict([
             ('Participant_ID', ['CE0004', 'CE0004', 'CE0006']),
-            ('__origin_id__', np.array([1, 1, 2], dtype=np.int64)),
+            ('__entry_id__', np.array([0, 0, 1], dtype=np.int64)),
             ('__update_idx__', np.array([0, 1, 0], dtype=np.int64)),
+            ('__conflict_idx__', np.array([0, 0, 0], dtype=np.int64)),
             ('Age', pd.array([22, 50, None], dtype=pd.Int64Dtype())),
             ('Taille', [None, 1.7, 1.7]),
             ('Phone_Number', ['514', '514', '512']),
@@ -2766,7 +2908,7 @@ class TestDataSheet(unittest.TestCase):
             ('Timestamp', [datetime(2020,1,2,13,37),
                            datetime(2021,2,2,13,37),
                            datetime(2020,1,5,13,37)]),
-        ]))
+        ])).set_index(['__entry_id__', '__update_idx__', '__conflict_idx__'])
 
         self.sheet_id = 'Participant_info'
         items = [FormItem({'Participant_ID' :
@@ -2797,7 +2939,7 @@ class TestDataSheet(unittest.TestCase):
                                   Form.from_dict(self.form_def_ts_data),
                                   self.data_df_ts_data,
                                   self.user, self.filesystem)
-        self.sheet_ts.save_all_data()
+        self.sheet_ts.save()
         logger.debug('--------------------')
         logger.debug('utest setUp finished')
 
@@ -2827,7 +2969,7 @@ class TestDataSheet(unittest.TestCase):
         ]))
         self.assertFalse(df_weak_equal(df1, df2))
 
-    def test_duplicate(self):
+    def test_inconsistencies(self):
         form_def = {
             'title' : {'French' : 'Un formulaire'},
             'default_language' : 'French',
@@ -2846,12 +2988,13 @@ class TestDataSheet(unittest.TestCase):
             }
         }
         data = pd.DataFrame(OrderedDict([
-            ('Participant_ID', ['P1', 'P1', 'P2', 'P1']),
-            ('__entry_id__', np.arange(4, dtype=np.int64)),
-            ('__origin_id__', np.array([0, 0, 2, 3], dtype=np.int64)),
-            ('__update_idx__', np.array([0, 1, 0, 0], dtype=np.int64)),
+            ('Participant_ID', ['P1', 'P1', 'P2', 'P2']), # last is dup
+            ('__entry_id__',   np.array([0, 0, 1, 2], dtype=np.int64)),
+            # 2 first are conflicting updates
+            ('__update_idx__', np.array([0, 0, 0, 0], dtype=np.int64)),
+            ('__conflict_idx__', np.array([0, 0, 0, 0], dtype=np.int64)),
             ('Name', ['John', 'Jon', 'Robert', 'Dude']),
-        ])).set_index('__entry_id__')
+        ])).set_index(['__entry_id__', '__update_idx__', '__conflict_idx__'])
 
         sheet_id = 'pinfo_with_duplicates'
         user = 'me'
@@ -2864,8 +3007,85 @@ class TestDataSheet(unittest.TestCase):
                           data, user, filesystem)
 
         # TODO use cell validity on top of row validity?
-        self.assertFalse(sheet.is_valid())
-        self.assertEqual(sheet.inconsistent_entries(), {0, 1, 3})
+        self.assertEqual(sheet.inconsistent_entries(),
+                         {(0,0,1), (0,0,2), (1,0,0), (2,0,0)})
+
+    def test_index_from_value(self):
+        form_def = {
+            'title' : {'French' : 'Un formulaire'},
+            'default_language' : 'French',
+            'supported_languages' : {'French'},
+            'sections' : {
+                'section1' : {
+                    'items' : [
+                        {'keys' : {'Participant_ID' :
+                                   {'French':'Code Participant'}},
+                         'freeze_on_update' : True,
+                         'allow_empty' : False,
+                        },
+                        {'keys' : {'Interview' :
+                                   {'French': "Type d'interview"}},
+                         'freeze_on_update' : True,
+                         'allow_empty' : False,
+                        },
+
+                        {'keys' : {'Name' : {'French':'Nom'}}}
+                    ]
+                }
+            }
+        }
+        data = pd.DataFrame(OrderedDict([
+            ('__entry_id__',     np.array([0, 0, 1, 2, 2], dtype=np.int64)),
+            ('__update_idx__',   np.array([0, 1, 0, 0, 1], dtype=np.int64)),
+            ('__conflict_idx__', np.array([0, 0, 0, 0, 0], dtype=np.int64)),
+            ('Participant_ID', ['P1', 'P1', 'P1', 'P1', 'P1']),
+            ('Interview', ['Npk', 'Npsy', 'Npsy', 'Prelim', 'Tuto']),
+            ('Extra', ['yep', 'nope', 'maybe', 'sure', 'thing']),
+        ])).set_index(['__entry_id__', '__update_idx__', '__conflict_idx__'])
+
+        sheet_id = 'sheet'
+        user = 'me'
+        sheet_folder = op.join(self.tmp_dir, sheet_id)
+        os.makedirs(sheet_folder)
+        filesystem = LocalFileSystem(sheet_folder)
+
+        logger.debug('utest: create sheet with duplicates in data')
+        sheet = DataSheet(sheet_id, Form.from_dict(form_def),
+                          data, user, filesystem)
+        sheet.set_default_view('latest')
+
+        # TODO ustest keys not found in df
+        self.assertEqual(len(sheet.df_index_from_value({'Participant_ID' : 'P1',
+                                                        'Interview' : 'Npk'})),
+                         0)
+        self.assertEqual(set(sheet.df_index_from_value({'Participant_ID' : 'P1',
+                                                        'Interview' : 'Npsy'})),
+                         {(0,1,0),(1,0,0)})
+        self.assertEqual(len(sheet.df_index_from_value({'Participant_ID' : 'P3',
+                                                        'Interview' : 'Npsy'})),
+                         0)
+        self.assertEqual(sheet.df_index_from_value({'Participant_ID' : 'P1',
+                                                     'Interview' : 'Tuto'}),
+                         [(2,1,0)])
+
+        # Update entry
+        # from IPython import embed; embed()
+        form = sheet.form_update_entry((2,1,0))
+        form.set_values_from_entry({'Extra' : 'waza'})
+        form.submit()
+        self.assertEqual(sheet.df_index_from_value({'Participant_ID' : 'P1',
+                                                     'Interview' : 'Tuto'}),
+                         [(2,2,0)])
+
+        # No need to test data modications as long as search method is systematic
+        # and does rely on secondary maintained indexes
+
+        # New entry
+
+        # Set existing entry
+
+        # Delete entry
+
 
     def test_conflicting_update(self):
         form_def = {
@@ -2887,11 +3107,11 @@ class TestDataSheet(unittest.TestCase):
         }
         data = pd.DataFrame(OrderedDict([
             ('Participant_ID', ['P1', 'P1', 'P2', 'P1']),
-            ('__entry_id__', np.arange(4, dtype=np.int64)),
-            ('__origin_id__', np.array([0, 0, 2, 0], dtype=np.int64)),
+            ('__entry_id__', np.array([0, 0, 2, 0], dtype=np.int64)),
             ('__update_idx__', np.array([0, 1, 0, 0], dtype=np.int64)),
+            ('__conflict_idx__', np.array([0, 0, 0, 0], dtype=np.int64)),
             ('Name', ['John', 'Jon', 'Robert', 'Dude']),
-        ])).set_index('__entry_id__')
+        ])).set_index(['__entry_id__', '__update_idx__', '__conflict_idx__'])
 
         sheet_id = 'pinfo_with_conflicts'
         user = 'me'
@@ -2904,9 +3124,7 @@ class TestDataSheet(unittest.TestCase):
         sheet = DataSheet(sheet_id, Form.from_dict(form_def),
                           data, user, filesystem)
 
-        # TODO use cell validity on top of row validity?
-        self.assertFalse(sheet.is_valid())
-        self.assertEqual(sheet.inconsistent_entries(), {0, 3})
+        self.assertEqual(sheet.inconsistent_entries(), {(0,0,1),(0,0,2)})
 
     def test_duplicate_form_input(self):
         form = self.sheet_ts.form_new_entry()
@@ -2927,7 +3145,6 @@ class TestDataSheet(unittest.TestCase):
                           Form.from_dict(self.form_def_ts_data),
                           df=self.data_df_ts_data)
         sheet.set_default_view('latest')
-        self.assertTrue(sheet.is_valid())
         df_latest = sheet.get_df_view()
         mask = df_latest.Participant_ID=='CE0004'
         self.assertEqual(df_latest.loc[mask, 'Age'].values[0], 50)
@@ -3023,30 +3240,6 @@ class TestDataSheet(unittest.TestCase):
                                          dtype=bool)
         assert_frame_equal(validity, expected_validity)
 
-
-    def __test_plugin_compute(self):
-        class Plugin(SheetPlugin):
-            def views(self, base_views):
-                return {'base' :
-                        lambda df: df[~df.Participant_ID.str.startswith('CE9')]}
-            def default_view(self):
-                return 'base'
-            def compute(self):
-                self.df = pd.DataFrame(OrderedDict([
-                    ('Participant_ID', ['CE0004', 'CE0004', 'CE9006']),
-                    ('Age', pd.array([22, 50, None], dtype=pd.Int64Dtype()))]))
-
-        sheet = DataSheet(self.sheet_id)
-        sheet.set_plugin(Plugin(sheet))
-        self.assertEqual(sheet.df.shape, (3,2))
-        sheet.df.iloc[2,0] == 'CE9006'
-        sheet.df.iloc[2,1] == pd.NA
-
-        base_df = sheet.get_df_view()
-        self.assertEqual(base_df.shape, (2,2))
-        base_df.iloc[0,0] == 'CE0004'
-        base_df.iloc[1,0] == 'CE0004'
-
     def test_data_io(self):
         form = self.sheet_ts.form_new_entry()
         entry = {'Participant_ID' : '"', 'Age' : 43,
@@ -3057,10 +3250,10 @@ class TestDataSheet(unittest.TestCase):
         logger.debug('-----------------------')
         logger.debug('utest: submit form')
         submitted_entry = form.submit()
-        self.sheet_ts.save_form_master()
+
         logger.debug('-----------------------')
         logger.debug('utest: load sheet again')
-        sh2 = DataSheet.from_files(self.user, self.filesystem)
+        sh2 = DataSheet.from_files(self.user, self.filesystem.clone())
         eid = submitted_entry['__entry_id__']
         loaded_entry = sh2.df.loc[[eid]].to_dict('record')[0]
 
@@ -3076,7 +3269,6 @@ class TestDataSheet(unittest.TestCase):
                          entry['Date'])
 
     def test_form_new_entry(self):
-
         watched_entry = []
         def watch_entry():
             watched_entry.append(self.sheet_ts.df.tail(1))
@@ -3093,9 +3285,11 @@ class TestDataSheet(unittest.TestCase):
         time.sleep(0.1)
         form.submit()
         self.assertTrue(self.sheet_ts.df.index.unique)
-        entry_id = form['section1']['__entry_id__'].get_value()
+        entry_id = (form['section1']['__entry_id__'].get_value(),
+                    form['section1']['__update_idx__'].get_value(),
+                    form['section1']['__conflict_idx__'].get_value())
         last_entry = self.sheet_ts.df.tail(1)
-        self.assertEqual(last_entry.index, entry_id)
+        self.assertEqual(last_entry.index[0], entry_id)
         last_entry_dict = last_entry.to_dict('record')[0]
         self.assertEqual(last_entry_dict['Age'], entry['Age'])
         self.assertEqual(last_entry_dict['Participant_ID'],
@@ -3115,19 +3309,16 @@ class TestDataSheet(unittest.TestCase):
             watched_entry.append(self.sheet_ts.df.tail(1))
         self.sheet_ts.notifier.add_watcher('appended_entry', watch_entry)
 
-        entry_to_update = self.sheet_ts.df.iloc[1].name
+        entry_to_update = self.sheet_ts.df.index[0]
         previous_pid = self.sheet_ts.df.loc[entry_to_update, 'Participant_ID']
-        previous_update_idx = self.sheet_ts.df.loc[entry_to_update,
-                                                   '__update_idx__']
-        self.assertTrue(self.sheet_ts.df.groupby('Participant_ID')
-                        .__origin_id__.nunique().eq(1).all())
         logger.debug('-------------------------')
         logger.debug('utest: create update form')
         form = self.sheet_ts.form_update_entry(entry_to_update)
         self.assertEqual(form['section1']['__submission__'].get_value(),
                          'append')
-        self.assertNotEqual(form['section1']['__entry_id__'].get_value(),
-                            entry_to_update)
+        self.assertEqual((form['section1']['__entry_id__'].get_value(),
+                          form['section1']['__update_idx__'].get_value()),
+                         (entry_to_update[0], 2))
         # Check that Participant_ID is frozen (not editable)
         self.assertFalse(form['section1']['Participant_ID'].editable)
         self.assertRaises(NotEditableError,
@@ -3140,7 +3331,9 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
-        self.assertEqual(type(form['section1']['__origin_id__'].get_value()),
+        self.assertEqual(type(form['section1']['__entry_id__'].get_value()),
+                         np.int64)
+        self.assertEqual(type(form['section1']['__update_idx__'].get_value()),
                          np.int64)
 
         time.sleep(0.1)
@@ -3148,14 +3341,12 @@ class TestDataSheet(unittest.TestCase):
         logger.debug('utest: submit form')
         form.submit()
 
-        self.assertTrue(self.sheet_ts.df.groupby('Participant_ID')
-                        .__origin_id__.nunique().eq(1).all())
-
-        self.assertEqual(self.sheet_ts.df.tail(1)['__update_idx__'].iat[0],
-                         previous_update_idx + np.int64(1))
-        entry_id = form['section1']['__entry_id__'].get_value()
+        self.assertEqual(self.sheet_ts.df.tail(1).index[0][1], 2)
+        entry_idx = (form['section1']['__entry_id__'].get_value(),
+                     form['section1']['__update_idx__'].get_value(),
+                     form['section1']['__conflict_idx__'].get_value())
         last_entry = self.sheet_ts.df.tail(1)
-        self.assertEqual(last_entry.index, entry_id)
+        self.assertEqual(last_entry.index[0], entry_idx)
         last_entry_dict = last_entry.to_dict('record')[0]
         self.assertEqual(last_entry_dict['Age'], entry['Age'])
         self.assertEqual(last_entry_dict['Participant_ID'], previous_pid)
@@ -3175,7 +3366,8 @@ class TestDataSheet(unittest.TestCase):
                                                    'Participant_ID')
         self.assertEqual(form['section1']['__submission__'].get_value(),
                          'append')
-        self.assertNotEqual(form['section1']['__entry_id__'].get_value(),
+        self.assertNotEqual((form['section1']['__entry_id__'].get_value(),
+                             form['section1']['__update_idx__'].get_value()),
                             entry_to_update)
         # Check that Participant_ID is frozen (not editable)
         self.assertFalse(form['section1']['Participant_ID'].editable)
@@ -3183,23 +3375,87 @@ class TestDataSheet(unittest.TestCase):
                           form['section1']['Participant_ID'].set_input_str,
                           'CE0000')
 
+    def test_resolve_conflicting_entries_by_deletion(self):
+        sheet_ts2 = DataSheet.from_files(self.user, self.filesystem.clone())
+
+        form = self.sheet_ts.form_update_entry((1,0,0))
+        form.set_values_from_entry({'Age' : 33})
+        form.submit()
+
+        form = sheet_ts2.form_update_entry((1,0,0))
+        form.set_values_from_entry({'Age' : 44})
+        form.submit()
+
+        sheet_ts2.refresh_data()
+        self.sheet_ts.refresh_data()
+
+        logger.debug('utest: Fix conflict by deletion')
+
+        to_delete = self.sheet_ts.df[self.sheet_ts.df.Age == 44].index[0]
+        self.sheet_ts.delete_entry(to_delete)
+
+        sheet_ts2.refresh_data()
+
+        for sheet_name,sheet in [('ts', self.sheet_ts), ('ts2', sheet_ts2)]:
+            logger.debug('Check that sheet %s has no more concurrent updates',
+                         sheet_name)
+            self.assertEqual(len(sheet.concurrent_updated_entries()), 0)
+            self.assertEqual(sheet.df.loc[(1,1,0), 'Age'], 33)
+
+    def test_conflicting_entries_on_load(self):
+        sheet_ts2 = DataSheet.from_files(self.user, self.filesystem)
+
+        form = self.sheet_ts.form_update_entry((1,0,0))
+        form.set_values_from_entry({'Age' : 33})
+        form.submit()
+
+        form = sheet_ts2.form_update_entry((1,0,0))
+        form.set_values_from_entry({'Age' : 44})
+        form.submit()
+
+        sheet_ts3 = DataSheet.from_files(self.user, self.filesystem)
+        self.assertEqual(set(sheet_ts3.concurrent_updated_entries()),
+                         {(1,1,1),(1,1,2)})
+
+    def test_conflicting_entries_on_refresh(self):
+        sheet_ts2 = DataSheet.from_files(self.user, self.filesystem.clone())
+
+        form = self.sheet_ts.form_update_entry((1,0,0))
+        form.set_values_from_entry({'Age' : 33})
+        form.submit()
+
+        form = sheet_ts2.form_update_entry((1,0,0))
+        form.set_values_from_entry({'Age' : 44})
+        form.submit()
+
+        sheet_ts2.refresh_data()
+        self.sheet_ts.refresh_data()
+
+        self.assertEqual(set(sheet_ts2.concurrent_updated_entries()),
+                         {(1,1,1),(1,1,2)})
+
+        self.assertEqual(set(self.sheet_ts.concurrent_updated_entries()),
+                         {(1,1,1),(1,1,2)})
+
     def test_form_entry_set(self):
         # Change the content of an entry
         # All values can change
-        entry_to_modify = self.sheet_ts.df.iloc[1].name
+        entry_idx_to_modify = self.sheet_ts.df.index[1]
 
         watched_entry = []
-        def watch_entry(entry_id):
-            watched_entry.append(self.sheet_ts.df.loc[[entry_id]])
+        def watch_entry(entry_idx):
+            watched_entry.append(self.sheet_ts.df.loc[[entry_idx]])
         self.sheet_ts.notifier.add_watcher('entry_set', watch_entry)
 
         logger.debug('-------------------------')
         logger.debug('utest: create set form')
-        form = self.sheet_ts.form_set_entry(entry_to_modify)
+        form = self.sheet_ts.form_set_entry(entry_idx_to_modify)
         self.assertEqual(form['section1']['__submission__'].get_value(),
                          'set')
-        self.assertEqual(form['section1']['__entry_id__'].get_value(),
-                         entry_to_modify)
+        self.assertEqual((form['section1']['__entry_id__'].get_value(),
+                          form['section1']['__update_idx__'].get_value(),
+                          form['section1']['__conflict_idx__'].get_value()),
+                         entry_idx_to_modify)
         # Check that Participant_ID is frozen (not editable)
         self.assertTrue(form['section1']['Participant_ID'].editable)
         form['section1']['Participant_ID'].set_input_str('CE0000')
@@ -3216,23 +3472,29 @@ class TestDataSheet(unittest.TestCase):
         form.submit()
         self.assertEqual(len(watched_entry), 1)
 
-        entry_id = form['section1']['__entry_id__'].get_value()
-        self.assertEqual(entry_id, entry_to_modify)
+        entry_idx = (form['section1']['__entry_id__'].get_value(),
+                     form['section1']['__update_idx__'].get_value(),
+                     form['section1']['__conflict_idx__'].get_value())
+        self.assertEqual(entry_idx, entry_idx_to_modify)
         self.assertEqual(watched_entry[0].iloc[0]['Age'],
                          entry['Age'])
 
-        self.assertEqual(watched_entry[0].loc[entry_to_modify, 'Participant_ID'],
+        self.assertEqual(watched_entry[0].loc[entry_idx_to_modify,
+                                              'Participant_ID'],
                          'CE0000')
-        self.assertEqual(watched_entry[0].loc[entry_to_modify, 'Phone_Number'],
+        self.assertEqual(watched_entry[0].loc[entry_idx_to_modify,
+                                              'Phone_Number'],
                          entry['Phone_Number'])
-        self.assertGreater(watched_entry[0].loc[entry_to_modify, 'Timestamp'],
+        self.assertGreater(watched_entry[0].loc[entry_idx_to_modify, 'Timestamp'],
                            ts_before_submit)
 
     def test_set_entry_file_update(self):
 
-        entry_to_modify = self.sheet_ts.df.iloc[1].name
+        entry_to_modify = self.sheet_ts.df.index[1]
         logger.debug('-------------------------')
         logger.debug('utest: create set form')
+        logger.debug('utest: df before set:')
+        logger.debug(self.sheet_ts.df)
         form = self.sheet_ts.form_set_entry(entry_to_modify)
         # Update the entry
         logger.debug('-----------------')
@@ -3243,8 +3505,14 @@ class TestDataSheet(unittest.TestCase):
         ts_before_submit = datetime.now()
         time.sleep(0.1)
         form.submit()
+        logger.debug('utest: df after set:')
+        logger.debug(self.sheet_ts.df)
 
         self.sheet_ts.reload_all_data()
+
+        logger.debug('utest: df after data reload:')
+        logger.debug(self.sheet_ts.df)
+
         self.assertTrue(self.sheet_ts.df.index.is_unique)
         self.assertEqual(self.sheet_ts.df.loc[entry_to_modify, 'Age'], 77)
 
@@ -4165,7 +4433,7 @@ class WorkBook:
             self.filesystem.makedirs(sheet_folder)
         sheet.set_filesystem(self.filesystem.change_dir(sheet_folder))
         sheet.save()
-
+        
         sheet.set_workbook(self)
         self.sheets[sheet.label] = sheet
 
@@ -4460,7 +4728,6 @@ class TestWorkBook(unittest.TestCase):
         f2_id = 222
         f2 = sh1.form_new_entry(form_id=f2_id)
 
-        #from IPython import embed; embed()
         # will call input_callback hooked by workbook, that saves entry to file
         logger.debug('utest: set Participant_ID using form 1 from workbook1')
         f1['section1']['Participant_ID'].set_input_str('CE0001')
@@ -4486,10 +4753,6 @@ class TestWorkBook(unittest.TestCase):
         f1_reloaded.submit()
         print('wb2.sh df after submission:')
         print(sh_reloaded.df)
-        df_no_index = sh_reloaded.df.reset_index(level=0)
-        self.assertTrue((df_no_index['__entry_id__']==\
-                         df_no_index['__origin_id__']).all())
-        self.assertTrue(sh_reloaded.df.index.dtype == np.int64)
         df_from_f1 = sh_reloaded.df.tail(1)
         self.assertEqual(df_from_f1['Age'].iloc[0], 42)
         self.assertEqual(df_from_f1['Participant_ID'].iloc[0], 'CE0001')
@@ -4684,7 +4947,7 @@ class TestWorkBook(unittest.TestCase):
         dashboard_df = sh_dashboard.get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_OK')
 
-        sh_pp.delete_entry(sh_pp.df.iloc[1].name)
+        sh_pp.delete_entry(sh_pp.df.index[1])
         dashboard_df = sh_dashboard.get_df_view()
 
         self.assertEqual(dashboard_df.shape, (2,1))
@@ -4722,7 +4985,7 @@ class TestWorkBook(unittest.TestCase):
         sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
 
         # Create Interview plan sheet
-        sheet_id = 'Interview_Plan'
+        sheet_id = DEFAULT_INTERVIEW_PLAN_SHEET_LABEL
         items = [FormItem({'Participant_ID' :
                            {'French':'Code Participant'}},
                           unique=True,
@@ -4740,7 +5003,7 @@ class TestWorkBook(unittest.TestCase):
                                    'Eval' : {'French' : "Séance d'évaluation"}
                                    },
                           default_language='French',
-                          allow_empty=True),
+                          allow_empty=False),
                  FormItem(keys={'Plan_Action':None},
                           vtype='text', supported_languages={'French'},
                           default_language='French',
@@ -4757,6 +5020,11 @@ class TestWorkBook(unittest.TestCase):
                  FormItem(keys={'Availability':None},
                           vtype='text', supported_languages={'French'},
                           default_language='French',
+                          allow_empty=True),
+                 FormItem(keys={'Callback_Days':None},
+                          vtype='int', supported_languages={'French'},
+                          default_language='French',
+                          number_interval={'left':0, 'closed':'neither'},
                           allow_empty=True),
                  FormItem(keys={'Send_Email':None},
                           vtype='boolean', supported_languages={'French'},
@@ -4786,7 +5054,8 @@ class TestWorkBook(unittest.TestCase):
                          choices={'to_send':None,
                                   'sent':None,
                                   'error':None},
-                          allow_empty=True),
+                         init_values={'Email_Status' : 'to_send'},
+                         allow_empty=True),
                  FormItem(keys={'Timestamp':None},
                           vtype='datetime',
                           allow_empty=False,
@@ -4840,15 +5109,27 @@ class TestWorkBook(unittest.TestCase):
         wb.add_sheet(sh_pp)
 
         # Create dashboard sheet that gets list of participants from p_info
-        # and compute evaluation status. Action is a string report.
+        # and compute evaluation status.
         class Dashboard(LescaDashboard):
+            def __init__(self, *args, **kwargs):
+                super(Dashboard, self).__init__(*args, **kwargs)
+                self.date_now = None
+
             def sheets_to_watch(self):
                 return super(Dashboard, self).sheets_to_watch() + \
                     [DEFAULT_INTERVIEW_PLAN_SHEET_LABEL, 'Eval']
 
+            def refresh_all(self):
+                self.refresh_entries(self.df.index)
+                self.sheet.invalidate_cached_views()
+
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
-                track_interview(self.df, 'Eval', self.workbook, pids)
+                track_interview(self.df, 'Eval', self.workbook, pids,
+                                date_now=self.date_now)
+
+            def action(self, entry_df, selected_column):
+                return interview_action(entry_df, selected_column, self.workbook)
 
         sh_dashboard = DataSheet('Dashboard')
         sh_dashboard.set_plugin(Dashboard(sh_dashboard))
@@ -4863,98 +5144,128 @@ class TestWorkBook(unittest.TestCase):
 
         from .plugin_tools import DATE_FMT
         pid = 'CE0001'
-        logger.debug('------- Assign staff for %s --------' % pid)
+        logger.debug('---- Test most recent entry in plan sheet ----')
+
+        logger.debug('----- Assign staff for %s -----', pid)
+
+        dashboard_df = wb['Dashboard'].get_df_view()
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval_Staff')
+        self.assertTrue(action_label.endswith('New'), action_label)
+        plan_sheet_label = DEFAULT_INTERVIEW_PLAN_SHEET_LABEL
+        self.assertTrue(action_label.startswith(plan_sheet_label), action_label)
+
         ts = datetime(2021,9,10,10,10)
-        form = sh_plan.add_new_entry({'Participant_ID' : pid,
-                                      'Plan_Action' : 'assign_staff',
-                                      'Staff' : 'Thomas Vincent',
-                                      'Interview_Type' : 'Eval',
-                                      'Interview_Date' : None,
-                                      'Availability' : None,
-                                      'Send_Email' : True,
-                                      'Timestamp' : ts})
+        form.set_values_from_entry({'Plan_Action' : 'assign_staff',
+                                    'Staff' : 'Thomas Vincent',
+                                    'Timestamp' : ts})
+        form.submit()
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(df.loc[pid, 'Eval'], 'eval_not_scheduled')
-        self.assertEqual(df.loc[pid, 'Eval_Staff'],
-                         'Thomas Vincent')
-        self.assertTrue(df.loc[pid, 'Eval_Date'])
+        self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(df.loc[pid, 'Eval_Date'], 'eval_to_plan')
 
-        logger.debug('------- Plan interview for %s --------' % pid)
+        logger.debug('------- Pid %s: Plan interview date, no email --------',
+                     pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11)
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval_Date')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith(plan_sheet_label))
 
-        entry_id = form['section1']['__entry_id__'].get_value()
-        form = sh_plan.form_update_entry(entry_id)
         form.set_values_from_entry({'Plan_Action' : 'plan',
-                                    'Staff' : 'Thomas Vincent',
-                                    'Interview_Type' : 'Eval',
                                     'Interview_Date' : idate,
-                                    'Availability' : None,
+                                    'Availability' : 'ignored',
                                     'Send_Email' : False,
                                     'Timestamp' : ts})
         form.submit()
         df = wb['Dashboard'].get_df_view()
-        self.assertEqual(df.loc[pid, 'Eval'],
-                         'eval_scheduled')
-        self.assertEqual(df.loc[pid, 'Eval_Staff'],
-                         'Thomas Vincent')
+        self.assertEqual(df.loc[pid, 'Eval'], 'eval_scheduled')
+        self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
         self.assertEqual(df.loc[pid, 'Eval_Date'],
                          idate.strftime(DATE_FMT))
 
-        logger.debug('------- Plan availability for %s --------' % pid)
+        logger.debug('-- Pid %s: No planned date, availability, no callback --',
+                     pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11,30)
-        entry_id = form['section1']['__entry_id__'].get_value()
-        form = sh_plan.form_update_entry(entry_id)
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval_Date')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Plan_Action' : 'plan',
-                                    'Staff' : 'Thomas Vincent',
-                                    'Interview_Type' : 'Eval',
                                     'Interview_Date' : None,
                                     'Availability' : 'parfois',
+                                    'Callback_days' : 0,
                                     'Send_Email' : False,
                                     'Timestamp' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_scheduled')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_not_scheduled')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'parfois')
 
-        # TODO: test competing entries plan/interview with different timestamp
-
-        logger.debug('------- Plan interview email for %s --------' % pid)
+        logger.debug('-- Pid %s: No planned date, availability, '\
+                     'callback in 7 days --', pid)
         idate = datetime(2021,10,10,10,10)
-        ts = datetime(2021,9,10,10,12)
-        entry_id = form['section1']['__entry_id__'].get_value()
-        form = sh_plan.form_update_entry(entry_id)
-        form.set_values_from_entry({'Plan_Action' : 'plan',
-                                    'Staff' : 'Thomas Vincent',
-                                    'Interview_Type' : 'Eval',
-                                    'Interview_Date' : idate,
-                                    'Availability' : None,
-                                    'Send_Email' : True,
-                                    'Email_Status' : 'to_send',
+        ts = datetime(2021,9,10,10,11,35)
+        wb['Dashboard'].plugin.date_now = ts
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval_Date')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith(plan_sheet_label))
+        callback_nb_days = 7
+        form.set_values_from_entry({'Callback_Days' : callback_nb_days,
                                     'Timestamp' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
-                         'eval_email_pending')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
-                         'Thomas Vincent')
+                         'eval_callback_%dD' % callback_nb_days)
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'parfois')
+
+        wb['Dashboard'].plugin.date_now = ts + timedelta(days=1)
+        wb['Dashboard'].plugin.refresh_all()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
+                         'eval_callback_%dD' % (callback_nb_days-1))
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'parfois')
+
+        wb['Dashboard'].plugin.date_now = ts + timedelta(days=callback_nb_days+1)
+        wb['Dashboard'].plugin.refresh_all()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_callback' )
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'parfois')
+
+        logger.debug('------- Pid %s: Plan interview date, with email --------',
+                     pid)
+        idate = datetime(2021,10,10,10,10)
+        ts = datetime(2021,9,10,10,12)
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval_Date')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith(plan_sheet_label))
+        form.set_values_from_entry({'Interview_Date' : idate,
+                                    'Send_Email' : True,
+                                    'Timestamp' : ts})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_email_pending')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
                          idate.strftime(DATE_FMT))
 
         logger.debug('------- Interview email sent for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,13)
-        entry_id = form['section1']['__entry_id__'].get_value()
-        form = sh_plan.form_update_entry(entry_id)
-        form.set_values_from_entry({'Plan_Action' : 'plan',
-                                    'Staff' : 'Thomas Vincent',
-                                    'Interview_Type' : 'Eval',
-                                    'Interview_Date' : idate,
-                                    'Availability' : None,
-                                    'Send_Email' : True,
-                                    'Email_Status' : 'sent',
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval_Date')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith(plan_sheet_label))
+        form.set_values_from_entry({'Email_Status' : 'sent',
                                     'Timestamp' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
@@ -4969,16 +5280,13 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview email error for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,14)
-        entry_id = form['section1']['__entry_id__'].get_value()
-        form_plan = sh_plan.form_update_entry(entry_id)
-        form_plan.set_values_from_entry({'Plan_Action' : 'plan',
-                                         'Staff' : 'Thomas Vincent',
-                                         'Interview_Type' : 'Eval',
-                                         'Interview_Date' : idate,
-                                         'Send_Email' : True,
-                                         'Email_Status' : 'error',
-                                         'Timestamp' : ts})
-        form_plan.submit()
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval_Date')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith(plan_sheet_label))
+        form.set_values_from_entry({'Email_Status' : 'error',
+                                    'Timestamp' : ts})
+        form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_email_error')
@@ -4990,11 +5298,16 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview done for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,16)
-        form_eval = sh_eval.add_new_entry({'Participant_ID' : pid,
-                                           'Session_Action' : 'do_session',
-                                           'Staff' : 'Thomas Vincent',
-                                           'Session_Status' : 'done',
-                                           'Timestamp' : ts})
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval')
+        self.assertTrue(action_label.endswith('New'))
+        self.assertTrue(action_label.startswith('Eval'))
+
+        form.set_values_from_entry({'Session_Action' : 'do_session',
+                                    'Staff' : 'Thomas Vincent',
+                                    'Session_Status' : 'done',
+                                    'Timestamp' : ts})
+        form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_ok')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
@@ -5005,36 +5318,303 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview to redo for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,17)
-        entry_id = form_eval['section1']['__entry_id__'].get_value()
-        form_eval = sh_eval.form_update_entry(entry_id)
-        form_eval.set_values_from_entry({'Session_Action' : 'do_session',
-                                         'Staff' : 'Thomas Vincent',
-                                         'Session_Status' : 'redo',
-                                         'Timestamp' : ts})
-        form_eval.submit()
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith('Eval'))
+        form.set_values_from_entry({'Session_Action' : 'do_session',
+                                    'Session_Status' : 'redo',
+                                    'Timestamp' : ts})
+        form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_redo')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
-                         'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
                          ts.strftime(DATE_FMT))
 
         logger.debug('------- Interview cancelled for %s --------' % pid)
         idate = datetime(2021,10,11,10,10)
         ts = datetime(2021,9,10,10,18)
-        entry_id = form_eval['section1']['__entry_id__'].get_value()
-        form_eval = sh_eval.form_update_entry(entry_id)
-        form_eval.set_values_from_entry({'Staff' : 'Thomas Vincent',
-                                         'Session_Action' : 'cancel_session',
-                                         'Timestamp' : ts})
-        form_eval.submit()
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith('Eval'))
+        form.set_values_from_entry({'Session_Action' : 'cancel_session',
+                                    'Staff' : 'Thomas Vincent',
+                                    'Timestamp' : ts})
+        form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
-                         'eval_cancelled')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_cancelled')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertTrue(pd.isna(dashboard_df.loc[pid, 'Eval_Date']))
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'eval_plan')
+
+        logger.debug('--- Pid %s: Plan interview date again, with email ----',
+                     pid)
+        idate = datetime(2021,10,15,10,10)
+        ts = datetime(2021,9,10,10,29)
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Eval_Date')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith(plan_sheet_label))
+        form.set_values_from_entry({'Interview_Date' : idate,
+                                    'Staff' : 'Catherine-Alexandra Grégoire',
+                                    'Send_Email' : True,
+                                    'Email_Status' : 'to_send',
+                                    'Timestamp' : ts})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
+                         'eval_email_pending')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
+                         'Catherine-Alexandra Grégoire')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
+                         idate.strftime(DATE_FMT))
+
+    def test_dashboard_emailled_poll_track(self):
+        # Create empty workbook
+        fs = LocalFileSystem(self.tmp_dir)
+
+        # Create new workbook from scratch
+        wb_id = 'Participant_info'
+        user = 'me'
+        data_folder = 'pinfo_files'
+        wb = WorkBook(wb_id, data_folder, fs)
+        wb.set_access_password(self.access_pwd)
+        wb.set_password(UserRole.ADMIN, self.admin_pwd)
+        wb.set_password(UserRole.EDITOR, self.editor_pwd)
+        wb.decrypt(self.access_pwd)
+        wb.set_user(user, UserRole.ADMIN)
+        wb.user_login(user, self.admin_pwd)
+
+        # Create data sheet participant info (no form)
+        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002']})
+        items = [FormItem({'Participant_ID' :
+                   {'French':'Code Participant'}},
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+        ]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Participant Information'})
+        sheet_label = 'Participants'
+        sh_pp = DataSheet(sheet_label, form_master=form, df=pp_df, user=user)
+
+        # Create Email sheet
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          unique=True,
+                          default_language='French',
+                          freeze_on_update=True,
+                          supported_languages={'French'}),
+                 FormItem({'Staff' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Email_Action':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          choices={'plan':
+                                   {'French':"Plannifier l'envoi d'un courriel"},
+                                   'cancel':
+                                   {'French':"Annuler l'envoi d'un courriel"},
+                                   'call_off':
+                                   {'French':"Supprimer le suivi d'envoi de courriel"}},
+                          allow_empty=False),
+                 FormItem(keys={'Email_Template':None},
+                          vtype='text', supported_languages={'French'},
+                          choices={'Poll' : {'French' : 'Sondage'},
+                                   'Eval' : {'French' : "Séance d'évaluation"}},
+                          default_language='French',
+                          allow_empty=True),
+                 FormItem(keys={'Email_Schedule':None},
+                          vtype='datetime', supported_languages={'French'},
+                          generator='timestamp_creation',
+                          default_language='French',
+                          allow_empty=True),
+                 FormItem(keys={'Overdue_Days':None},
+                          vtype='int', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=True),
+                 FormItem(keys={'Email_Status':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          choices={'to_send':None,
+                                   'sent':None,
+                                   'error':None},
+                          init_values={'Email_Status' : 'to_send'},
+                          allow_empty=True),
+                 FormItem(keys={'Timestamp':None},
+                          vtype='datetime',
+                          allow_empty=True,
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Plannification'})
+        sheet_email_label = 'Email'
+        sh_email = DataSheet(sheet_email_label, form, user=user)
+
+        # Create Poll sheet
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          unique=True,
+                          default_language='French',
+                          freeze_on_update=True,
+                          supported_languages={'French'}),
+                 FormItem({'Answer' : None},
+                          vtype='boolean',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem({'Timestamp' : None},
+                          vtype='datetime',
+                          default_language='French',
+                          supported_languages={'French'},
+                          generator='timestamp_submission')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Plannification'})
+        sheet_poll_label = 'Poll'
+        sh_poll = DataSheet(sheet_poll_label, form, user=user)
+
+        wb.add_sheet(sh_email)
+        wb.add_sheet(sh_poll)
+        wb.add_sheet(sh_pp)
+
+        class Dashboard(LescaDashboard):
+            def __init__(self, *args, **kwargs):
+                super(Dashboard, self).__init__(*args, **kwargs)
+                self.date_now = None
+
+            def sheets_to_watch(self):
+                return super(Dashboard, self).sheets_to_watch() + \
+                    ['Poll', 'Email']
+
+            def refresh_all(self):
+                self.refresh_entries(self.df.index)
+                self.sheet.invalidate_cached_views()
+
+            def refresh_entries(self, pids):
+                logger.debug('Dashboard refresh for: %s', pids)
+                track_emailled_poll(self.df, 'Poll', 'Email', self.workbook, pids,
+                                    date_now=self.date_now)
+
+            def action(self, entry_df, selected_column):
+                return emailled_poll_action(entry_df, selected_column, 'Email',
+                                            self.workbook)
+
+        sh_dashboard = DataSheet('Dashboard')
+        sh_dashboard.set_plugin(Dashboard(sh_dashboard))
+        wb.add_sheet(sh_dashboard)
+
+        wb.after_workbook_load()
+
+        pid = 'CE0001'
+        logger.debug('--- Pid %s: Email not planned ----', pid)
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(set(dashboard_df.index.values),
+                         set(pp_df['Participant_ID']))
+        self.assertTrue((dashboard_df['Poll'] == 'poll_to_send').all())
+
+        logger.debug('--- Pid %s: Plan email ----', pid)
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Poll')
+        self.assertTrue(action_label.endswith('New'))
+        self.assertTrue(action_label.startswith('Email'))
+        form.set_values_from_entry({'Email_Action' : 'plan',
+                                    'Staff' : 'Catherine-Alexandra Grégoire',
+                                    'Email_Template' : 'Poll',
+                                    'Email_Schedule' : datetime.now()})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_pending')
+
+        logger.debug('--- Pid %s: Cancel email ----', pid)
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Poll')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith('Email'))
+        form.set_values_from_entry({'Email_Action' : 'cancel',
+                                    'Staff' : 'Catherine-Alexandra Grégoire'})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_to_send')
+
+        logger.debug('--- Pid %s: Plan email again ----', pid)
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Poll')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith('Email'))
+        form.set_values_from_entry({'Email_Action' : 'plan',
+                                    'Staff' : 'Thomas Vincent',
+                                    'Email_Template' : 'Poll',
+                                    'Email_Schedule' : datetime.now()})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_pending')
+
+        logger.debug('--- Pid %s: Email error ----', pid)
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Poll')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith('Email'))
+        form.set_values_from_entry({'Email_Action' : 'plan',
+                                    'Staff' : 'Script',
+                                    'Email_Template' : 'Poll',
+                                    'Email_Status' : 'error',
+                                    'Email_Schedule' : datetime.now()})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_error')
+
+        logger.debug('--- Pid %s: Email sent, not answered ----', pid)
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Poll')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith('Email'))
+        ts = datetime(2021,9,10,10,29)
+        wb['Dashboard'].plugin.date_now = ts
+        overdue_nb_days = 2
+        form.set_values_from_entry({'Email_Action' : 'plan',
+                                    'Staff' : 'Script',
+                                    'Email_Template' : 'Poll',
+                                    'Email_Status' : 'sent',
+                                    'Overdue_Days' : overdue_nb_days,
+                                    'Timestamp' : ts})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_sent')
+
+        logger.debug('--- Pid %s: Email sent, overdue ----', pid)
+        wb['Dashboard'].plugin.date_now = ts + timedelta(days=overdue_nb_days+1)
+        wb['Dashboard'].plugin.refresh_all()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_overdue')
+
+        # logger.debug('--- Pid %s: Email sent, overdue, remind ----', pid)
+
+        # logger.debug('--- Pid %s: Email sent, overdue too long ----', pid)
+
+        logger.debug('--- Pid %s: Email answered ----', pid)
+        form = sh_poll.form_new_entry()
+        form.set_values_from_entry({'Participant_ID' : pid,
+                                    'Answer' : True})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_answered')
+
+        # logger.debug('--- Pid %s: Plan email again after answer ----', pid)
+        # TODO: not sure useful. If there has been an anwser, no need to track
+        # new email.
 
     def test_workbook_version(self):
         # TODO: enable version tracking while loading a workbook
@@ -5405,7 +5985,6 @@ class FormItem:
                 #     if self.choices is not None and \
                 #        (not self.allow_other_choice or \
                 #         str(self.init_values[key]) in self.choices):
-                #         # from IPython import embed; embed()
                 #         self.set_input_str(self.tr[str(self.init_values[key])],
                 #                            force=force)
                 #     else:
@@ -5429,8 +6008,8 @@ class FormItem:
     def _set_validity(self, validity, message, key=None):
 
         if not validity:
-            logger.debug2(message + (' for key: '+key \
-                                     if key is not None else ''))
+            logger.debug(message + (' for key: '+key \
+                                    if key is not None else ''))
         # logger.debug('%s - validity: %s', self, validity)
 
         self.validity = validity
@@ -7117,9 +7696,9 @@ class DataSheetModel(QtCore.QAbstractTableModel):
 
 
     @QtCore.pyqtSlot()
-    def update_after_set(self, entry_id):
+    def update_after_set(self, entry_idx):
         view = self.sheet.get_df_view()
-        irow = view.index.get_loc(entry_id)
+        irow = view.index.get_loc(entry_idx)
         ncols = view.shape[1]
         self.dataChanged.emit(self.createIndex(irow,0),
                               self.createIndex(irow,ncols-1))
