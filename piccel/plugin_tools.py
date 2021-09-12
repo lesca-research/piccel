@@ -271,7 +271,15 @@ def form_update_or_new(sheet_label, workbook, primary_keys, entry_dict=None):
     form.set_values_from_entry(entry_dict)
     return form, action_label
 
-
+def track_participant_status(participant_status_sheet,
+                             common_progress_notes_sheet,
+                             workbook):
+    """
+    If progress note with drop status is more recent than latest entry in
+    participant_status_sheet -> confirm_drop
+    Else: Display current participant status in participant_status_sheet
+    """
+    pass
 
 def emailled_poll_action(entry_df, poll_column, email_sheet_label, workbook):
     poll_status = entry_df[poll_column].iat[0]
@@ -569,27 +577,64 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     date_now = date_now if date_now is not None else datetime.now()
 
-    interview_df = (workbook[interview_label].get_df_view('latest') \
-                    if workbook.has_sheet(plan_sheet_label) else None)
+    def latest_sheet_data(workbook, sheet_label, expected_columns,
+                          filter_dict=None, index_column=None):
+        df = (workbook[sheet_label].get_df_view('latest') \
+              if workbook.has_sheet(sheet_label) else None)
 
-    if interview_df is None:
-        interview_df = pd.DataFrame(columns=['Participant_ID', 'Staff',
-                                             'Session_Action', 'Session_Status',
-                                             'Timestamp'])
-    interview_df = interview_df.set_index('Participant_ID')
+        if df is None:
+            df = pd.DataFrame(columns=expected_columns)
+        if filter_dict is not None:
+            df = df_filter_from_dict(df, filter_dict)
+        if index_column is not None:
+            df = df.set_index('Participant_ID')
+            if not df.index.is_unique():
+                logger.warning('Index of latest data from sheet %s is not unique',
+                               sheet_label)
 
-    plan_df = (workbook[plan_sheet_label].get_df_view('latest') \
-               if workbook.has_sheet(plan_sheet_label) else None)
+    interview_df = latest_sheet_data(workbook, interview_label,
+                                     expected_columns=['Participant_ID', 'Staff',
+                                                       'Session_Action',
+                                                       'Session_Status',
+                                                       'Timestamp'],
+                                     index_column='Participant_ID')
 
-    if plan_df is None:
-        plan_df = pd.DataFrame(columns=['Participant_ID', 'Staff', 'Plan_Action',
-                                        'Interview_Type', 'Interview_Date',
-                                        'Availability', 'Send_Email',
-                                        'Email_Schedule', 'Email_Template',
-                                        'Email_Status', 'Timestamp'])
-    plan_df = plan_df.set_index('Participant_ID')
-    plan_df = plan_df[plan_df['Interview_Type'] == interview_label]
+    # interview_df = (workbook[interview_label].get_df_view('latest') \
+    #                 if workbook.has_sheet(plan_sheet_label) else None)
 
+    # if interview_df is None:
+    #     interview_df = pd.DataFrame(columns=['Participant_ID', 'Staff',
+    #                                          'Session_Action', 'Session_Status',
+    #                                          'Timestamp'])
+    # interview_df = interview_df.set_index('Participant_ID')
+
+    # plan_df = (workbook[plan_sheet_label].get_df_view('latest') \
+    #            if workbook.has_sheet(plan_sheet_label) else None)
+
+    # if plan_df is None:
+    #     plan_df = pd.DataFrame(columns=['Participant_ID', 'Staff', 'Plan_Action',
+    #                                     'Interview_Type', 'Interview_Date',
+    #                                     'Availability', 'Send_Email',
+    #                                     'Email_Schedule', 'Email_Template',
+    #                                     'Email_Status', 'Timestamp'])
+    # plan_df = plan_df[plan_df['Interview_Type'] == interview_label]
+    # # TODO: insure unique(PID,interview)
+    # plan_df = plan_df.set_index('Participant_ID')
+    # if not plan_df.index.is_unique():
+    #     logger.warning('Participant index of planning data for %s is not unique',
+    #                    interview_label)
+
+    plan_df = latest_sheet_data(workbook, interview_label,
+                                expected_columns=[
+                                    'Participant_ID', 'Staff', 'Plan_Action',
+                                    'Interview_Type', 'Interview_Date',
+                                    'Availability', 'Send_Email',
+                                    'Email_Schedule', 'Email_Template',
+                                    'Email_Status', 'Timestamp'],
+                                filter_dict={'Interview_Type' : interview_label},
+                                index_column='Participant_ID')
+
+    # Keep only entries of participants that are seen in the dashboard    
     pids_in_dashboard = set(pids).intersection(dashboard_df.index)
     common_interview_index = (pids_in_dashboard
                               .intersection(interview_df.index))
