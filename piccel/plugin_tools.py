@@ -272,7 +272,8 @@ def form_update_or_new(sheet_label, workbook, primary_keys, entry_dict=None):
     form.set_values_from_entry(entry_dict)
     return form, action_label
 
-def track_participant_status(participant_status_sheet,
+def track_participant_status(dashboard_df, dashboard_column_status,
+                             participant_status_sheet,
                              common_progress_notes_sheet,
                              workbook):
     """
@@ -280,7 +281,27 @@ def track_participant_status(participant_status_sheet,
     participant_status_sheet -> confirm_drop
     Else: Display current participant status in participant_status_sheet
     """
-    pass
+    # TODO: utest
+    # TODO: action
+    pnotes_df = latest_sheet_data(workbook, common_progress_notes_sheet,
+                                  expected_columns=['Participant_ID', 'Type'
+                                                    'Timestamp'],
+                                  index_column='Participant_ID')
+
+    status_df = latest_sheet_data(workbook, participant_status_sheet,
+                                  expected_columns=['Participant_ID', 'Status'
+                                                    'Timestamp'],
+                                  index_column='Participant_ID')
+
+    pnotes_fresher, status_fresher = df_split_more_recent(pnotes_df, status_df)
+
+    dashboard_df.loc[status_fresher.index, dashboard_column_status] = \
+        status_fresher.loc[:, 'Status']
+
+    map_set(dashboard_df, dashboard_column_status,
+            conditions={'confirm_drop':
+                        (pnotes_fresher, 'Type', ['withdrawal', 'exclusion'])})
+
 
 def emailled_poll_action(entry_df, poll_column, email_sheet_label, workbook):
     poll_status = entry_df[poll_column].iat[0]
