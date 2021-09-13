@@ -66,7 +66,7 @@ from io import BytesIO
 from PyQt5 import QtCore, QtGui, QtWidgets
 from . import ui
 
-from .core import LazyFunc
+from .core import LazyFunc, df_index_from_value
 
 from appdirs import user_data_dir
 
@@ -1699,17 +1699,6 @@ class TestLocalFileSystem(unittest.TestCase):
 
 class NonUniqueIndexFromValues(Exception) : pass
 
-
-
-def df_index_from_value(df, value_dict):
-    if len(value_dict) == 0:
-            return []
-    iter_vd = iter(value_dict.items())
-    first_key, first_value = next(iter_vd)
-    m = df[first_key] == first_value
-    for key, value in iter_vd:
-        m &= (df[key] == value)
-    return df[m].index.to_list()
 
 
 class DataSheet:

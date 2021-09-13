@@ -2,6 +2,7 @@ import pandas as pd
 import logging
 from datetime import datetime, timedelta, time
 from .sheet_plugin import SheetPlugin
+from .core import df_filter_from_dict
 
 logger = logging.getLogger('piccel')
 
@@ -568,10 +569,6 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
     if column_date not in dashboard_df.columns:
         dashboard_df[column_date] = default_date
 
-    if 1:
-        print('dashboard_df beginning of track_interview')
-        print(dashboard_df)
-
     if workbook is None:
         return
 
@@ -588,9 +585,10 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
             df = df_filter_from_dict(df, filter_dict)
         if index_column is not None:
             df = df.set_index('Participant_ID')
-            if not df.index.is_unique():
+            if not df.index.is_unique:
                 logger.warning('Index of latest data from sheet %s is not unique',
                                sheet_label)
+        return df
 
     interview_df = latest_sheet_data(workbook, interview_label,
                                      expected_columns=['Participant_ID', 'Staff',
@@ -599,32 +597,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
                                                        'Timestamp'],
                                      index_column='Participant_ID')
 
-    # interview_df = (workbook[interview_label].get_df_view('latest') \
-    #                 if workbook.has_sheet(plan_sheet_label) else None)
-
-    # if interview_df is None:
-    #     interview_df = pd.DataFrame(columns=['Participant_ID', 'Staff',
-    #                                          'Session_Action', 'Session_Status',
-    #                                          'Timestamp'])
-    # interview_df = interview_df.set_index('Participant_ID')
-
-    # plan_df = (workbook[plan_sheet_label].get_df_view('latest') \
-    #            if workbook.has_sheet(plan_sheet_label) else None)
-
-    # if plan_df is None:
-    #     plan_df = pd.DataFrame(columns=['Participant_ID', 'Staff', 'Plan_Action',
-    #                                     'Interview_Type', 'Interview_Date',
-    #                                     'Availability', 'Send_Email',
-    #                                     'Email_Schedule', 'Email_Template',
-    #                                     'Email_Status', 'Timestamp'])
-    # plan_df = plan_df[plan_df['Interview_Type'] == interview_label]
-    # # TODO: insure unique(PID,interview)
-    # plan_df = plan_df.set_index('Participant_ID')
-    # if not plan_df.index.is_unique():
-    #     logger.warning('Participant index of planning data for %s is not unique',
-    #                    interview_label)
-
-    plan_df = latest_sheet_data(workbook, interview_label,
+    plan_df = latest_sheet_data(workbook, plan_sheet_label,
                                 expected_columns=[
                                     'Participant_ID', 'Staff', 'Plan_Action',
                                     'Interview_Type', 'Interview_Date',
@@ -634,7 +607,17 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
                                 filter_dict={'Interview_Type' : interview_label},
                                 index_column='Participant_ID')
 
-    # Keep only entries of participants that are seen in the dashboard    
+    if 1:
+        print('dashboard_df beginning of track_interview')
+        print(dashboard_df)
+
+        print('plan_df beginning of track_interview')
+        print(plan_df)
+
+        print('interview_df beginning of track_interview')
+        print(interview_df)
+
+    # Keep only entries of participants that are seen in the dashboard
     pids_in_dashboard = set(pids).intersection(dashboard_df.index)
     common_interview_index = (pids_in_dashboard
                               .intersection(interview_df.index))
@@ -644,22 +627,21 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
                          .intersection(plan_df.index))
     plan_df = plan_df.loc[common_plan_index, :]
 
-    def set_date_from_plan(pids):
-        plan_sel_df = plan_df.loc[pids]
+    def set_date_from_plan(plan_sel_df):
         availability = plan_sel_df[((plan_sel_df['Plan_Action']=='plan') & \
                                     (~pd.isna(plan_sel_df['Availability'])))]
         dashboard_df.loc[availability.index, column_date] = \
             availability.loc[availability.index, 'Availability']
 
         planned = plan_sel_df[((plan_sel_df['Plan_Action']=='plan') & \
-                           (~pd.isna(plan_sel_df['Interview_Date'])))]
+                               (~pd.isna(plan_sel_df['Interview_Date'])))]
 
         dates = (planned.loc[planned.index, 'Interview_Date']
                  .apply(lambda x: x.strftime(DATE_FMT)))
         dashboard_df.loc[planned.index, column_date] = dates
 
-    def set_date_from_interview(pids):
-        int_sel_df = interview_df.loc[pids]
+    def set_date_from_interview(int_sel_df):
+        #int_sel_df = interview_df.loc[pids]
         done = int_sel_df[((int_sel_df['Session_Action']!='cancel_session') & \
                            ((int_sel_df['Session_Status']=='done') | \
                             (int_sel_df['Session_Status']=='redo')))]
@@ -671,9 +653,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
                                 (int_sel_df['Session_Status']=='cancel_session'))]
         dashboard_df.loc[cancelled.index, column_date] = '%s_plan' % interview_tag
 
-    common_pids = (pids_in_dashboard
-                   .intersection(plan_df.index)
-                   .intersection(interview_df.index))
+    common_pids = plan_df.index.intersection(interview_df.index)
     if 1:
         print('Get most recent entry btwn plan and interview')
 
@@ -686,26 +666,61 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print('common_pids')
         print(common_pids)
 
-    mask = (plan_df.loc[common_pids, 'Timestamp'] > \
-            interview_df.loc[common_pids, 'Timestamp'])
-    mask = mask[mask]
-    pids_plan_more_recent = plan_df.loc[mask.index].index
+    def df_split_more_recent(df1, df2):
+        common_index = df1.index.intersection(df2.index)
+        mask = (df1.loc[common_index, 'Timestamp'] > \
+                df2.loc[common_index, 'Timestamp'])
+        mask = mask[mask]
+        index1_more_recent = df1.loc[mask.index].index
+        index2_more_recent = common_index.difference(index1_more_recent)
 
-    pids_interview_more_recent = common_pids.difference(pids_plan_more_recent)
+        index1 = index1_more_recent.union(df1.index.difference(common_index))
+        index2 = index2_more_recent.union(df2.index.difference(common_index))
+        return df1.loc[index1], df2.loc[index2]
 
-    pids_plan_only = plan_df.index.difference(common_pids)
-    pids_plan = pids_plan_more_recent.union(pids_plan_only)
+    # mask = (plan_df.loc[common_pids, 'Timestamp'] > \
+    #         interview_df.loc[common_pids, 'Timestamp'])
+    # mask = mask[mask]
+    # pids_plan_more_recent = plan_df.loc[mask.index].index
 
-    pids_interview_only = interview_df.index.difference(common_pids)
+    # pids_interview_more_recent = common_pids.difference(pids_plan_more_recent)
 
-    pids_interview = pids_interview_more_recent.union(pids_interview_only)
+    # pids_plan_only = plan_df.index.difference(common_pids)
+    # pids_plan = pids_plan_more_recent.union(pids_plan_only)
+
+    # pids_interview_only = interview_df.index.difference(common_pids)
+
+    # pids_interview = pids_interview_more_recent.union(pids_interview_only)
 
     dashboard_df.loc[pids_in_dashboard, column_date] = default_date
-    set_date_from_plan(pids_plan)
-    set_date_from_interview(pids_interview)
+    plan_df_fresher, interview_df_fresher = df_split_more_recent(plan_df,
+                                                                 interview_df)
+
+    # More readable API to replace map_set:
+    # match_set(dashboard_df, column_date,
+    #           setters=[SetWhere(where=And((plan_df, 'Plan_Action', ['plan']),
+    #                                       (plan_df, 'Availability', IsNotNa())),
+    #                             value=FetchDf(plan_df, 'Availability')),
+    #                    SetWhere(where=And((plan_df, 'Plan_Action', ['plan']),
+    #                                       (plan_df, 'Interview_Date', IsNotNa())),
+    #                             value=FetchDf(plan_df, 'Interview_Date',
+    #                                           apply=fmt_date)),
+    #                    SetWhere(where=And((itv_df, 'Session_Action',
+    #                                        NotIn('cancel_session')),
+    #                                       (itv_df, 'Session_Status',
+    #                                        ['done', 'redo'])),
+    #                             value=FetchDf(itv_df, 'Timestamp', apply=fmt_date)),
+    #                    SetWhere(where=Or((itv_df, 'Session_Action',
+    #                                       ['cancel_session']),
+    #                                      (itv_df, 'Session_Status',
+    #                                       ['cancel_session'])),
+    #                             value='%s_plan' % interview_tag)])
+
+    set_date_from_plan(plan_df_fresher)
+    set_date_from_interview(interview_df_fresher)
 
     # Staff
-    if 0:
+    if 1:
         print('Set Staff...')
         print('dashboard_df:')
         print(dashboard_df)
@@ -714,10 +729,10 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print(plan_df)
 
     dashboard_df.loc[pids_in_dashboard, column_staff] = default_staff
-    dashboard_df.loc[pids_plan, column_staff] = \
-        plan_df.loc[pids_plan, 'Staff']
-    dashboard_df.loc[pids_interview, column_staff] = \
-        interview_df.loc[pids_interview, 'Staff']
+    dashboard_df.loc[plan_df_fresher.index, column_staff] = \
+        plan_df_fresher.loc[:, 'Staff']
+    dashboard_df.loc[interview_df_fresher.index, column_staff] = \
+        interview_df_fresher.loc[:, 'Staff']
 
     # Status
     dashboard_df.loc[pids_in_dashboard, column_status] = default_status
@@ -726,65 +741,45 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print('dashboard_df before map_set')
         print(dashboard_df)
 
-    plan_df_selected = plan_df.loc[pids_plan, :]
-
     logger.debug('Set interview status from %s (selected pids=%s)',
-                 plan_sheet_label, pids_plan)
-    if plan_df_selected.shape[0] > 0:
+                 plan_sheet_label, interview_df_fresher.index)
+    if plan_df_fresher.shape[0] > 0:
         try:
-            # timestamp_now = datetime.now()
-            # callback_timestamp_df = pd.DataFrame(index=plan_df_selected.index,
-            #                                      columns=['Callback_Date'])
-            # callback_diff_days_df = pd.DataFrame(index=plan_df_selected.index,
-            #                                      columns=['Callback_Diff'])
-            # if 'Callback_Days' in plan_df_selected.columns:
-            #     callback_timestamp_df['Callback_Date'] = \
-            #         (plan_df_selected['Callback_Days']
-            #          .apply(lambda x : timestamp_now - timedelta(days=x)))
-            #     from IPython import embed; embed()
-            #     callback_diff_days_df['Callback_Diff'] = \
-            #         ((plan_df_selected['Timestamp'] - \
-            #           callback_timestamp_df)
-            #          .apply(lambda x : x.days()))
 
             def cb_ts(plan_df, plan_col):
                 f_ts = lambda x: date_now - timedelta(days=x)
                 return plan_df['Callback_Days'].apply(f_ts)
 
-            def cb_days(plan_df):
-                return (date_now - plan_df['Callback_Days'] - \
-                        plan_df['Timestamp']).days()
-
             map_set(dashboard_df, column_status,
                     conditions={'%s_scheduled' % interview_tag:
-                     And((plan_df_selected, 'Plan_Action', ['plan']),
-                         (plan_df_selected, 'Send_Email', [False]),
-                         (plan_df_selected, 'Interview_Date', IsNotNA())),
+                     And((plan_df_fresher, 'Plan_Action', ['plan']),
+                         (plan_df_fresher, 'Send_Email', [False]),
+                         (plan_df_fresher, 'Interview_Date', IsNotNA())),
                      '%s_callback_tbd' % interview_tag:
-                     And((plan_df_selected, 'Plan_Action', ['plan']),
-                         (plan_df_selected, 'Interview_Date', IsNA()),
-                         (plan_df_selected, 'Callback_Days', IsNotNA()),
-                         (plan_df_selected, 'Timestamp', Greater(cb_ts))),
+                     And((plan_df_fresher, 'Plan_Action', ['plan']),
+                         (plan_df_fresher, 'Interview_Date', IsNA()),
+                         (plan_df_fresher, 'Callback_Days', IsNotNA()),
+                         (plan_df_fresher, 'Timestamp', Greater(cb_ts))),
                     '%s_callback' % interview_tag:
-                     And((plan_df_selected, 'Plan_Action', ['plan']),
-                         (plan_df_selected, 'Interview_Date', IsNA()),
-                         (plan_df_selected, 'Callback_Days', IsNotNA()),
-                         (plan_df_selected, 'Timestamp', Lower(cb_ts))),
+                     And((plan_df_fresher, 'Plan_Action', ['plan']),
+                         (plan_df_fresher, 'Interview_Date', IsNA()),
+                         (plan_df_fresher, 'Callback_Days', IsNotNA()),
+                         (plan_df_fresher, 'Timestamp', Lower(cb_ts))),
                      '%s_email_pending' % interview_tag:
-                     And((plan_df_selected, 'Plan_Action', ['plan']),
-                         (plan_df_selected, 'Interview_Date', IsNotNA()),
-                         (plan_df_selected, 'Send_Email', [True]),
-                         (plan_df_selected, 'Email_Status', ['to_send'])),
+                     And((plan_df_fresher, 'Plan_Action', ['plan']),
+                         (plan_df_fresher, 'Interview_Date', IsNotNA()),
+                         (plan_df_fresher, 'Send_Email', [True]),
+                         (plan_df_fresher, 'Email_Status', ['to_send'])),
                      '%s_email_sent' % interview_tag:
-                     And((plan_df_selected, 'Plan_Action', ['plan']),
-                         (plan_df_selected, 'Interview_Date', IsNotNA()),
-                         (plan_df_selected, 'Send_Email', [True]),
-                         (plan_df_selected, 'Email_Status', ['sent'])),
+                     And((plan_df_fresher, 'Plan_Action', ['plan']),
+                         (plan_df_fresher, 'Interview_Date', IsNotNA()),
+                         (plan_df_fresher, 'Send_Email', [True]),
+                         (plan_df_fresher, 'Email_Status', ['sent'])),
                      '%s_email_error' % interview_tag:
-                     And((plan_df_selected, 'Plan_Action', ['plan']),
-                         (plan_df_selected, 'Interview_Date', IsNotNA()),
-                         (plan_df_selected, 'Send_Email', [True]),
-                         (plan_df_selected, 'Email_Status', ['error'])),
+                     And((plan_df_fresher, 'Plan_Action', ['plan']),
+                         (plan_df_fresher, 'Interview_Date', IsNotNA()),
+                         (plan_df_fresher, 'Send_Email', [True]),
+                         (plan_df_fresher, 'Email_Status', ['error'])),
                     })
         except SrcColumnNotFound as e:
             msg = 'Column %s not found in df of sheet %s' % \
@@ -795,11 +790,11 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
             raise DestColumnNotFound(msg) from e
 
         mask_callback_tbd = (dashboard_df
-                             .loc[plan_df_selected.index, column_status] \
+                             .loc[plan_df_fresher.index, column_status] \
                              == '%s_callback_tbd' % interview_tag)
         pids_callback_tbd = mask_callback_tbd[mask_callback_tbd].index
         if len(pids_callback_tbd) > 0:
-            plan_df_for_cb_tbd = plan_df_selected.loc[pids_callback_tbd]
+            plan_df_for_cb_tbd = plan_df_fresher.loc[pids_callback_tbd]
             cb_days = (plan_df_for_cb_tbd['Timestamp'] \
                        + pd.to_timedelta(plan_df_for_cb_tbd['Callback_Days'],
                                          unit='d') \
@@ -810,20 +805,18 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print('dashboard_df after map_set from plan_df')
         print(dashboard_df)
 
-    interview_df_selected = interview_df.loc[pids_interview, :]
-
     logger.debug('Set interview status from %s', interview_label)
-    if interview_df_selected.shape[0] > 0:
+    if interview_df_fresher.shape[0] > 0:
         try:
             map_set(dashboard_df, column_status,
                     {'%s_ok' % interview_tag:
-                     And((interview_df_selected, 'Session_Action', ['do_session']),
-                         (interview_df_selected, 'Session_Status', ['done'])),
+                     And((interview_df_fresher, 'Session_Action', ['do_session']),
+                         (interview_df_fresher, 'Session_Status', ['done'])),
                      '%s_redo' % interview_tag:
-                     And((interview_df_selected, 'Session_Action', ['do_session']),
-                         (interview_df_selected, 'Session_Status', ['redo'])),
+                     And((interview_df_fresher, 'Session_Action', ['do_session']),
+                         (interview_df_fresher, 'Session_Status', ['redo'])),
                      '%s_cancelled' % interview_tag:
-                     (interview_df_selected, 'Session_Action', ['cancel_session'])
+                     (interview_df_fresher, 'Session_Action', ['cancel_session'])
                     })
         except SrcColumnNotFound as e:
             msg = 'Column %s not found in df of sheet %s' % \
