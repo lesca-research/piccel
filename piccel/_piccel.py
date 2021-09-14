@@ -14,19 +14,14 @@ from pprint import pformat, pprint
 # UUID1: MAC addr + current timestamp with nanosec precision
 # UUID4: 122 bytes random number
 from uuid import uuid1, uuid4
-
 import re
-
+from enum import IntEnum
 import time
 from datetime import date, datetime, timedelta
 import os.path as op
 from collections import defaultdict
 import shutil
 from pathlib import PurePath
-import shutil
-from collections.abc import Mapping
-from itertools import chain
-from enum import IntEnum, Enum
 import importlib
 from importlib import import_module, reload as reload_module
 import inspect
@@ -34,22 +29,19 @@ import csv
 
 from . import sheet_plugin_template
 from . import workbook_plugin_template
-from .sheet_plugin_template import CustomSheetPlugin
 from .plugin_tools import map_set, And, Or #, Less, LessEqual, Greater, GreaterEqual
 from .plugin_tools import (LescaDashboard, track_interview, interview_action,
-                           DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
-                           track_emailled_poll, emailled_poll_action)
+                           form_update_or_new, DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
+                           track_emailled_poll, emailled_poll_action,
+                           track_participant_status, participant_status_action)
 
 import unittest
 import tempfile
 
 import numpy as np
-from numpy.testing import assert_array_equal
 
 import pandas as pd
-import warnings
-
-from pandas.testing import assert_frame_equal, assert_series_equal
+from pandas.testing import assert_frame_equal
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.backends import default_backend
@@ -1377,7 +1369,7 @@ class LocalFileSystem:
                         additions.append(fn)
                     elif self.current_stats[fn] != self.file_size(fn):
                         modifications.append(fn)
-        deletions = [fn for fn in self.current_stats if not self.exists(fn)]
+        deletions = [f for f in self.current_stats if not self.exists(f)]
         return modifications, additions, deletions
 
     def accept_changes(self, modifications=None, additions=None, deletions=None):
@@ -4940,6 +4932,171 @@ class TestWorkBook(unittest.TestCase):
         dashboard_df = sh_dashboard.get_df_view()
 
         self.assertEqual(dashboard_df.shape, (2,1))
+
+
+    def test_dashboard_status_track(self):
+        # Create empty workbook
+        fs = LocalFileSystem(self.tmp_dir)
+
+        # Create new workbook from scratch
+        wb_id = 'Study'
+        user = 'me'
+        data_folder = 'pinfo_files'
+        wb = WorkBook(wb_id, data_folder, fs)
+        wb.set_access_password(self.access_pwd)
+        wb.set_password(UserRole.ADMIN, self.admin_pwd)
+        wb.set_password(UserRole.EDITOR, self.editor_pwd)
+        wb.decrypt(self.access_pwd)
+        wb.set_user(user, UserRole.ADMIN)
+        wb.user_login(user, self.admin_pwd)
+
+        # Create sheet for participant status
+        sheet_id = 'Participants'
+        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002'],
+                              'Status' : ['ongoing', 'ongoing'],
+                              'Staff' : ['TV', 'TV'],
+                              'Timestamp' : [datetime(2021,9,9,10,10),
+                                             datetime(2021,9,9,10,10)]})
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem({'Staff' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem({'Status' :
+                           {'French':'Statut du participant'}},
+                          default_language='French',
+                          supported_languages={'French'},
+                          choices={
+                              'ongoing' : {'French' : 'Etude en cours'},
+                              'drop_out' : {'French' : "Sorti.e de l'étude"},
+                          },
+                          allow_empty=False),
+                 FormItem(keys={'Timestamp' : None},
+                          vtype='datetime',
+                          generator='timestamp_submission',
+                          supported_languages={'French'},
+                          default_language='French')
+        ]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Participant Status'})
+        sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
+
+        # Create Progress note sheet
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          default_language='French',
+                          freeze_on_update=True,
+                          supported_languages={'French'}),
+                 FormItem(keys={'Note_Type':None},
+                          vtype='text', supported_languages={'French'},
+                          choices={'health' : {'French' : 'Etat de santé'},
+                                   'withdrawal' : {'French' : "Abandon"},
+                                   'exclusion' : {'French' : "Exclusion"}
+                                   },
+                          default_language='French',
+                          allow_empty=False),
+                 FormItem(keys={'Timestamp' : None},
+                          vtype='datetime',
+                          generator='timestamp_submission',
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Common progress note'})
+        sh_pnote = DataSheet('Progress_Note', form, user=user)
+
+        wb.add_sheet(sh_pnote)
+        wb.add_sheet(sh_pp)
+
+        class Dashboard(LescaDashboard):
+            def __init__(self, *args, **kwargs):
+                super(Dashboard, self).__init__(*args, **kwargs)
+
+            def sheets_to_watch(self):
+                return super(Dashboard, self).sheets_to_watch() + \
+                    ['Progress_Note']
+
+            def refresh_all(self):
+                self.refresh_entries(self.df.index)
+                self.sheet.invalidate_cached_views()
+
+            def refresh_entries(self, pids):
+                logger.debug('Dashboard refresh for: %s', pids)
+                track_participant_status(self.df, 'Status', 'Participants',
+                                         'Progress_Note', self.workbook, pids)
+
+            def action(self, entry_df, selected_column):
+                return participant_status_action(entry_df, selected_column,
+                                                 self.workbook, 'Participants')
+
+        sh_dashboard = DataSheet('Dashboard')
+        sh_dashboard.set_plugin(Dashboard(sh_dashboard))
+        wb.add_sheet(sh_dashboard)
+
+        wb.after_workbook_load()
+
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(set(dashboard_df.index.values),
+                         set(pp_df['Participant_ID']))
+        self.assertTrue((dashboard_df['Status'] == 'ongoing').all())
+
+        pid = 'CE0001'
+        logger.debug('---- Test add progress note not related to drop-out ----')
+
+        form, action = form_update_or_new('Progress_Note', wb,
+                                          {'Participant_ID' : pid},
+                                          entry_dict={'Note_Type' : 'health'})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Status'], 'ongoing')
+
+        logger.debug('---- Test add exclusion progress note ----')
+        form, action = form_update_or_new('Progress_Note', wb,
+                                          {'Participant_ID' : pid},
+                                          entry_dict={'Note_Type' : 'exclusion'})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Status'], 'confirm_drop')
+
+        logger.debug('---- Test ignore exclusion from progress note ----')
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Status')
+        self.assertTrue(action_label.endswith('Update'), action_label)
+        self.assertTrue(action_label.startswith('Participants'), action_label)
+
+        form.set_values_from_entry({'Status' : 'ongoing'})
+        form.submit()
+
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Status'], 'ongoing')
+
+        logger.debug('---- Test add withdrawal progress note ----')
+        form, action = form_update_or_new('Progress_Note', wb,
+                                          {'Participant_ID' : pid},
+                                          entry_dict={'Note_Type' : 'withdrawal'})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Status'], 'confirm_drop')
+
+        logger.debug('---- Test accept withdrawal from progress note ----')
+        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+                                                        'Status')
+        self.assertTrue(action_label.endswith('Update'), action_label)
+        self.assertTrue(action_label.startswith('Participants'), action_label)
+
+        form.set_values_from_entry({'Status' : 'drop_out'})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Status'], 'drop_out')
 
     def test_dashboard_interview_track(self):
         # Create empty workbook

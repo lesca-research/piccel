@@ -258,7 +258,7 @@ def form_update_or_new(sheet_label, workbook, primary_keys, entry_dict=None):
     entry_dict = {} if entry_dict is None else entry_dict
 
     sheet = workbook[sheet_label]
-    entry_index = sheet.df_index_from_value(primary_keys, view='latest') # TODO
+    entry_index = sheet.df_index_from_value(primary_keys, view='latest')
     if len(entry_index) == 0:
         form = sheet.form_new_entry()
         form.set_values_from_entry(primary_keys)
@@ -272,10 +272,18 @@ def form_update_or_new(sheet_label, workbook, primary_keys, entry_dict=None):
     form.set_values_from_entry(entry_dict)
     return form, action_label
 
+
+def participant_status_action(entry_df, selected_column, workbook,
+                              participant_sheet):
+    participant_id = entry_df.index.values[0]
+    return form_update_or_new(participant_sheet, workbook,
+                              {'Participant_ID' : participant_id},
+                              {'Staff' : workbook.user})
+
 def track_participant_status(dashboard_df, dashboard_column_status,
                              participant_status_sheet,
                              common_progress_notes_sheet,
-                             workbook):
+                             workbook, pids):
     """
     If progress note with drop status is more recent than latest entry in
     participant_status_sheet -> confirm_drop
@@ -284,23 +292,22 @@ def track_participant_status(dashboard_df, dashboard_column_status,
     # TODO: utest
     # TODO: action
     pnotes_df = latest_sheet_data(workbook, common_progress_notes_sheet,
-                                  expected_columns=['Participant_ID', 'Type'
+                                  expected_columns=['Participant_ID', 'Note_Type',
                                                     'Timestamp'],
                                   index_column='Participant_ID')
-
     status_df = latest_sheet_data(workbook, participant_status_sheet,
-                                  expected_columns=['Participant_ID', 'Status'
+                                  expected_columns=['Participant_ID', 'Status',
                                                     'Timestamp'],
                                   index_column='Participant_ID')
 
-    pnotes_fresher, status_fresher = df_split_more_recent(pnotes_df, status_df)
+    pnotes_fresher, status_fresher = df_keep_higher(pnotes_df, status_df)
 
     dashboard_df.loc[status_fresher.index, dashboard_column_status] = \
         status_fresher.loc[:, 'Status']
 
     map_set(dashboard_df, dashboard_column_status,
             conditions={'confirm_drop':
-                        (pnotes_fresher, 'Type', ['withdrawal', 'exclusion'])})
+                        (pnotes_fresher, 'Note_Type', ['withdrawal', 'exclusion'])})
 
 
 def emailled_poll_action(entry_df, poll_column, email_sheet_label, workbook):
@@ -339,36 +346,23 @@ def track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
 
     date_now = date_now if date_now is not None else datetime.now()
 
-    email_df = (workbook[email_sheet_label].get_df_view('latest') \
-                if workbook.has_sheet(email_sheet_label) else None)
-    if email_df is None:
-        email_df = pd.DataFrame(columns=['Participant_ID', 'Staff',
-                                         'Email_Action', 'Email_Status',
-                                         'Email_Template', 'Overdue_Days',
-                                         'Timestamp'])
-    email_df = email_df.set_index('Participant_ID')
+    pids = set(pids).intersection(dashboard_df.index)
 
-    poll_df = (workbook[poll_label].get_df_view('latest') \
-                if workbook.has_sheet(poll_label) else None)
-    if poll_df is None:
-        poll_df = pd.DataFrame(columns=['Participant_ID', 'Timestamp'])
-    poll_df = poll_df.set_index('Participant_ID')
+    email_df = latest_sheet_data(workbook, email_sheet_label,
+                                 expected_columns=['Participant_ID', 'Staff',
+                                                   'Email_Action', 'Email_Status',
+                                                   'Email_Template', 'Overdue_Days',
+                                                   'Timestamp'],
+                                 filter_dict={'Email_Template' : poll_label},
+                                 index_column='Participant_ID', indexes=pids)
 
-    pids_in_dashboard = set(pids).intersection(dashboard_df.index)
+    poll_df = latest_sheet_data(workbook, poll_label,
+                                expected_columns=['Participant_ID', 'Timestamp'],
+                                index_column='Participant_ID', indexes=pids)
 
-    common_email_index = (pids_in_dashboard
-                          .intersection(email_df.index))
-    email_df = email_df.loc[common_email_index, :]
+    dashboard_df.loc[pids, column_status] = default_status
 
-    common_poll_index = (pids_in_dashboard
-                         .intersection(poll_df.index))
-    poll_df = poll_df.loc[common_poll_index, :]
-
-    dashboard_df.loc[pids_in_dashboard, column_status] = default_status
-
-    email_selection = email_df['Email_Template'] == poll_label
-    if email_selection.sum() > 0:
-        email_df = email_df[email_selection]
+    if email_df.shape[0] > 0:
         try:
             def od_ts(email_df, email_col):
                 f_ts = lambda x: date_now - timedelta(days=x)
@@ -466,6 +460,37 @@ def interview_action(entry_df, interview_column, workbook,
             'Staff' : interview_sheet.user
         })
     return form, action_label
+
+def latest_sheet_data(workbook, sheet_label, expected_columns,
+                      filter_dict=None, index_column=None, indexes=None):
+    df = (workbook[sheet_label].get_df_view('latest') \
+          if workbook.has_sheet(sheet_label) else None)
+
+    if df is None:
+        df = pd.DataFrame(columns=expected_columns)
+    if filter_dict is not None:
+        df = df_filter_from_dict(df, filter_dict)
+    if index_column is not None:
+        df = df.set_index('Participant_ID')
+        if not df.index.is_unique:
+            logger.warning('Index of latest data from sheet %s is not unique',
+                           sheet_label)
+    if indexes is not None:
+        df = df.loc[indexes.intersection(df.index)]
+
+    return df
+
+def df_keep_higher(df1, df2, compare_column='Timestamp'):
+    common_index = df1.index.intersection(df2.index)
+    mask = (df1.loc[common_index, compare_column] > \
+            df2.loc[common_index, compare_column])
+    mask = mask[mask]
+    index1_more_recent = df1.loc[mask.index].index
+    index2_more_recent = common_index.difference(index1_more_recent)
+
+    index1 = index1_more_recent.union(df1.index.difference(common_index))
+    index2 = index2_more_recent.union(df2.index.difference(common_index))
+    return df1.loc[index1], df2.loc[index2]
 
 def track_interview(dashboard_df, interview_label, workbook, pids,
                     plan_sheet_label=DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
@@ -573,6 +598,10 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
               pid, interview_staff, action=do_session
 
     """
+
+    # Keep only entries seen in the dashboard:
+    pids = set(pids).intersection(dashboard_df.index)
+
     interview_tag = interview_label.lower()
     default_status = ('%s_not_scheduled' % interview_tag)
     column_status = interview_label
@@ -595,28 +624,13 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     date_now = date_now if date_now is not None else datetime.now()
 
-    def latest_sheet_data(workbook, sheet_label, expected_columns,
-                          filter_dict=None, index_column=None):
-        df = (workbook[sheet_label].get_df_view('latest') \
-              if workbook.has_sheet(sheet_label) else None)
-
-        if df is None:
-            df = pd.DataFrame(columns=expected_columns)
-        if filter_dict is not None:
-            df = df_filter_from_dict(df, filter_dict)
-        if index_column is not None:
-            df = df.set_index('Participant_ID')
-            if not df.index.is_unique:
-                logger.warning('Index of latest data from sheet %s is not unique',
-                               sheet_label)
-        return df
-
     interview_df = latest_sheet_data(workbook, interview_label,
                                      expected_columns=['Participant_ID', 'Staff',
                                                        'Session_Action',
                                                        'Session_Status',
                                                        'Timestamp'],
-                                     index_column='Participant_ID')
+                                     index_column='Participant_ID',
+                                     indexes=pids)
 
     plan_df = latest_sheet_data(workbook, plan_sheet_label,
                                 expected_columns=[
@@ -626,8 +640,8 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
                                     'Email_Schedule', 'Email_Template',
                                     'Email_Status', 'Timestamp'],
                                 filter_dict={'Interview_Type' : interview_label},
-                                index_column='Participant_ID')
-
+                                index_column='Participant_ID',
+                                indexes=pids)
     if 1:
         print('dashboard_df beginning of track_interview')
         print(dashboard_df)
@@ -637,16 +651,6 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
         print('interview_df beginning of track_interview')
         print(interview_df)
-
-    # Keep only entries of participants that are seen in the dashboard
-    pids_in_dashboard = set(pids).intersection(dashboard_df.index)
-    common_interview_index = (pids_in_dashboard
-                              .intersection(interview_df.index))
-    interview_df = interview_df.loc[common_interview_index, :]
-
-    common_plan_index = (pids_in_dashboard
-                         .intersection(plan_df.index))
-    plan_df = plan_df.loc[common_plan_index, :]
 
     def set_date_from_plan(plan_sel_df):
         availability = plan_sel_df[((plan_sel_df['Plan_Action']=='plan') & \
@@ -662,7 +666,6 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         dashboard_df.loc[planned.index, column_date] = dates
 
     def set_date_from_interview(int_sel_df):
-        #int_sel_df = interview_df.loc[pids]
         done = int_sel_df[((int_sel_df['Session_Action']!='cancel_session') & \
                            ((int_sel_df['Session_Status']=='done') | \
                             (int_sel_df['Session_Status']=='redo')))]
@@ -687,35 +690,8 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print('common_pids')
         print(common_pids)
 
-    def df_split_more_recent(df1, df2):
-        common_index = df1.index.intersection(df2.index)
-        mask = (df1.loc[common_index, 'Timestamp'] > \
-                df2.loc[common_index, 'Timestamp'])
-        mask = mask[mask]
-        index1_more_recent = df1.loc[mask.index].index
-        index2_more_recent = common_index.difference(index1_more_recent)
-
-        index1 = index1_more_recent.union(df1.index.difference(common_index))
-        index2 = index2_more_recent.union(df2.index.difference(common_index))
-        return df1.loc[index1], df2.loc[index2]
-
-    # mask = (plan_df.loc[common_pids, 'Timestamp'] > \
-    #         interview_df.loc[common_pids, 'Timestamp'])
-    # mask = mask[mask]
-    # pids_plan_more_recent = plan_df.loc[mask.index].index
-
-    # pids_interview_more_recent = common_pids.difference(pids_plan_more_recent)
-
-    # pids_plan_only = plan_df.index.difference(common_pids)
-    # pids_plan = pids_plan_more_recent.union(pids_plan_only)
-
-    # pids_interview_only = interview_df.index.difference(common_pids)
-
-    # pids_interview = pids_interview_more_recent.union(pids_interview_only)
-
-    dashboard_df.loc[pids_in_dashboard, column_date] = default_date
-    plan_df_fresher, interview_df_fresher = df_split_more_recent(plan_df,
-                                                                 interview_df)
+    dashboard_df.loc[pids, column_date] = default_date
+    plan_df_fresher, interview_df_fresher = df_keep_higher(plan_df, interview_df)
 
     # More readable API to replace map_set:
     # match_set(dashboard_df, column_date,
@@ -749,14 +725,14 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print('plan_df:')
         print(plan_df)
 
-    dashboard_df.loc[pids_in_dashboard, column_staff] = default_staff
+    dashboard_df.loc[pids, column_staff] = default_staff
     dashboard_df.loc[plan_df_fresher.index, column_staff] = \
         plan_df_fresher.loc[:, 'Staff']
     dashboard_df.loc[interview_df_fresher.index, column_staff] = \
         interview_df_fresher.loc[:, 'Staff']
 
     # Status
-    dashboard_df.loc[pids_in_dashboard, column_status] = default_status
+    dashboard_df.loc[pids, column_status] = default_status
 
     if 1:
         print('dashboard_df before map_set')
