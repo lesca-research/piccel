@@ -64,30 +64,9 @@
           <number>2</number>
          </property>
          <item>
-          <widget class="QLineEdit" name="hour_field">
-           <property name="sizePolicy">
-            <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
-             <horstretch>0</horstretch>
-             <verstretch>0</verstretch>
-            </sizepolicy>
-           </property>
-           <property name="maximumSize">
-            <size>
-             <width>50</width>
-             <height>16777215</height>
-            </size>
-           </property>
-           <property name="text">
-            <string>11</string>
-           </property>
-           <property name="maxLength">
-            <number>2</number>
-           </property>
-           <property name="frame">
-            <bool>true</bool>
-           </property>
-           <property name="alignment">
-            <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+          <widget class="QSpinBox" name="hour_field">
+           <property name="maximum">
+            <number>23</number>
            </property>
           </widget>
          </item>
@@ -111,28 +90,20 @@
           </widget>
          </item>
          <item>
-          <widget class="QLineEdit" name="minute_field">
-           <property name="sizePolicy">
-            <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
-             <horstretch>0</horstretch>
-             <verstretch>0</verstretch>
-            </sizepolicy>
-           </property>
-           <property name="maximumSize">
-            <size>
-             <width>50</width>
-             <height>16777215</height>
-            </size>
-           </property>
-           <property name="maxLength">
-            <number>2</number>
-           </property>
-           <property name="alignment">
-            <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+          <widget class="QSpinBox" name="minute_field">
+           <property name="maximum">
+            <number>59</number>
            </property>
           </widget>
          </item>
         </layout>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="button_clear">
+        <property name="text">
+         <string>Clear</string>
+        </property>
        </widget>
       </item>
       <item>

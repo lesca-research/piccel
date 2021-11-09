@@ -85,12 +85,13 @@ class LescaDashboard(SheetPlugin):
         if entry_df.index[0] in self.df.index:
             self.refresh_entries(entry_df.index)
             self.sheet.invalidate_cached_views()
-            self.sheet.notifier.notify('entry_set', entry_id=entry_df.index[0])
+            self.sheet.notifier.notify('entry_set',
+                                       entry_idx=entry_df.index[0])
         else:
             logger.warning('Update plugin of sheet %s: '\
                            'udpated entry from %s with id=%s is not in index',
                            self.sheet.label, sheet_source.label,
-                           entry_df.index.values[0])
+                           entry_df.index[0])
 
 
     def action(self):
@@ -275,7 +276,7 @@ def form_update_or_new(sheet_label, workbook, primary_keys, entry_dict=None):
 
 def participant_status_action(entry_df, selected_column, workbook,
                               participant_sheet):
-    participant_id = entry_df.index.values[0]
+    participant_id = entry_df.index[0]
     return form_update_or_new(participant_sheet, workbook,
                               {'Participant_ID' : participant_id},
                               {'Staff' : workbook.user})
@@ -289,38 +290,51 @@ def track_participant_status(dashboard_df, dashboard_column_status,
     participant_status_sheet -> confirm_drop
     Else: Display current participant status in participant_status_sheet
     """
-    # TODO: utest
-    # TODO: action
     pnotes_df = latest_sheet_data(workbook, common_progress_notes_sheet,
                                   expected_columns=['Participant_ID', 'Note_Type',
                                                     'Timestamp'],
                                   index_column='Participant_ID')
     status_df = latest_sheet_data(workbook, participant_status_sheet,
-                                  expected_columns=['Participant_ID', 'Status',
+                                  expected_columns=['Participant_ID', 'Study_Status',
                                                     'Timestamp'],
                                   index_column='Participant_ID')
 
     pnotes_fresher, status_fresher = df_keep_higher(pnotes_df, status_df)
 
     dashboard_df.loc[status_fresher.index, dashboard_column_status] = \
-        status_fresher.loc[:, 'Status']
+        status_fresher.loc[:, 'Study_Status']
 
     map_set(dashboard_df, dashboard_column_status,
             conditions={'confirm_drop':
                         (pnotes_fresher, 'Note_Type', ['withdrawal', 'exclusion'])})
 
 
+def track_poll_answer(dashboard_df, dashboard_column, poll_sheet_label, poll_answer_column,
+                      expected_poll_sheet_columns, default_status, workbook, pids,
+                      poll_filter=None):
+    poll_df = latest_sheet_data(workbook, poll_sheet_label,
+                                expected_columns=expected_poll_sheet_columns,
+                                index_column='Participant_ID',
+                                filter_dict=poll_filter,
+                                indexes=pids)
+    dashboard_df.loc[pids, dashboard_column] = default_status
+    if poll_df.shape[0] > 0:
+        answered_df = poll_df[~pd.isna(poll_df[poll_answer_column])]
+        dashboard_df.loc[answered_df.index, dashboard_column] = \
+            answered_df[poll_answer_column]
+
 def emailled_poll_action(entry_df, poll_column, email_sheet_label, workbook):
     poll_status = entry_df[poll_column].iat[0]
     if poll_status=='' or pd.isna(poll_status) or poll_status is None or \
        poll_status == '%s_answered' % poll_column:
         return None, ''
-    participant_id = entry_df.index.values[0]
+    participant_id = entry_df.index[0]
     return form_update_or_new(email_sheet_label, workbook,
                               {'Participant_ID' : participant_id,
                                'Email_Template' : poll_column},
                               {'Plan_Action' : 'plan',
                                'Staff' : workbook.user})
+
 def track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
                         workbook, pids, date_now=None):
     """
@@ -342,7 +356,7 @@ def track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
     column_status = poll_label
 
     if column_status not in dashboard_df.columns:
-        dashboard_df[column_status] = default_status
+        dashboard_df[column_status] = pd.NA
 
     date_now = date_now if date_now is not None else datetime.now()
 
@@ -418,7 +432,7 @@ def interview_action(entry_df, interview_column, workbook,
     if value=='' or pd.isna(value) or value is None:
         return None, ''
 
-    participant_id = entry_df.index.values[0]
+    participant_id = entry_df.index[0]
     form = None
     action_label = ''
     plan_sheet = workbook[plan_sheet_label]
@@ -429,8 +443,10 @@ def interview_action(entry_df, interview_column, workbook,
                                   {'Participant_ID' : participant_id,
                                    'Interview_Type' : interview_label},
                                   {'Plan_Action' : 'plan',
-                                   'Send_Email' : True})
-        # if value.endswith('_not_scheduled') or value.endswith('_cancelled'):
+                                   'Send_Email' : True,
+                                   'Email_Schedule' : 'days_before_2',
+                                   'Email_Template' : interview_label})
+        # if value.endswith('_not_done') or value.endswith('_cancelled'):
         # elif value.endswith('_scheduled') or value.endswith('_email_pending') or \
         #  value.endswith('_email_sent') or value.endswith('_email_error') or \
         #  value.endswith('_ok') or value.endswith('_redo'):
@@ -494,7 +510,7 @@ def df_keep_higher(df1, df2, compare_column='Timestamp'):
 
 def track_interview(dashboard_df, interview_label, workbook, pids,
                     plan_sheet_label=DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
-                    date_now=None):
+                    date_now=None, show_staff_column=True):
     """
 
     Date
@@ -512,7 +528,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
        ACTION: new/update entry in plan_sheet with:
               pid, evaluation_type=interview_label, action=plan,
               send_email=True, email_date=days_before_2,
-              email_template=interview_label + '_remind'
+              email_template=interview_label
 
     * else more recent entry in interview_sheet and status==done
        -> show session date
@@ -520,7 +536,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
        ACTION: new entry in plan_sheet with:
               pid, evaluation_type=interview_label, action=plan,
               send_email=True, email_date=days_before_2,
-              email_template=interview_label + '_remind'
+              email_template=interview_label
 
     Staff
 
@@ -533,7 +549,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     Status
 
-    * Default status -> _not_scheduled
+    * Default status -> _not_done
         ACTION: new/update entry in plan_sheet with :
               pid, evaluation_type=interview_label, action=plan,
               send_email=True, email_date=days_before_2,
@@ -598,26 +614,30 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
               pid, interview_staff, action=do_session
 
     """
+    interview_tag = interview_label.lower()
+
+    logger.debug('Update interview tracking of %s for pids: %s',
+                 interview_tag, pids)
 
     # Keep only entries seen in the dashboard:
     pids = set(pids).intersection(dashboard_df.index)
+    logger.debug('pids kept (that are in Dashboard)  : %s', pids)
 
-    interview_tag = interview_label.lower()
-    default_status = ('%s_not_scheduled' % interview_tag)
+    default_status = ('%s_not_done' % interview_tag)
     column_status = interview_label
 
     if column_status not in dashboard_df.columns:
-        dashboard_df[column_status] = default_status
+        dashboard_df[column_status] = pd.NA
 
     column_staff = '%s_Staff' % interview_label
     default_staff = ('%s_set_staff' % interview_tag)
-    if column_staff not in dashboard_df.columns:
-        dashboard_df[column_staff] = default_staff
+    if show_staff_column and column_staff not in dashboard_df.columns:
+        dashboard_df[column_staff] = pd.NA
 
     column_date = '%s_Date' % interview_label
-    default_date = ('%s_to_plan' % interview_tag)
+    default_date = ('%s_plan' % interview_tag)
     if column_date not in dashboard_df.columns:
-        dashboard_df[column_date] = default_date
+        dashboard_df[column_date] = pd.NaT
 
     if workbook is None:
         return
@@ -725,11 +745,12 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         print('plan_df:')
         print(plan_df)
 
-    dashboard_df.loc[pids, column_staff] = default_staff
-    dashboard_df.loc[plan_df_fresher.index, column_staff] = \
-        plan_df_fresher.loc[:, 'Staff']
-    dashboard_df.loc[interview_df_fresher.index, column_staff] = \
-        interview_df_fresher.loc[:, 'Staff']
+    if show_staff_column:
+        dashboard_df.loc[pids, column_staff] = default_staff
+        dashboard_df.loc[plan_df_fresher.index, column_staff] = \
+            plan_df_fresher.loc[:, 'Staff']
+        dashboard_df.loc[interview_df_fresher.index, column_staff] = \
+            interview_df_fresher.loc[:, 'Staff']
 
     # Status
     dashboard_df.loc[pids, column_status] = default_status

@@ -16,8 +16,8 @@ from pprint import pformat, pprint
 from uuid import uuid1, uuid4
 import re
 from enum import IntEnum
-import time
-from datetime import date, datetime, timedelta
+from time import sleep
+from datetime import date, datetime, timedelta, time
 import os.path as op
 from collections import defaultdict
 import shutil
@@ -513,6 +513,12 @@ function snakeCaseToCamelCase(s) {
         self.key_to_items = defaultdict(list)
         section_names = list(sections.keys())
         for i_section, (section_name, section) in enumerate(sections.items()):
+            if section.tr.supported_languages != self.tr.supported_languages:
+                raise UnsupportedLanguage('Supported languages for Form %s (s) =!'\
+                                          'those of section %s (%s)',
+                                          self, self.tr.supported_languages,
+                                          section_name,
+                                          section.tr.supported_languages)
             section.notifier.add_watcher('section_valid',
                                          LazyFunc(self.on_section_is_valid,
                                                   section_name, section))
@@ -852,7 +858,8 @@ function snakeCaseToCamelCase(s) {
         self.validate()
 
     def validate(self):
-        current_section_is_final = self.current_section.next() == '__submit__'
+        next_section = self.current_section.next()
+        current_section_is_final =  next_section == '__submit__'
         # validity = (self.nb_valid_sections == len(self.section_path)) and \
         #     current_section_is_final
         validity = current_section_is_final and \
@@ -865,7 +872,8 @@ function snakeCaseToCamelCase(s) {
         logger.debug2('%s notifies %s', self, signal)
         self.notifier.notify(signal)
 
-        if current_section_is_final or not self.current_section.is_valid():
+        if current_section_is_final or not self.current_section.is_valid() or \
+           next_section is None:
             signal = 'next_section_not_available'
         else:
             signal = 'next_section_available'
@@ -1011,6 +1019,97 @@ class Predicate:
             raise InvalidPredicateResult('Result "%s" is not bool' % result)
         return result
 
+class DateTimeCollector:
+    def __init__(self, callback_date_str, qdate=None,
+                 hours=None, minutes=None):
+        self.date, self.hours, self.minutes = None, None, None
+        self.callback = None
+        self.set_date(qdate)
+        self.set_hours(hours)
+        self.set_minutes(minutes)
+        self.callback = callback_date_str
+
+    def set_date(self, qdate):
+        if qdate is not None and not qdate.isNull():
+            self.date = qdate.toPyDate()
+            self.check_completion()
+        else:
+            self.date = None
+
+    def set_hours(self, hours):
+        self.hours = hours if hours is not None else None
+        self.check_completion()
+
+    def set_minutes(self, minutes):
+        self.minutes = minutes if minutes is not None else None
+        self.check_completion()
+
+    def clear(self):
+        """
+        """
+        self.date, self.hours, self.minutes = None, None, None
+        self.callback('')
+
+    def check_completion(self):
+        if self.callback is not None:
+            date_str = ''
+            if self.date is not None and self.minutes is not None and \
+               self.hours is not None:
+                dt = datetime.combine(self.date, time(self.hours, self.minutes))
+                date_str = dt.strftime(FormItem.DATETIME_FORMAT)
+            print('collected datetime: ', date_str)
+            self.callback(date_str)
+
+class TestDateTimeCollector(unittest.TestCase):
+
+    def setUp(self):
+        self.date_str = 'start'
+        self.set_date_str_nb_calls = 0
+
+    def set_date_str(self, sdate):
+        self.set_date_str_nb_calls += 1
+        self.date_str = sdate
+
+    def test_null(self):
+        dt_collector = DateTimeCollector(self.set_date_str)
+        dt_collector.set_date(QtCore.QDate())
+        self.assertEqual(self.set_date_str_nb_calls, 0)
+        self.assertEqual(self.date_str, 'start')
+
+    def test_no_callback_at_init(self):
+        DateTimeCollector(self.set_date_str, QtCore.QDate(2020,1,1),
+                          11, 13)
+        self.assertEqual(self.set_date_str_nb_calls, 0)
+        self.assertEqual(self.date_str, 'start')
+
+    def test_setdate_no_hours(self):
+        dt_collector = DateTimeCollector(self.set_date_str)
+        dt_collector.set_date(QtCore.QDate(2020,1,1))
+        self.assertEqual(self.set_date_str_nb_calls, 1)
+        self.assertEqual(self.date_str, '')
+
+    def test_set_full_date(self):
+        dt_collector = DateTimeCollector(self.set_date_str)
+        dt_collector.set_date(QtCore.QDate(2020,1,1))
+        dt_collector.set_hours(12)
+        self.assertEqual(self.set_date_str_nb_calls, 2)
+        self.assertEqual(self.date_str, '')
+        dt_collector.set_minutes(13)
+        self.assertEqual(self.set_date_str_nb_calls, 3)
+        self.assertEqual(self.date_str,
+                         (datetime(2020,1,1,12,13)
+                          .strftime(FormItem.DATETIME_FORMAT)))
+
+    def test_clear(self):
+        dt_collector = DateTimeCollector(self.set_date_str)
+        dt_collector.set_date(QtCore.QDate(2020,1,1))
+        dt_collector.set_hours(12)
+        dt_collector.set_minutes(13)
+        self.assertEqual(self.set_date_str_nb_calls, 3)
+        dt_collector.clear()
+        self.assertEqual(self.set_date_str_nb_calls, 4)
+        self.assertEqual(self.date_str, '')
+
 class TestPredicate(unittest.TestCase):
 
     def test_normal_call(self):
@@ -1145,7 +1244,7 @@ class FormSection:
                 if not i.is_valid():
                     logger.debug2('item %s is invalid', i)
         signal = ['section_invalid', 'section_valid'][self.validity]
-        logger.debug2('%s notifies %s', self, signal)
+        logger.debug('%s notifies %s', self, signal)
         self.notifier.notify(signal)
 
     def to_dict(self):
@@ -2708,6 +2807,10 @@ class DataSheet:
                      self.label, entry_df.index.to_list(),
                      ','.join(entry_df.columns))
 
+        if entry_df.shape[0] == 0:
+            logger.debug2('Empty entry not appended to sheet %s', self.label)
+            return None
+
         if self.df is None:
             self.df = entry_df.copy()
         else:
@@ -2718,7 +2821,7 @@ class DataSheet:
         self.invalidate_cached_views()
         self.notifier.notify('appended_entry')
 
-        # Note: only the index of the first row of entry_df if returned.
+        # Note: only the index of the first row of entry_df is returned.
         # This is expected to work only for single entries
         return entry_index
 
@@ -2738,6 +2841,9 @@ class DataSheet:
     def fix_conflicting_entries(self, index_to_track=None):
         new_tracked_index = index_to_track
         index_to_track = index_to_track if index_to_track is not None else tuple()
+        if self.df is None or self.df.shape[0] == 0:
+            return None
+
         ipos_to_fix = np.flatnonzero(self.df.index.duplicated(keep=False))
         logger.debug('Check conflicting entries in %s',
                      [self.df.index[i] for i in ipos_to_fix])
@@ -3263,7 +3369,7 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
-        time.sleep(0.1)
+        sleep(0.1)
         form.submit()
         self.assertTrue(self.sheet_ts.df.index.unique)
         entry_id = (form['section1']['__entry_id__'].get_value(),
@@ -3317,7 +3423,7 @@ class TestDataSheet(unittest.TestCase):
         self.assertEqual(type(form['section1']['__update_idx__'].get_value()),
                          np.int64)
 
-        time.sleep(0.1)
+        sleep(0.1)
         logger.debug('-----------------')
         logger.debug('utest: submit form')
         form.submit()
@@ -3447,7 +3553,7 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         ts_before_submit = datetime.now()
-        time.sleep(0.1)
+        sleep(0.1)
         logger.debug('-----------------')
         logger.debug('utest: submit form')
         form.submit()
@@ -3483,8 +3589,8 @@ class TestDataSheet(unittest.TestCase):
         entry = {'Age' : 77, 'Phone_Number' : '444'}
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
-        ts_before_submit = datetime.now()
-        time.sleep(0.1)
+
+        sleep(0.1)
         form.submit()
         logger.debug('utest: df after set:')
         logger.debug(self.sheet_ts.df)
@@ -4915,7 +5021,7 @@ class TestWorkBook(unittest.TestCase):
         dashboard_df = sh_dashboard.get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_FAIL')
 
-        time.sleep(0.01)
+        sleep(0.01)
         logger.debug('utest: Add entry for participant who already passed eval')
         form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
                                                         'Eval')
@@ -4953,7 +5059,7 @@ class TestWorkBook(unittest.TestCase):
         # Create sheet for participant status
         sheet_id = 'Participants'
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002'],
-                              'Status' : ['ongoing', 'ongoing'],
+                              'Study_Status' : ['ongoing', 'ongoing'],
                               'Staff' : ['TV', 'TV'],
                               'Timestamp' : [datetime(2021,9,9,10,10),
                                              datetime(2021,9,9,10,10)]})
@@ -4966,7 +5072,7 @@ class TestWorkBook(unittest.TestCase):
                           default_language='French',
                           supported_languages={'French'},
                           allow_empty=False),
-                 FormItem({'Status' :
+                 FormItem({'Study_Status' :
                            {'French':'Statut du participant'}},
                           default_language='French',
                           supported_languages={'French'},
@@ -5031,7 +5137,7 @@ class TestWorkBook(unittest.TestCase):
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
-                track_participant_status(self.df, 'Status', 'Participants',
+                track_participant_status(self.df, 'Study_Status', 'Participants',
                                          'Progress_Note', self.workbook, pids)
 
             def action(self, entry_df, selected_column):
@@ -5047,7 +5153,7 @@ class TestWorkBook(unittest.TestCase):
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(set(dashboard_df.index.values),
                          set(pp_df['Participant_ID']))
-        self.assertTrue((dashboard_df['Status'] == 'ongoing').all())
+        self.assertTrue((dashboard_df['Study_Status'] == 'ongoing').all())
 
         pid = 'CE0001'
         logger.debug('---- Test add progress note not related to drop-out ----')
@@ -5057,7 +5163,7 @@ class TestWorkBook(unittest.TestCase):
                                           entry_dict={'Note_Type' : 'health'})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Status'], 'ongoing')
+        self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'ongoing')
 
         logger.debug('---- Test add exclusion progress note ----')
         form, action = form_update_or_new('Progress_Note', wb,
@@ -5065,19 +5171,19 @@ class TestWorkBook(unittest.TestCase):
                                           entry_dict={'Note_Type' : 'exclusion'})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Status'], 'confirm_drop')
+        self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'confirm_drop')
 
         logger.debug('---- Test ignore exclusion from progress note ----')
         form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Status')
+                                                        'Study_Status')
         self.assertTrue(action_label.endswith('Update'), action_label)
         self.assertTrue(action_label.startswith('Participants'), action_label)
 
-        form.set_values_from_entry({'Status' : 'ongoing'})
+        form.set_values_from_entry({'Study_Status' : 'ongoing'})
         form.submit()
 
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Status'], 'ongoing')
+        self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'ongoing')
 
         logger.debug('---- Test add withdrawal progress note ----')
         form, action = form_update_or_new('Progress_Note', wb,
@@ -5085,18 +5191,18 @@ class TestWorkBook(unittest.TestCase):
                                           entry_dict={'Note_Type' : 'withdrawal'})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Status'], 'confirm_drop')
+        self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'confirm_drop')
 
         logger.debug('---- Test accept withdrawal from progress note ----')
         form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Status')
+                                                        'Study_Status')
         self.assertTrue(action_label.endswith('Update'), action_label)
         self.assertTrue(action_label.startswith('Participants'), action_label)
 
-        form.set_values_from_entry({'Status' : 'drop_out'})
+        form.set_values_from_entry({'Study_Status' : 'drop_out'})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Status'], 'drop_out')
+        self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'drop_out')
 
     def test_dashboard_interview_track(self):
         # Create empty workbook
@@ -5147,7 +5253,7 @@ class TestWorkBook(unittest.TestCase):
                           choices={'Preliminary' :
                                    {'French' : 'Séance préliminaire'},
                                    'Eval' : {'French' : "Séance d'évaluation"}
-                                   },
+                          },
                           default_language='French',
                           allow_empty=False),
                  FormItem(keys={'Plan_Action':None},
@@ -5286,7 +5392,7 @@ class TestWorkBook(unittest.TestCase):
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(set(df.index.values),
                          set(pp_df['Participant_ID']))
-        self.assertTrue((df['Eval'] == 'eval_not_scheduled').all())
+        self.assertTrue((df['Eval'] == 'eval_not_done').all())
 
         from .plugin_tools import DATE_FMT
         pid = 'CE0001'
@@ -5307,9 +5413,9 @@ class TestWorkBook(unittest.TestCase):
                                     'Timestamp' : ts})
         form.submit()
         df = wb['Dashboard'].get_df_view()
-        self.assertEqual(df.loc[pid, 'Eval'], 'eval_not_scheduled')
+        self.assertEqual(df.loc[pid, 'Eval'], 'eval_not_done')
         self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
-        self.assertEqual(df.loc[pid, 'Eval_Date'], 'eval_to_plan')
+        self.assertEqual(df.loc[pid, 'Eval_Date'], 'eval_plan')
 
         logger.debug('------- Pid %s: Plan interview date, no email --------',
                      pid)
@@ -5348,7 +5454,7 @@ class TestWorkBook(unittest.TestCase):
                                     'Timestamp' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_not_scheduled')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_not_done')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'parfois')
 
@@ -5679,7 +5785,8 @@ class TestWorkBook(unittest.TestCase):
         form.set_values_from_entry({'Email_Action' : 'plan',
                                     'Staff' : 'Catherine-Alexandra Grégoire',
                                     'Email_Template' : 'Poll',
-                                    'Email_Schedule' : datetime.now()})
+                                    'Email_Scheduled_Send_Date' : \
+                                    datetime.now()})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_pending')
@@ -5703,7 +5810,8 @@ class TestWorkBook(unittest.TestCase):
         form.set_values_from_entry({'Email_Action' : 'plan',
                                     'Staff' : 'Thomas Vincent',
                                     'Email_Template' : 'Poll',
-                                    'Email_Schedule' : datetime.now()})
+                                    'Email_Scheduled_Send_Date' : \
+                                    datetime.now()})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_pending')
@@ -5717,7 +5825,8 @@ class TestWorkBook(unittest.TestCase):
                                     'Staff' : 'Script',
                                     'Email_Template' : 'Poll',
                                     'Email_Status' : 'error',
-                                    'Email_Schedule' : datetime.now()})
+                                    'Email_Scheduled_Send_Date' : \
+                                    datetime.now()})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_error')
@@ -5829,6 +5938,18 @@ def is_valid_html(html):
         else:
             html_ok = False
     return html_ok
+
+
+# class FormItemLabel:
+#     def __init__(self, default_language, supported_languages,
+#                  title=None, description='', hidden=False, nb_lines=1):
+
+#         self.tr = Translator(default_language=default_language,
+#                              supported_languages=supported_languages)
+#         self.tr.register('title', title)
+#         self.tr.register('description', description)
+#         self.hidden = hidden
+#         self.nb_lines = nb_lines
 
 class FormItem:
     """
@@ -6190,7 +6311,7 @@ class FormItem:
                              else value_str)
 
         if len(value_str)==0 and not self.allow_None:
-            logger.debug2('%s cannot be empty', self)
+            logger.debug('%s cannot be empty', self)
             self._set_validity(False, 'A value is required', key)
             return
 
@@ -6202,6 +6323,7 @@ class FormItem:
 
         try:
             value = self.unformat(value_str)
+            logger.debug2('Unformated value for %s: %s', self, value)
         except ValueError:
             self._set_validity(False, self.invalid_vtype_format_message, key)
             return
@@ -6270,24 +6392,21 @@ class FormItem:
 
 
     def split_qdatetime_str(self, key):
-        """
-        Return date_str, date_format_str, hour_str, min_str
-        If vtype is date then hour_str and min_str are None
-        """
+        vdate = None
         try:
-            date = self.get_value(key)
+            vdate = self.get_value(key)
         except InvalidValue:
-            return None, None, None, None
-        if date is None:
-            return None, None, None, None
-        hour_str = None
-        min_str = None
+            pass
+        if vdate is None:
+            return (date.today().strftime(FormItem.DATE_FORMAT),
+                    FormItem.QDATE_FORMAT, None, None)
+        hours, mins = 0, 0
         if self.vtype == 'datetime':
-            hour_str = '%02d' % date.hour
-            min_str = '%02d' % date.minute
-            date = date.date()
-        return date.strftime(FormItem.DATE_FORMAT), FormItem.QDATE_FORMAT, \
-            hour_str, min_str
+            hours = vdate.hour
+            mins = vdate.minute
+            vdate = vdate.date()
+        return vdate.strftime(FormItem.DATE_FORMAT), FormItem.QDATE_FORMAT, \
+            hours, mins
 
     def submit(self):
         """
@@ -6301,7 +6420,7 @@ class FormItem:
 
     def set_input_str(self, s, key=None, use_callback=True,
                       force=False):
-        logger.debug2('%s: set input str of key %s', self, key)
+        logger.debug('%s: set input str of key %s', self, key)
 
         if key is None:
             assert(len(self.keys)==1)
@@ -7099,7 +7218,7 @@ class TestFormSection(unittest.TestCase):
     def test_next_section_with_transition(self):
         next_section_def = [
             ('Age is not None and Age > 60', 'section_elder'),
-            ('Age is not None and Age <= 60', 'section_younger')
+            ('Age is not None and Age < 50', 'section_younger')
         ]
         section = FormSection([FormItem({'Participant_ID' :
                                          {'French':'Code Participant'}},
@@ -7118,6 +7237,8 @@ class TestFormSection(unittest.TestCase):
         self.assertEqual(section.next(), 'section_younger')
         section['Age'].set_input_str('99')
         self.assertEqual(section.next(), 'section_elder')
+        section['Age'].set_input_str('55')
+        self.assertIsNone(section.next(), None)
 
     def test_no_transition_when_invalid(self):
         next_section_def = [
@@ -7551,7 +7672,7 @@ class TestFormItem(unittest.TestCase):
                         default_language='English')
         ts_after_init = datetime.now()
         sleep_time_sec = 0.1
-        time.sleep(sleep_time_sec)
+        sleep(sleep_time_sec)
         result = next(iter(item.submit().values()))
         self.assertGreaterEqual(result, start)
         self.assertLess(result, ts_after_init+timedelta(seconds=sleep_time_sec/2))
@@ -7563,7 +7684,7 @@ class TestFormItem(unittest.TestCase):
                         default_language='English')
         ts_after_init = datetime.now()
         sleep_time_sec = 0.1
-        time.sleep(sleep_time_sec)
+        sleep(sleep_time_sec)
         result = next(iter(item.submit().values()))
         end_submit = datetime.now()
         self.assertGreater(result, ts_after_init+timedelta(seconds=sleep_time_sec/2))
@@ -7871,6 +7992,13 @@ class text_connect:
                   (self.text_get, self.text_set, txt))
             self.text_set(txt)
 
+class get_set_connect:
+    def __init__(self, f_get, f_set):
+        self.get = f_get
+        self.set = f_set
+    def __call__(self):
+        self.set(self.get())
+
 def make_item_input_widget(item_widget, item, key, key_label,
                            item_is_single=False):
     input_widget = QtWidgets.QWidget(item_widget)
@@ -7946,12 +8074,33 @@ def make_item_input_widget(item_widget, item, key, key_label,
         _input_ui = ui.item_datetime_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
         _input_ui.label_key.setText(item.tr[key])
-        date_str, date_fmt, hour_str, min_str = item.split_qdatetime_str(key)
-        if date_str != None:
+        date_str, date_fmt, hour, mins = item.split_qdatetime_str(key)
+
+        if date_str is not None:
             qdate = QtCore.QDate.fromString(date_str, date_fmt)
-            _input_ui.datetime_field.setDate(qdate)
-            _input_ui.hour_field.setText(hour_str)
-            _input_ui.minute_field.setText(min_str)
+        else:
+            qdate = QtCore.QDate()
+        logger.debug2("Init date field with %s -> qdate=%s", date_str, qdate)
+        date_collector = DateTimeCollector(item.set_input_str, qdate, hour, mins)
+
+        _input_ui.datetime_field.setDate(qdate)
+        _input_ui.datetime_field.dateChanged.connect(date_collector.set_date)
+        if hour is not None:
+            _input_ui.hour_field.setValue(hour)
+        else:
+            _input_ui.hour_field.clear()
+        callback = get_set_connect(_input_ui.hour_field.value,
+                                   date_collector.set_hours)
+        _input_ui.hour_field.editingFinished.connect(callback)
+
+        if mins is not None:
+            _input_ui.minute_field.setValue(mins)
+        else:
+            _input_ui.minute_field.clear()
+        callback = get_set_connect(_input_ui.minute_field.value,
+                                   date_collector.set_minutes)
+        _input_ui.minute_field.editingFinished.connect(callback)
+
         if item.vtype == 'date':
             _input_ui.frame_hour.hide()
     else:
@@ -7974,20 +8123,21 @@ def make_item_widget(section_widget, item):
     else:
         _item_ui.description.hide()
     _item_ui.label_invalid_message.hide()
-    invalidity_callback = text_connect(item.get_validity_message,
-                                       _item_ui.label_invalid_message.setText)
-    item.notifier.add_watcher('item_invalid', invalidity_callback)
-    item.notifier.add_watcher('item_invalid',
-                              _item_ui.label_invalid_message.show)
-    item.notifier.add_watcher('item_valid', _item_ui.label_invalid_message.hide)
-    if item.allow_None:
-        _item_ui.required_label.hide()
-    for key, key_label in item.keys.items():
-        input_widget = make_item_input_widget(item_widget, item, key, key_label,
-                                              item_is_single=len(item.keys)==1)
-        _item_ui.input_layout.addWidget(input_widget)
-        if not item.editable:
-            input_widget.setEnabled(False)
+    if isinstance(item, FormItem):
+        invalidity_callback = text_connect(item.get_validity_message,
+                                           _item_ui.label_invalid_message.setText)
+        item.notifier.add_watcher('item_invalid', invalidity_callback)
+        item.notifier.add_watcher('item_invalid',
+                                  _item_ui.label_invalid_message.show)
+        item.notifier.add_watcher('item_valid', _item_ui.label_invalid_message.hide)
+        if item.allow_None:
+            _item_ui.required_label.hide()
+        for key, key_label in item.keys.items():
+            input_widget = make_item_input_widget(item_widget, item, key, key_label,
+                                                  item_is_single=len(item.keys)==1)
+            _item_ui.input_layout.addWidget(input_widget)
+            if not item.editable:
+                input_widget.setEnabled(False)
     return item_widget
 
 
@@ -8003,6 +8153,11 @@ class SheetViewChanger:
         self.sheet_model.sheet.set_default_view(view_label)
         self.sheet_model.endResetModel()
         self.sheet_model.layoutChanged.emit()
+
+def language_abbrev(language):
+    # https://www.loc.gov/standards/iso639-2/php/code_list.php
+    return {'French' : 'Fre',
+            'English' : 'Eng'}[language]
 
 class PiccelApp(QtWidgets.QApplication):
 
@@ -8307,7 +8462,6 @@ class PiccelApp(QtWidgets.QApplication):
 
     def make_form_tab(self, tab_name, sheet_model, sheet_ui, tab_widget,
                       tab_idx, form):
-        sections = {}
         form_widget = QtWidgets.QWidget()
         _form_ui = ui.form_ui.Ui_Form()
         _form_ui.setupUi(form_widget)
@@ -8331,12 +8485,14 @@ class PiccelApp(QtWidgets.QApplication):
         form.notifier.add_watchers(watchers)
         form.validate()
 
-        section_widgets = {}
+        #self.section_widget_stack = QtWidgets.QStackedWidget()
+        section_widgets_by_language = defaultdict(dict)
         # self.current_section_widget = None
         self.item_labels = []
         def set_section_ui(section_label, section):
             #if self.current_section_widget is not None:
             #    self.current_section_widget.hide()
+            section_widgets = section_widgets_by_language[section.tr.language]
             if section_label not in section_widgets:
                 section_widget = QtWidgets.QWidget(form_widget)
                 _section_ui = ui.section_ui.Ui_Form()
@@ -8354,10 +8510,18 @@ class PiccelApp(QtWidgets.QApplication):
                          self.logic.workbook.user_role >= UserRole.MANAGER)):
                         item_widget = make_item_widget(section_widget, item)
                         _section_ui.verticalLayout.addWidget(item_widget)
+                _form_ui.sections_stack.addWidget(section_widget)
                 section_widgets[section_label] = section_widget
             else:
                 section_widget = section_widgets[section_label]
-            _form_ui.scroll_section.setWidget(section_widget)
+
+            _form_ui.sections_stack.setCurrentWidget(section_widget)
+
+            #_form_ui.scroll_section.setWidget(section_widget)
+                #
+                # self.stacked.addWidget(self.lineedit)
+            # except RuntimeError:
+            #     from IPython import embed; embed()
             #self.current_section_widget = section_widget
             #self.current_section_widget.show()
 
@@ -8367,20 +8531,47 @@ class PiccelApp(QtWidgets.QApplication):
         tab_widget.setTabIcon(tab_idx, tab_icon)
         tab_widget.setCurrentIndex(tab_idx)
 
-        # TODO: add language selector
         _form_ui.title_label.setText(form.tr['title'])
+
+        radio_language_group = QtWidgets.QButtonGroup(form_widget)
+        from IPython import embed; embed()
+        frame = _form_ui.frame_language_select
+        for idx,language in enumerate(sorted(form.tr.supported_languages)):
+            radio_button = QtWidgets.QRadioButton(language_abbrev(language),
+                                                  frame)
+            radio_button.setObjectName("radio_button_" + language)
+            _form_ui.language_select_layout.addWidget(radio_button, idx)
+            radio_language_group.addButton(radio_button, idx)
+            class ChoiceProcess:
+                def __init__(self, language):
+                    self.language = language
+                def __call__(self, state):
+                    if state:
+                        form.current_section.set_language(language)
+                        set_section_ui(form.current_section_name, form.current_section)
+            radio_button.toggled.connect(ChoiceProcess(language))
 
         # Set button actions
         def prev_sec():
-            _form_ui.section_widget = \
-                dict_lazy_setdefault(sections, form.to_previous_section(),
-                                     lambda : section_ui(form.previous_section()))
+            # gen_section = lambda : set_section_ui(form.previous_section(),
+            #                                       form.to_previous_section())
+            # _form_ui.section_widget = \
+            #     dict_lazy_setdefault(sections, form.previous_section(),
+            #                          gen_section)
+            set_section_ui(form.previous_section(),
+                           form.to_previous_section())
         _form_ui.button_previous.clicked.connect(prev_sec)
 
         def next_sec():
-            _form_ui.section_widget = \
-                dict_lazy_setdefault(sections, form.to_next_section(),
-                                     lambda : section_ui(form.next_section()))
+            # def gen_section():
+            #     gen_section = lambda : set_section_ui(form.next_section(),
+            #                                       form.to_next_section())
+            # _form_ui.section_widget = \
+            #     dict_lazy_setdefault(sections, form.next_section(),
+            #                          gen_section)
+            set_section_ui(form.next_section(),
+                           form.to_next_section())
+
         _form_ui.button_next.clicked.connect(next_sec)
 
         def cancel():
@@ -8462,7 +8653,7 @@ class PiccelApp(QtWidgets.QApplication):
                 if isinstance(action_result, Form):
                     self.make_form_tab(action_label, model, _data_sheet_ui,
                                        self._workbook_ui.tabWidget,
-                                       tab_idx=self.tab_indexes[sh_name]+1,
+                                       tab_idx=max(0,self.tab_indexes[sh_name]-1),
                                        form=action_result)
                 else:
                     print('action result:', action_result)
