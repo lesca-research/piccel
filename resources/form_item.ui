@@ -6,12 +6,12 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>340</width>
-    <height>132</height>
+    <width>836</width>
+    <height>154</height>
    </rect>
   </property>
   <property name="sizePolicy">
-   <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+   <sizepolicy hsizetype="Preferred" vsizetype="Ignored">
     <horstretch>0</horstretch>
     <verstretch>0</verstretch>
    </sizepolicy>
@@ -20,10 +20,28 @@
    <string>Form</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
+   <property name="spacing">
+    <number>0</number>
+   </property>
+   <property name="sizeConstraint">
+    <enum>QLayout::SetDefaultConstraint</enum>
+   </property>
+   <property name="leftMargin">
+    <number>0</number>
+   </property>
+   <property name="topMargin">
+    <number>4</number>
+   </property>
+   <property name="rightMargin">
+    <number>0</number>
+   </property>
+   <property name="bottomMargin">
+    <number>4</number>
+   </property>
    <item>
     <widget class="QFrame" name="frame_2">
      <property name="sizePolicy">
-      <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+      <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
        <horstretch>0</horstretch>
        <verstretch>0</verstretch>
       </sizepolicy>
@@ -37,6 +55,9 @@
      <layout class="QVBoxLayout" name="verticalLayout_2">
       <property name="spacing">
        <number>0</number>
+      </property>
+      <property name="sizeConstraint">
+       <enum>QLayout::SetDefaultConstraint</enum>
       </property>
       <property name="leftMargin">
        <number>0</number>
@@ -53,7 +74,7 @@
       <item>
        <widget class="QFrame" name="frame_title">
         <property name="sizePolicy">
-         <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+         <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
           <horstretch>0</horstretch>
           <verstretch>0</verstretch>
          </sizepolicy>
@@ -121,7 +142,7 @@ background-color: rgb(136, 153,170);</string>
       <item>
        <widget class="QFrame" name="frame">
         <property name="sizePolicy">
-         <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+         <sizepolicy hsizetype="Preferred" vsizetype="MinimumExpanding">
           <horstretch>0</horstretch>
           <verstretch>0</verstretch>
          </sizepolicy>
@@ -133,6 +154,12 @@ background-color: rgb(136, 153,170);</string>
          <enum>QFrame::Raised</enum>
         </property>
         <layout class="QVBoxLayout" name="verticalLayout_3">
+         <property name="spacing">
+          <number>9</number>
+         </property>
+         <property name="sizeConstraint">
+          <enum>QLayout::SetDefaultConstraint</enum>
+         </property>
          <property name="leftMargin">
           <number>9</number>
          </property>
@@ -145,7 +172,7 @@ background-color: rgb(136, 153,170);</string>
          <item>
           <widget class="QLabel" name="description">
            <property name="sizePolicy">
-            <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+            <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
              <horstretch>0</horstretch>
              <verstretch>0</verstretch>
             </sizepolicy>
@@ -154,6 +181,9 @@ background-color: rgb(136, 153,170);</string>
             <font>
              <italic>true</italic>
             </font>
+           </property>
+           <property name="frameShape">
+            <enum>QFrame::NoFrame</enum>
            </property>
            <property name="text">
             <string>Description</string>
@@ -172,7 +202,7 @@ background-color: rgb(136, 153,170);</string>
          <item alignment="Qt::AlignLeft">
           <widget class="QFrame" name="frame_input">
            <property name="sizePolicy">
-            <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+            <sizepolicy hsizetype="Preferred" vsizetype="MinimumExpanding">
              <horstretch>0</horstretch>
              <verstretch>0</verstretch>
             </sizepolicy>
@@ -186,6 +216,9 @@ background-color: rgb(136, 153,170);</string>
            <layout class="QVBoxLayout" name="input_layout">
             <property name="spacing">
              <number>2</number>
+            </property>
+            <property name="sizeConstraint">
+             <enum>QLayout::SetDefaultConstraint</enum>
             </property>
             <property name="leftMargin">
              <number>0</number>
@@ -205,7 +238,7 @@ background-color: rgb(136, 153,170);</string>
          <item>
           <widget class="QLabel" name="label_invalid_message">
            <property name="sizePolicy">
-            <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+            <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
              <horstretch>0</horstretch>
              <verstretch>0</verstretch>
             </sizepolicy>
@@ -218,6 +251,9 @@ background-color: rgb(136, 153,170);</string>
            </property>
            <property name="styleSheet">
             <string notr="true">color: rgb(255, 106, 0);</string>
+           </property>
+           <property name="frameShape">
+            <enum>QFrame::NoFrame</enum>
            </property>
            <property name="text">
             <string>TextLabel</string>

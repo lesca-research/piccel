@@ -570,6 +570,9 @@ function snakeCaseToCamelCase(s) {
         self.on_cancel = None
         self.to_next_section()
 
+    def get_dtypes(self):
+        return {k:its[0].dtype_pd for k,its in self.key_to_items.items()}
+
     def has_key(self, key):
         return key in self.key_to_items
 
@@ -1848,13 +1851,18 @@ class DataSheet:
 
         self.df = None
         if form_master is not None:
-            cols = ['__entry_id__', '__update_idx__', '__conflict_idx__', '__fn__']
+            dtypes = form_master.get_dtypes()
+            cols = ['__entry_id__', '__update_idx__', '__conflict_idx__', '__fn__'] + \
+                [k for k in dtypes]
             self.df = pd.DataFrame(columns=cols)
             self.df['__entry_id__'] = self.df['__entry_id__'].astype(np.int64)
             self.df['__update_idx__'] = (self.df['__update_idx__']
                                          .astype(np.int64))
             self.df['__conflict_idx__'] = (self.df['__conflict_idx__']
                                            .astype(np.int64))
+
+            for col,dt in dtypes.items():
+                self.df[col] = self.df[col].astype(dt)
 
             self.df.set_index(['__entry_id__', '__update_idx__',
                                '__conflict_idx__'], inplace=True)
@@ -3029,6 +3037,65 @@ class TestDataSheet(unittest.TestCase):
         self.sheet_ts.save()
         logger.debug('--------------------')
         logger.debug('utest setUp finished')
+
+
+    def init_df_from_form_master(self):
+        form_def = {
+            'title' : {'French' : 'Un formulaire'},
+            'default_language' : 'French',
+            'supported_languages' : {'French'},
+            'sections' : {
+                'section1' : {
+                    'items' : [
+                        {'keys' : {'Participant_ID' :
+                                   {'French':'Code Participant'}},
+                         'unique' : True,
+                         'freeze_on_update' : True,
+                        },
+                        {'keys' : {'Name' : {'French':'Nom'}}}
+                    ]
+                },
+                'section2' : {
+                    'items' : [
+                        {'keys' : {'Var1' : None},
+                         'vtype' : 'int64'
+                        },
+                    ]
+                },
+                'section3' : {
+                    'items' : [
+                        {'keys' : {'Var1' : None},
+                         'vtype' : 'int64'
+                        },
+                    ],
+                }
+            }
+        }
+        sheet_id = 'pinfo_with_duplicates'
+        user = 'me'
+        sheet_folder = op.join(self.tmp_dir, sheet_id)
+        os.makedirs(sheet_folder)
+        filesystem = LocalFileSystem(sheet_folder)
+        sheet = DataSheet(sheet_id, Form.from_dict(form_def),
+                          None, user, filesystem)
+
+        cols = ['__entry_id__', '__update_idx__', '__conflict_idx__', '__fn__',
+                'Participant_ID', 'Name', 'Var1']
+        expected_df = pd.DataFrame(columns=cols)
+        expected_df['__entry_id__'] = expected_df['__entry_id__'].astype(np.int64)
+        expected_df['__update_idx__'] = (expected_df['__update_idx__']
+                                         .astype(np.int64))
+        expected_df['__conflict_idx__'] = (expected_df['__conflict_idx__']
+                                           .astype(np.int64))
+        expected_df.set_index(['__entry_id__', '__update_idx__',
+                               '__conflict_idx__'], inplace=True)
+
+        expected_df['Participant_ID'] = (expected_df['Participant_ID']
+                                         .astype('string'))
+        expected_df['Name'] = (expected_df['Participant_ID']
+                               .astype('string'))
+        expected_df['Var1'] = expected_df['Var1'].astype('int64')
+        assert_frame_equal(sheet.df, expected_df)
 
     def test_df_weak_equal(self):
         df1 = pd.DataFrame(OrderedDict([
@@ -8492,6 +8559,8 @@ class PiccelApp(QtWidgets.QApplication):
         def set_section_ui(section_label, section):
             #if self.current_section_widget is not None:
             #    self.current_section_widget.hide()
+            logger.debug('Set section widget for %s, language: %s',
+                         section_label, section.tr.language)
             section_widgets = section_widgets_by_language[section.tr.language]
             if section_label not in section_widgets:
                 section_widget = QtWidgets.QWidget(form_widget)
@@ -8534,7 +8603,6 @@ class PiccelApp(QtWidgets.QApplication):
         _form_ui.title_label.setText(form.tr['title'])
 
         radio_language_group = QtWidgets.QButtonGroup(form_widget)
-        from IPython import embed; embed()
         frame = _form_ui.frame_language_select
         for idx,language in enumerate(sorted(form.tr.supported_languages)):
             radio_button = QtWidgets.QRadioButton(language_abbrev(language),
@@ -8542,15 +8610,20 @@ class PiccelApp(QtWidgets.QApplication):
             radio_button.setObjectName("radio_button_" + language)
             _form_ui.language_select_layout.addWidget(radio_button, idx)
             radio_language_group.addButton(radio_button, idx)
+            logger.debug('Set radio button for switching language '\
+                         'of section %s to %s', form.current_section_name,
+                         language)
             class ChoiceProcess:
                 def __init__(self, language):
                     self.language = language
                 def __call__(self, state):
                     if state:
-                        form.current_section.set_language(language)
-                        set_section_ui(form.current_section_name, form.current_section)
+                        form.current_section.set_language(self.language)
+                        set_section_ui(form.current_section_name,
+                                       form.current_section)
             radio_button.toggled.connect(ChoiceProcess(language))
-
+            if language == form.current_section.tr.language:
+                radio_language_group.button(idx).setChecked(True)
         # Set button actions
         def prev_sec():
             # gen_section = lambda : set_section_ui(form.previous_section(),

@@ -89,32 +89,9 @@ background-color: rgb(136, 153,170);</string>
           </widget>
          </item>
          <item>
-          <widget class="QLabel" name="title">
-           <property name="sizePolicy">
-            <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
-             <horstretch>0</horstretch>
-             <verstretch>0</verstretch>
-            </sizepolicy>
-           </property>
-           <property name="font">
-            <font>
-             <pointsize>12</pointsize>
-            </font>
-           </property>
-           <property name="text">
-            <string>Item Title</string>
-           </property>
-           <property name="alignment">
-            <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
-           </property>
-           <property name="wordWrap">
-            <bool>true</bool>
-           </property>
-           <property name="margin">
-            <number>0</number>
-           </property>
-           <property name="textInteractionFlags">
-            <set>Qt::LinksAccessibleByMouse</set>
+          <widget class="QLineEdit" name="lineEdit">
+           <property name="placeholderText">
+            <string>titre [French]</string>
            </property>
           </widget>
          </item>

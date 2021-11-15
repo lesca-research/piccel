@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>400</width>
-    <height>96</height>
+    <height>48</height>
    </rect>
   </property>
   <property name="sizePolicy">
@@ -51,7 +51,7 @@
    <item>
     <widget class="QFrame" name="radio_frame">
      <property name="sizePolicy">
-      <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+      <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
        <horstretch>0</horstretch>
        <verstretch>0</verstretch>
       </sizepolicy>
