@@ -106,7 +106,7 @@ color: rgb(255, 255, 255);</string>
    <item>
     <widget class="QScrollArea" name="scroll_section">
      <property name="sizePolicy">
-      <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+      <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
        <horstretch>0</horstretch>
        <verstretch>1</verstretch>
       </sizepolicy>
@@ -147,25 +147,10 @@ color: rgb(255, 255, 255);</string>
         <verstretch>0</verstretch>
        </sizepolicy>
       </property>
-      <layout class="QVBoxLayout" name="verticalLayout_2">
+      <layout class="QVBoxLayout" name="scroll_section_content_layout">
        <property name="sizeConstraint">
         <enum>QLayout::SetDefaultConstraint</enum>
        </property>
-       <item>
-        <widget class="QStackedWidget" name="sections_stack">
-         <property name="sizePolicy">
-          <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-           <horstretch>0</horstretch>
-           <verstretch>0</verstretch>
-          </sizepolicy>
-         </property>
-         <property name="lineWidth">
-          <number>2</number>
-         </property>
-         <widget class="QWidget" name="page_3"/>
-         <widget class="QWidget" name="page_4"/>
-        </widget>
-       </item>
       </layout>
      </widget>
     </widget>

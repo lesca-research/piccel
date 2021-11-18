@@ -27,7 +27,7 @@ class LescaDashboard(SheetPlugin):
 
     def reset_data(self):
         if self.pp.df is not None and self.pp.df.shape[0] > 0:
-            self.df = (self.pp.df[['Participant_ID']]
+            self.df = (self.pp.latest_update_df()[['Participant_ID']]
                        .sort_values(by='Participant_ID')
                        .reset_index(drop=True))
             self.df.set_index('Participant_ID', inplace=True)
@@ -290,13 +290,15 @@ def track_participant_status(dashboard_df, dashboard_column_status,
     participant_status_sheet -> confirm_drop
     Else: Display current participant status in participant_status_sheet
     """
+    # expected_columns=['Participant_ID', 'Note_Type',
+    #                   'Timestamp_Submission'],
+
     pnotes_df = latest_sheet_data(workbook, common_progress_notes_sheet,
-                                  expected_columns=['Participant_ID', 'Note_Type',
-                                                    'Timestamp'],
                                   index_column='Participant_ID')
+    # expected_columns=['Participant_ID', 'Study_Status',
+    #                   'Timestamp_Submission'],
+
     status_df = latest_sheet_data(workbook, participant_status_sheet,
-                                  expected_columns=['Participant_ID', 'Study_Status',
-                                                    'Timestamp'],
                                   index_column='Participant_ID')
 
     pnotes_fresher, status_fresher = df_keep_higher(pnotes_df, status_df)
@@ -306,14 +308,14 @@ def track_participant_status(dashboard_df, dashboard_column_status,
 
     map_set(dashboard_df, dashboard_column_status,
             conditions={'confirm_drop':
-                        (pnotes_fresher, 'Note_Type', ['withdrawal', 'exclusion'])})
+                        (pnotes_fresher, 'Note_Type',
+                         ['withdrawal', 'exclusion'])})
 
 
-def track_poll_answer(dashboard_df, dashboard_column, poll_sheet_label, poll_answer_column,
-                      expected_poll_sheet_columns, default_status, workbook, pids,
+def track_poll_answer(dashboard_df, dashboard_column, poll_sheet_label,
+                      poll_answer_column, default_status, workbook, pids,
                       poll_filter=None):
     poll_df = latest_sheet_data(workbook, poll_sheet_label,
-                                expected_columns=expected_poll_sheet_columns,
                                 index_column='Participant_ID',
                                 filter_dict=poll_filter,
                                 indexes=pids)
@@ -332,7 +334,7 @@ def emailled_poll_action(entry_df, poll_column, email_sheet_label, workbook):
     return form_update_or_new(email_sheet_label, workbook,
                               {'Participant_ID' : participant_id,
                                'Email_Template' : poll_column},
-                              {'Plan_Action' : 'plan',
+                              {'Email_Action' : 'plan',
                                'Staff' : workbook.user})
 
 def track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
@@ -362,16 +364,17 @@ def track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
 
     pids = set(pids).intersection(dashboard_df.index)
 
+    # expected_columns=['Participant_ID', 'Staff',
+    #                   'Email_Action', 'Email_Status',
+    #                   'Email_Template', 'Overdue_Days',
+    #                   'Timestamp_Submission'],
     email_df = latest_sheet_data(workbook, email_sheet_label,
-                                 expected_columns=['Participant_ID', 'Staff',
-                                                   'Email_Action', 'Email_Status',
-                                                   'Email_Template', 'Overdue_Days',
-                                                   'Timestamp'],
                                  filter_dict={'Email_Template' : poll_label},
                                  index_column='Participant_ID', indexes=pids)
 
+    # expected_columns=['Participant_ID',
+    #                   'Timestamp_Submission'],
     poll_df = latest_sheet_data(workbook, poll_label,
-                                expected_columns=['Participant_ID', 'Timestamp'],
                                 index_column='Participant_ID', indexes=pids)
 
     dashboard_df.loc[pids, column_status] = default_status
@@ -394,12 +397,13 @@ def track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
                         And((email_df, 'Email_Action', ['plan']),
                             (email_df, 'Email_Status', ['sent']),
                             (email_df, 'Overdue_Days', IsNotNA()),
-                            (email_df, 'Timestamp', GreaterEqual(od_ts))),
+                            (email_df, 'Timestamp_Submission',
+                             GreaterEqual(od_ts))),
                         '%s_overdue' % poll_tag:
                         And((email_df, 'Email_Action', ['plan']),
                             (email_df, 'Email_Status', ['sent']),
                             (email_df, 'Overdue_Days', IsNotNA()),
-                            (email_df, 'Timestamp', Lower(od_ts))),
+                            (email_df, 'Timestamp_Submission', Lower(od_ts))),
                         '%s_email_error' % poll_tag:
                         And((email_df, 'Email_Action', ['plan']),
                             (email_df, 'Email_Status', ['error'])),
@@ -416,7 +420,7 @@ def track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
         try:
             map_set(dashboard_df, column_status,
                     conditions={'%s_answered' % poll_tag:
-                                (poll_df, 'Timestamp', Any())})
+                                (poll_df, 'Timestamp_Submission', Any())})
         except SrcColumnNotFound as e:
             msg = 'Column %s not found in df of sheet %s' % \
                 (e.message, poll_label)
@@ -477,13 +481,12 @@ def interview_action(entry_df, interview_column, workbook,
         })
     return form, action_label
 
-def latest_sheet_data(workbook, sheet_label, expected_columns,
-                      filter_dict=None, index_column=None, indexes=None):
-    df = (workbook[sheet_label].get_df_view('latest') \
-          if workbook.has_sheet(sheet_label) else None)
+def latest_sheet_data(workbook, sheet_label, filter_dict=None,
+                      index_column=None, indexes=None):
+    df = workbook[sheet_label].get_df_view('latest')
 
     if df is None:
-        df = pd.DataFrame(columns=expected_columns)
+        from IPython import embed; embed()
     if filter_dict is not None:
         df = df_filter_from_dict(df, filter_dict)
     if index_column is not None:
@@ -496,7 +499,7 @@ def latest_sheet_data(workbook, sheet_label, expected_columns,
 
     return df
 
-def df_keep_higher(df1, df2, compare_column='Timestamp'):
+def df_keep_higher(df1, df2, compare_column='Timestamp_Submission'):
     common_index = df1.index.intersection(df2.index)
     mask = (df1.loc[common_index, compare_column] > \
             df2.loc[common_index, compare_column])
@@ -644,21 +647,22 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     date_now = date_now if date_now is not None else datetime.now()
 
+    # expected_columns=['Participant_ID', 'Staff',
+    #                   'Session_Action',
+    #                   'Session_Status',
+    #                   'Timestamp_Submission'],
+
     interview_df = latest_sheet_data(workbook, interview_label,
-                                     expected_columns=['Participant_ID', 'Staff',
-                                                       'Session_Action',
-                                                       'Session_Status',
-                                                       'Timestamp'],
                                      index_column='Participant_ID',
                                      indexes=pids)
+    # expected_columns=[
+    #     'Participant_ID', 'Staff', 'Plan_Action',
+    #     'Interview_Type', 'Interview_Date',
+    #     'Availability', 'Send_Email',
+    #     'Email_Schedule', 'Email_Template',
+    #     'Email_Status', 'Timestamp_Submission'],
 
     plan_df = latest_sheet_data(workbook, plan_sheet_label,
-                                expected_columns=[
-                                    'Participant_ID', 'Staff', 'Plan_Action',
-                                    'Interview_Type', 'Interview_Date',
-                                    'Availability', 'Send_Email',
-                                    'Email_Schedule', 'Email_Template',
-                                    'Email_Status', 'Timestamp'],
                                 filter_dict={'Interview_Type' : interview_label},
                                 index_column='Participant_ID',
                                 indexes=pids)
@@ -689,7 +693,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         done = int_sel_df[((int_sel_df['Session_Action']!='cancel_session') & \
                            ((int_sel_df['Session_Status']=='done') | \
                             (int_sel_df['Session_Status']=='redo')))]
-        dates = (done.loc[done.index, 'Timestamp']
+        dates = (done.loc[done.index, 'Timestamp_Submission']
                  .apply(lambda x: x.strftime(DATE_FMT)))
         dashboard_df.loc[done.index, column_date] = dates
 
@@ -726,7 +730,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
     #                                        NotIn('cancel_session')),
     #                                       (itv_df, 'Session_Status',
     #                                        ['done', 'redo'])),
-    #                             value=FetchDf(itv_df, 'Timestamp', apply=fmt_date)),
+    #                             value=FetchDf(itv_df, 'Timestamp_Submission', apply=fmt_date)),
     #                    SetWhere(where=Or((itv_df, 'Session_Action',
     #                                       ['cancel_session']),
     #                                      (itv_df, 'Session_Status',
@@ -777,12 +781,12 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
                      And((plan_df_fresher, 'Plan_Action', ['plan']),
                          (plan_df_fresher, 'Interview_Date', IsNA()),
                          (plan_df_fresher, 'Callback_Days', IsNotNA()),
-                         (plan_df_fresher, 'Timestamp', Greater(cb_ts))),
+                         (plan_df_fresher, 'Timestamp_Submission', Greater(cb_ts))),
                     '%s_callback' % interview_tag:
                      And((plan_df_fresher, 'Plan_Action', ['plan']),
                          (plan_df_fresher, 'Interview_Date', IsNA()),
                          (plan_df_fresher, 'Callback_Days', IsNotNA()),
-                         (plan_df_fresher, 'Timestamp', Lower(cb_ts))),
+                         (plan_df_fresher, 'Timestamp_Submission', Lower(cb_ts))),
                      '%s_email_pending' % interview_tag:
                      And((plan_df_fresher, 'Plan_Action', ['plan']),
                          (plan_df_fresher, 'Interview_Date', IsNotNA()),
@@ -813,7 +817,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         pids_callback_tbd = mask_callback_tbd[mask_callback_tbd].index
         if len(pids_callback_tbd) > 0:
             plan_df_for_cb_tbd = plan_df_fresher.loc[pids_callback_tbd]
-            cb_days = (plan_df_for_cb_tbd['Timestamp'] \
+            cb_days = (plan_df_for_cb_tbd['Timestamp_Submission'] \
                        + pd.to_timedelta(plan_df_for_cb_tbd['Callback_Days'],
                                          unit='d') \
                        - date_now).dt.days
@@ -851,7 +855,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 def ts_data_latest_by_pid(df):
     if df is None or df.shape[0]==0:
         return None
-    max_ts = lambda x: x.loc[x['Timestamp']==x['Timestamp'].max()]
+    max_ts = lambda x: x.loc[x['Timestamp_Submission']==x['Timestamp_Submission'].max()]
     df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
     df.set_index('Participant_ID', inplace=True)
     return df

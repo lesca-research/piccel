@@ -29,7 +29,6 @@ class SheetPlugin:
            - df = sheet.get_df_view(view_label)
         """
         self.sheet = data_sheet
-        # self._watch_sheets([data_sheet])
 
     def set_workbook(self, workbook):
         logger.debug('Plugin of sheet %s, set workbook: %s',

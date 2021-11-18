@@ -491,9 +491,10 @@ function snakeCaseToCamelCase(s) {
                  title='', watchers=None):
         """
         - sections:
-          IMPORTANT: if no next_section_definition is given, then use the next section
-                     in order. If section is last then consider that the form can be 
-                     submitted afterwards.
+          IMPORTANT:
+            if no next_section_definition is given, then use the next section
+            in order. If section is last then consider that the form can be
+            submitted afterwards.
         """
         self.notifier = Notifier(watchers)
 
@@ -505,6 +506,7 @@ function snakeCaseToCamelCase(s) {
         self.datetime_keys = set()
         self.date_keys = set()
         self.int_keys = set()
+        self.user_items = []
         self.float_keys = set()
         self.text_keys = set()
         self.boolean_keys = set()
@@ -557,6 +559,8 @@ function snakeCaseToCamelCase(s) {
                     self.text_keys.add(key)
                 elif item.vtype == 'boolean':
                     self.boolean_keys.add(key)
+                elif item.vtype == 'user_name':
+                    self.user_items.append(item)
 
         self.sheet = None
 
@@ -568,13 +572,24 @@ function snakeCaseToCamelCase(s) {
         self.validity = None
         self.on_submission = None
         self.on_cancel = None
+        self.set_language(default_language)
         self.to_next_section()
+
+    def set_language(self, language):
+        if language != self.tr.language:
+            self.tr.set_language(language)
+            for section in self.sections.values():
+                section.set_language(language)
 
     def get_dtypes(self):
         return {k:its[0].dtype_pd for k,its in self.key_to_items.items()}
 
     def has_key(self, key):
         return key in self.key_to_items
+
+    def set_user(self, user):
+        for item in self.user_items:
+            item.set_user(user)
 
     def format(self, key, value):
         return self.key_to_items[key][0].format(value)
@@ -827,6 +842,7 @@ function snakeCaseToCamelCase(s) {
         else:
             self.on_section_is_invalid(self.current_section_name,
                                        self.current_section)
+        self.current_section.set_language(self.tr.language)
         return self.current_section
 
     def next_section(self):
@@ -837,11 +853,14 @@ function snakeCaseToCamelCase(s) {
             self.section_path.pop()
             logger.debug('Returning to previous section "%s"',
                          self.section_path[-1])
+            self.current_section_name = self.section_path[-1]
             self.current_section = self[self.section_path[-1]]
         else:
             logger.debug('No previous section to return to')
         self.nb_valid_sections -= 1
         self.validate()
+
+        self.current_section.set_language(self.tr.language)
         return self.current_section
 
     def __str__(self):
@@ -1849,23 +1868,7 @@ class DataSheet:
 
         self.notifier = Notifier(watchers if watchers is not None else {})
 
-        self.df = None
-        if form_master is not None:
-            dtypes = form_master.get_dtypes()
-            cols = ['__entry_id__', '__update_idx__', '__conflict_idx__', '__fn__'] + \
-                [k for k in dtypes]
-            self.df = pd.DataFrame(columns=cols)
-            self.df['__entry_id__'] = self.df['__entry_id__'].astype(np.int64)
-            self.df['__update_idx__'] = (self.df['__update_idx__']
-                                         .astype(np.int64))
-            self.df['__conflict_idx__'] = (self.df['__conflict_idx__']
-                                           .astype(np.int64))
-
-            for col,dt in dtypes.items():
-                self.df[col] = self.df[col].astype(dt)
-
-            self.df.set_index(['__entry_id__', '__update_idx__',
-                               '__conflict_idx__'], inplace=True)
+        self.df = self.empty_df_from_master()
 
         if df is not None:
             self.import_df(df)
@@ -1881,6 +1884,25 @@ class DataSheet:
 
         self.workbook = workbook
         self.set_plugin(SheetPlugin(self))
+
+    def empty_df_from_master(self):
+        df = None
+        if self.form_master is not None:
+            dtypes = self.form_master.get_dtypes()
+            cols = ['__entry_id__', '__update_idx__', '__conflict_idx__',
+                    '__fn__'] + [k for k in dtypes]
+            df = pd.DataFrame(columns=cols)
+            df['__entry_id__'] = df['__entry_id__'].astype(np.int64)
+            df['__update_idx__'] = df['__update_idx__'].astype(np.int64)
+            df['__conflict_idx__'] = df['__conflict_idx__'].astype(np.int64)
+            df['__fn__'] = df['__fn__'].astype('string')
+
+            for col,dt in dtypes.items():
+                df[col] = df[col].astype(dt)
+
+            df.set_index(['__entry_id__', '__update_idx__',
+                          '__conflict_idx__'],  inplace=True)
+        return df
 
     def set_filesystem(self, fs):
         # TODO: check if really needed? Should be set only once at __init__
@@ -1911,10 +1933,11 @@ class DataSheet:
     def latest_update_df(self, df=None):
         if df is None:
             df = self.df
-        if df is None or df.shape[0]==0:
-            return None
         fm = lambda x : x.loc[[x.index.max()]]
-        return df.groupby(level=0, group_keys=False).apply(fm)
+        latest = df.groupby(level=0, group_keys=False).apply(fm)
+        if latest.empty:
+            latest = self.empty_df_from_master()
+        return latest
 
     #@check_role(UserRole.ADMIN)
     def dump_plugin_code(self, plugin_code=None, overwrite=False):
@@ -2001,13 +2024,13 @@ class DataSheet:
         """
         Refresh data based on external file changes.
         """
-        logger.debug('Refresh data for sheet %s', self.label)
+        logger.debug2('Refresh data for sheet %s', self.label)
         if self.filesystem is not None:
             modified_files, new_files, deleted_files = \
                 self.filesystem.external_changes()
-            logger.debug('Files externally added: %s', new_files)
-            logger.debug('Files externally modified: %s', modified_files)
-            logger.debug('Files externally deleted: %s', deleted_files)
+            logger.debug2('Files externally added: %s', new_files)
+            logger.debug2('Files externally modified: %s', modified_files)
+            logger.debug2('Files externally deleted: %s', deleted_files)
             if len(modified_files) > 0 or len(deleted_files) > 0:
                 self.reload_all_data()
             else:
@@ -2140,14 +2163,17 @@ class DataSheet:
             live_form_folders = self.filesystem.listdir(top_folder)
             for form_id_str in live_form_folders:
                 live_form_folder = op.join(top_folder, form_id_str)
-                if self.filesystem.exists(op.join(live_form_folder, 'TO_DELETE')):
+                if self.filesystem.exists(op.join(live_form_folder,
+                                                  'TO_DELETE')):
                     # TODO: utest
-                    logger.debug('Live form %s marked as to remove', form_id_str)
+                    logger.debug('Live form %s marked as to remove',
+                                 form_id_str)
                     try:
                         self.filesystem.rmtree(live_form_folder)
                     except Exception as e:
                         logger.error('Error while deleting live form '\
-                                     'folder %s: %s', live_form_folder, repr(e))
+                                     'folder %s: %s', live_form_folder,
+                                     repr(e))
                     continue
                 saved_entries = defaultdict(dict)
                 for entry_fn in self.filesystem.listdir(live_form_folder):
@@ -2409,11 +2435,11 @@ class DataSheet:
         if view_df is None:
             view_df = self.views[view_label](self.df)
             if view_df is not None:
-                logger.debug('Sheet %s: Update cached view "%s". Shape%s. '\
+                logger.debug('Sheet %s: Update cached view "%s". Shape %s. '\
                              'Columns: %s', self.label, view_label, view_df.shape,
                              ', '.join(view_df.columns))
                 if '__fn__' in view_df.columns:
-                    view_df.drop(columns=['__fn__'], inplace=True)
+                    view_df = view_df.drop(columns=['__fn__'])
             else:
                 logger.debug('Update cached view "%s": None', view_label)
             if for_display and self.plugin.reset_view_index_for_display():
@@ -2567,7 +2593,8 @@ class DataSheet:
                               conflict_idx=entry_idx[2])
 
     def _new_form(self, submission, entry_dict=None, entry_id=None,
-                  form_id=None, update_idx=np.int64(0), conflict_idx=np.int64(0)):
+                  form_id=None, update_idx=np.int64(0),
+                  conflict_idx=np.int64(0)):
         if self.form_master is None:
             raise NoFormMasterError()
 
@@ -2576,6 +2603,7 @@ class DataSheet:
 
         logger.debug2('Sheet %s: fork from master', self.label)
         form = self.form_master.new()
+        form.set_user(self.user)
         forms_folder = self.get_live_forms_folder()
 
         if form_id is None:
@@ -2734,17 +2762,22 @@ class DataSheet:
         entry_df[other_cols] = entry_df[other_cols].fillna(pd.NA)
         entry_df[datetime_cols] = entry_df[datetime_cols].fillna(pd.NaT)
 
-        logger.debug('Sheet %s: entry_df to add: index=%s, cols=%s',
+        logger.debug('Sheet %s: process addition of entry_df: index=%s, cols=%s',
                      self.label, entry_df.index.name,
                      ','.join(entry_df.columns))
-
 
         # Inject entry in current dataframe
         # Index of entry may change because of conflicting entries
         entry_idx = process_entry_df(entry_df)
 
+        logger.debug('Sheet %s: process saving of entry_df: index=%s, cols=%s',
+                     self.label, entry_df.index.name,
+                     ','.join(entry_df.columns))
         # Save to file if needed
         fn = save_func(entry_df)
+        logger.debug('Sheet %s: saved entry_df (index=%s) to fn: %s',
+                     self.label, entry_df.index.name, fn)
+
         if fn is not None:
             self.df.loc[entry_idx, '__fn__'] = fn
 
@@ -2982,7 +3015,7 @@ class TestDataSheet(unittest.TestCase):
                          'vtype' : 'text'},
                         {'keys' : {'Date': None},
                          'vtype' : 'date'},
-                        {'keys' : {'Timestamp': None},
+                        {'keys' : {'Timestamp_Submission': None},
                          'vtype' :'datetime',
                          'generator' : 'timestamp_submission', }
                     ]
@@ -3000,9 +3033,9 @@ class TestDataSheet(unittest.TestCase):
             ('Flag', [True, False, None]),
             ('Comment', ['a\tb', '"', '""']),
             ('Date', [date(2020,1,2), date(2020,1,21), date(2020,10,2)]),
-            ('Timestamp', [datetime(2020,1,2,13,37),
-                           datetime(2021,2,2,13,37),
-                           datetime(2020,1,5,13,37)]),
+            ('Timestamp_Submission', [datetime(2020,1,2,13,37),
+                                      datetime(2021,2,2,13,37),
+                                      datetime(2020,1,5,13,37)]),
         ])).set_index(['__entry_id__', '__update_idx__', '__conflict_idx__'])
 
         self.sheet_id = 'Participant_info'
@@ -3013,7 +3046,7 @@ class TestDataSheet(unittest.TestCase):
                  FormItem(keys={'Age':None},
                           vtype='int', supported_languages={'French'},
                           default_language='French'),
-                 FormItem(keys={'Timestamp':None},
+                 FormItem(keys={'Timestamp_Creation':None},
                           vtype='datetime', generator='timestamp_creation',
                           supported_languages={'French'},
                           default_language='French')]
@@ -3122,6 +3155,35 @@ class TestDataSheet(unittest.TestCase):
                            datetime(2020,1,5,13,37)]),
         ]))
         self.assertFalse(df_weak_equal(df1, df2))
+
+    def test_form_user(self):
+        form_def = {
+            'title' : {'French' : 'Un formulaire'},
+            'default_language' : 'French',
+            'supported_languages' : {'French'},
+            'sections' : {
+                'section1' : {
+                    'items' : [
+                        {'keys' : {'User' :
+                                   {'French':'Utilisateur'}},
+                         'vtype' : 'user_name'
+                        },
+                    ]
+                }
+            }
+        }
+        sheet_id = 'user_sheet'
+        user = 'me'
+        sheet_folder = op.join(self.tmp_dir, sheet_id)
+        os.makedirs(sheet_folder)
+        filesystem = LocalFileSystem(sheet_folder)
+
+        form_master = Form.from_dict(form_def)
+        self.assertIsNone(form_master['section1']['User'].get_value())
+        sheet = DataSheet(sheet_id, form_master, None, user, filesystem)
+        form = sheet.form_new_entry()
+        self.assertIsNone(form_master['section1']['User'].get_value())
+        self.assertEqual(form['section1']['User'].get_value(), user)
 
     def test_inconsistencies(self):
         form_def = {
@@ -3450,7 +3512,8 @@ class TestDataSheet(unittest.TestCase):
                          entry['Participant_ID'])
         self.assertEqual(last_entry_dict['Phone_Number'],
                          entry['Phone_Number'])
-        self.assertGreater(last_entry_dict['Timestamp'], ts_before_submit)
+        self.assertGreater(last_entry_dict['Timestamp_Submission'],
+                           ts_before_submit)
         self.assertEqual(watched_entry[0].to_dict('record')[0]['Age'],
                          entry['Age'])
 
@@ -3506,7 +3569,8 @@ class TestDataSheet(unittest.TestCase):
         self.assertEqual(last_entry_dict['Participant_ID'], previous_pid)
         self.assertEqual(last_entry_dict['Phone_Number'],
                          entry['Phone_Number'])
-        self.assertGreater(last_entry_dict['Timestamp'], ts_before_submit)
+        self.assertGreater(last_entry_dict['Timestamp_Submission'],
+                           ts_before_submit)
         self.assertEqual(watched_entry[0].to_dict('record')[0]['Age'],
                          entry['Age'])
 
@@ -3639,7 +3703,8 @@ class TestDataSheet(unittest.TestCase):
         self.assertEqual(watched_entry[0].loc[entry_idx_to_modify,
                                               'Phone_Number'],
                          entry['Phone_Number'])
-        self.assertGreater(watched_entry[0].loc[entry_idx_to_modify, 'Timestamp'],
+        self.assertGreater(watched_entry[0].loc[entry_idx_to_modify,
+                                                'Timestamp_Submission'],
                            ts_before_submit)
 
     def test_set_entry_file_update(self):
@@ -4340,7 +4405,7 @@ class WorkBook:
         return {u:UserRole[r] for u,r in user_roles.items()}
 
     def refresh_all_data(self):
-        logger.debug('Workbook %s: Refresh data', self.label)
+        logger.debug2('Workbook %s: Refresh data', self.label)
         for sheet in self.sheets.values():
             sheet.refresh_data()
 
@@ -4969,7 +5034,7 @@ class TestWorkBook(unittest.TestCase):
                           vtype='text', supported_languages={'French'},
                           default_language='French',
                           allow_empty=False),
-                 FormItem(keys={'Timestamp':None},
+                 FormItem(keys={'Timestamp_Submission':None},
                           vtype='datetime', generator='timestamp_submission',
                           supported_languages={'French'},
                           default_language='French')]
@@ -5069,7 +5134,7 @@ class TestWorkBook(unittest.TestCase):
         form.set_values_from_entry({'Participant_ID' : pid,
                                     'Planned' : True,
                                     'Outcome' : 'FAIL',
-                                    'Timestamp' : datetime.now()})
+                                    'Timestamp_Submission' : datetime.now()})
         form.submit()
         dashboard_df = sh_dashboard.get_df_view()
         self.assertNotIn(pid, dashboard_df.index)
@@ -5083,7 +5148,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.startswith(sh_eval.label))
         form.set_values_from_entry({'Planned' : True,
                                     'Outcome' : 'FAIL',
-                                    'Timestamp' : datetime.now()})
+                                    'Timestamp_Submission' : datetime.now()})
         form.submit()
         dashboard_df = sh_dashboard.get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_FAIL')
@@ -5096,7 +5161,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.startswith(sh_eval.label))
         form.set_values_from_entry({'Planned' : True,
                                     'Outcome' : 'OK',
-                                    'Timestamp' : datetime.now()})
+                                    'Timestamp_Submission' : datetime.now()})
         form.submit()
         dashboard_df = sh_dashboard.get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_OK')
@@ -5128,7 +5193,7 @@ class TestWorkBook(unittest.TestCase):
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002'],
                               'Study_Status' : ['ongoing', 'ongoing'],
                               'Staff' : ['TV', 'TV'],
-                              'Timestamp' : [datetime(2021,9,9,10,10),
+                              'Timestamp_Submission' : [datetime(2021,9,9,10,10),
                                              datetime(2021,9,9,10,10)]})
         items = [FormItem({'Participant_ID' :
                            {'French':'Code Participant'}},
@@ -5148,7 +5213,7 @@ class TestWorkBook(unittest.TestCase):
                               'drop_out' : {'French' : "Sorti.e de l'étude"},
                           },
                           allow_empty=False),
-                 FormItem(keys={'Timestamp' : None},
+                 FormItem(keys={'Timestamp_Submission' : None},
                           vtype='datetime',
                           generator='timestamp_submission',
                           supported_languages={'French'},
@@ -5175,7 +5240,7 @@ class TestWorkBook(unittest.TestCase):
                                    },
                           default_language='French',
                           allow_empty=False),
-                 FormItem(keys={'Timestamp' : None},
+                 FormItem(keys={'Timestamp_Submission' : None},
                           vtype='datetime',
                           generator='timestamp_submission',
                           supported_languages={'French'},
@@ -5375,7 +5440,7 @@ class TestWorkBook(unittest.TestCase):
                                   'error':None},
                          init_values={'Email_Status' : 'to_send'},
                          allow_empty=True),
-                 FormItem(keys={'Timestamp':None},
+                 FormItem(keys={'Timestamp_Submission':None},
                           vtype='datetime',
                           allow_empty=False,
                           supported_languages={'French'},
@@ -5412,7 +5477,7 @@ class TestWorkBook(unittest.TestCase):
                           choices={'done':None,
                                    'redo':None},
                           allow_empty=True),
-                 FormItem(keys={'Timestamp':None},
+                 FormItem(keys={'Timestamp_Submission':None},
                           vtype='datetime',
                           supported_languages={'French'},
                           default_language='French')]
@@ -5477,7 +5542,7 @@ class TestWorkBook(unittest.TestCase):
         ts = datetime(2021,9,10,10,10)
         form.set_values_from_entry({'Plan_Action' : 'assign_staff',
                                     'Staff' : 'Thomas Vincent',
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(df.loc[pid, 'Eval'], 'eval_not_done')
@@ -5497,7 +5562,7 @@ class TestWorkBook(unittest.TestCase):
                                     'Interview_Date' : idate,
                                     'Availability' : 'ignored',
                                     'Send_Email' : False,
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(df.loc[pid, 'Eval'], 'eval_scheduled')
@@ -5518,7 +5583,7 @@ class TestWorkBook(unittest.TestCase):
                                     'Availability' : 'parfois',
                                     'Callback_days' : 0,
                                     'Send_Email' : False,
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_not_done')
@@ -5536,7 +5601,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.startswith(plan_sheet_label))
         callback_nb_days = 7
         form.set_values_from_entry({'Callback_Days' : callback_nb_days,
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
@@ -5569,7 +5634,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Interview_Date' : idate,
                                     'Send_Email' : True,
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_email_pending')
@@ -5585,7 +5650,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Email_Status' : 'sent',
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
@@ -5604,7 +5669,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Email_Status' : 'error',
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
@@ -5625,7 +5690,7 @@ class TestWorkBook(unittest.TestCase):
         form.set_values_from_entry({'Session_Action' : 'do_session',
                                     'Staff' : 'Thomas Vincent',
                                     'Session_Status' : 'done',
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_ok')
@@ -5643,7 +5708,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.startswith('Eval'))
         form.set_values_from_entry({'Session_Action' : 'do_session',
                                     'Session_Status' : 'redo',
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
@@ -5661,7 +5726,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.startswith('Eval'))
         form.set_values_from_entry({'Session_Action' : 'cancel_session',
                                     'Staff' : 'Thomas Vincent',
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_cancelled')
@@ -5681,7 +5746,7 @@ class TestWorkBook(unittest.TestCase):
                                     'Staff' : 'Catherine-Alexandra Grégoire',
                                     'Send_Email' : True,
                                     'Email_Status' : 'to_send',
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
@@ -5767,7 +5832,7 @@ class TestWorkBook(unittest.TestCase):
                                    'error':None},
                           init_values={'Email_Status' : 'to_send'},
                           allow_empty=True),
-                 FormItem(keys={'Timestamp':None},
+                 FormItem(keys={'Timestamp_Submission':None},
                           vtype='datetime',
                           allow_empty=True,
                           supported_languages={'French'},
@@ -5792,7 +5857,7 @@ class TestWorkBook(unittest.TestCase):
                           default_language='French',
                           supported_languages={'French'},
                           allow_empty=False),
-                 FormItem({'Timestamp' : None},
+                 FormItem({'Timestamp_Submission' : None},
                           vtype='datetime',
                           default_language='French',
                           supported_languages={'French'},
@@ -5911,7 +5976,7 @@ class TestWorkBook(unittest.TestCase):
                                     'Email_Template' : 'Poll',
                                     'Email_Status' : 'sent',
                                     'Overdue_Days' : overdue_nb_days,
-                                    'Timestamp' : ts})
+                                    'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_sent')
@@ -6043,6 +6108,13 @@ class FormItem:
             'message invalid format' : 'Enter a text',
             'validate value type' : is_valid_html,
             },
+        'user_name' : {
+            'dtype_pd' : 'string',
+            'unformat' : lambda s : s,
+            'format' : lambda v : v,
+            'message invalid format' : 'Enter a user name',
+            'validate value type' : lambda v : isinstance(v, str),
+        },
          'int' : {
              'dtype_pd' : 'int',
              'unformat' : lambda s : int(s),
@@ -6092,13 +6164,13 @@ class FormItem:
     }
 
     GENERATORS = {
-        'uuid4' : lambda: uuid4().hex,
-        'uuid1' : lambda: uuid1().hex,
-        None : lambda: '',
+        'uuid4' : lambda ii: uuid4().hex,
+        'uuid1' : lambda ii: uuid1().hex,
+        None : lambda ii: '',
         'timestamp_creation' : \
-        lambda: FormItem.VTYPES['datetime']['format'](datetime.now()),
+        lambda ii: FormItem.VTYPES['datetime']['format'](ii.creation_date),
         'timestamp_submission' : \
-        lambda: FormItem.VTYPES['datetime']['format'](datetime.now()),
+        lambda ii: FormItem.VTYPES['datetime']['format'](datetime.now()),
     }
 
     def __init__(self, keys, default_language, supported_languages,
@@ -6177,6 +6249,10 @@ class FormItem:
         self.input_callback = None
 
         self.validity = None
+
+        self.user = None
+
+        self.creation_date = datetime.now()
         self.reset(force=True)
 
     def set_init_values(self, init_values):
@@ -6309,7 +6385,7 @@ class FormItem:
                    not self.generator.endswith('submission'):
                     logger.debug2('%s: Use generator %s for key %s',
                                  self, self.generator, key)
-                    self.set_input_str(FormItem.GENERATORS[self.generator](),
+                    self.set_input_str(FormItem.GENERATORS[self.generator](self),
                                        key, force=force)
                     # TODO utest that value is generated even if
                     # init value is given
@@ -6338,6 +6414,7 @@ class FormItem:
     def set_language(self, language):
         logger.debug2('Set %s as language for %s', language, self)
         self.tr.set_language(language)
+        self.notifier.notify('language_changed')
 
     def _set_validity(self, validity, message, key=None):
 
@@ -6369,6 +6446,7 @@ class FormItem:
                 choices_str = ', '.join(["'%s'" %c for c in current_choices])
                 logger.debug2('Value of %s not in choices (%s)', self,
                              choices_str)
+                # from IPython import embed; embed()
                 self._set_validity(False, 'Value must be one of "%s"' % \
                                    choices_str, key)
                 return
@@ -6480,10 +6558,19 @@ class FormItem:
         Apply submission generator if any and return all values
         as a dict of {key:value}
         """
-        if self.generator is not None and self.generator.endswith('submission'):
+        if self.generator is not None and \
+           (self.generator.endswith('submission') or \
+            self.generator == 'timestamp_creation'):
             for key in self.keys:
-                self.set_input_str(FormItem.GENERATORS[self.generator](), key)
+                self.set_input_str(FormItem.GENERATORS[self.generator](self), key)
+        elif self.vtype == 'user_name':
+            self.set_input_str(self.user)
         return self.get_items()
+
+    def set_user(self, user):
+        self.user = user
+        if self.vtype == 'user_name':
+            self.set_input_str(self.user)
 
     def set_input_str(self, s, key=None, use_callback=True,
                       force=False):
@@ -6525,8 +6612,9 @@ class TestForm(unittest.TestCase):
         self.df_ts = pd.DataFrame(OrderedDict([
             ('Participant_ID', ['CE0004', 'CE0004', 'CE0006']),
             ('Age', [22, 50, 24]),
-            ('Timestamp', [datetime(2020,1,2,13,37), datetime(2021,2,2,13,37),
-                           datetime(2020,1,5,13,37)])
+            ('Timestamp_Submission',
+             [datetime(2020,1,2,13,37), datetime(2021,2,2,13,37),
+              datetime(2020,1,5,13,37)])
         ]))
 
         logger.setLevel(logging.DEBUG)
@@ -8006,13 +8094,13 @@ class DataSheetModel(QtCore.QAbstractTableModel):
     def update_before_delete(self, entry_id):
         view = self.sheet.get_df_view()
         irow = view.index.get_loc(entry_id)
-        logger.debug('before_delete(%d) -> irow = %d',
+        logger.debug('before_delete(%s) -> irow = %d',
                      entry_id, irow)
         self.layoutAboutToBeChanged.emit()
         self.beginRemoveRows(QtCore.QModelIndex(), irow, irow)
 
     @QtCore.pyqtSlot()
-    def update_after_delete(self, deleted_entry_df):
+    def update_after_delete(self, entry_df):
         # TODO: proper callback to actual data change here
         self.endRemoveRows()
         self.layoutChanged.emit()
@@ -8178,17 +8266,36 @@ def make_item_input_widget(item_widget, item, key, key_label,
 
     return input_widget
 
+class refresh_text:
+    def __init__(self, item, item_tr_label, ui_label,
+                 hide_on_empty=True):
+        self.item = item
+        self.item_tr_label = item_tr_label
+        self.ui_label = ui_label
+        self.hide_on_empty = hide_on_empty
+    def __call__(self):
+        text = self.item.tr[self.item_tr_label]
+        self.ui_label.setText(text)
+        if  self.hide_on_empty and (text is None or len(text)==0):
+            self.ui_label.hide()
+        else:
+            self.ui_label.show()
+
 def make_item_widget(section_widget, item):
     item_widget = QtWidgets.QWidget(section_widget)
     _item_ui = ui.form_item_ui.Ui_Form()
     _item_ui.setupUi(item_widget)
-    _item_ui.title.setText(item.tr['title'])
-    description = item.tr['description']
-    # logger.debug('Set description %s', description)
-    if description is not None and len(description)>0:
-        _item_ui.description.setText(description)
-    else:
-        _item_ui.description.hide()
+
+    refresh_title = refresh_text(item, 'title', _item_ui.title)
+    refresh_title()
+    item.notifier.add_watcher('language_changed', refresh_title)
+
+    refresh_description = refresh_text(item, 'description',
+                                       _item_ui.description,
+                                       hide_on_empty=True)
+    refresh_description()
+    item.notifier.add_watcher('language_changed', refresh_description)
+
     _item_ui.label_invalid_message.hide()
     if isinstance(item, FormItem):
         invalidity_callback = text_connect(item.get_validity_message,
@@ -8200,7 +8307,8 @@ def make_item_widget(section_widget, item):
         if item.allow_None:
             _item_ui.required_label.hide()
         for key, key_label in item.keys.items():
-            input_widget = make_item_input_widget(item_widget, item, key, key_label,
+            input_widget = make_item_input_widget(item_widget, item, key,
+                                                  key_label,
                                                   item_is_single=len(item.keys)==1)
             _item_ui.input_layout.addWidget(input_widget)
             if not item.editable:
@@ -8553,46 +8661,57 @@ class PiccelApp(QtWidgets.QApplication):
         form.validate()
 
         #self.section_widget_stack = QtWidgets.QStackedWidget()
-        section_widgets_by_language = defaultdict(dict)
+        section_widgets = {}
         # self.current_section_widget = None
         self.item_labels = []
+        def make_section_widget(section_label, section):
+            section_widget = QtWidgets.QWidget(form_widget)
+            section_widget.setObjectName("section_widget_" + section_label + \
+                                         section.tr.language)
+            _section_ui = ui.section_ui.Ui_Form()
+            _section_ui.setupUi(section_widget)
+            section_title = section.tr['title']
+            if section_title is not None and len(section_title)>0:
+                _section_ui.title_label.setText(section_title)
+            else:
+                _section_ui.frame_title.hide()
+            for item in section.items:
+                if self.logic.workbook.user_role >= UserRole.ADMIN or \
+                   ((len(item.keys)==0 or \
+                     not next(iter(item.keys.keys())).startswith('__')) and \
+                    ((not item.hidden) or \
+                     self.logic.workbook.user_role >= UserRole.MANAGER)):
+                    item_widget = make_item_widget(section_widget, item)
+                    _section_ui.verticalLayout.addWidget(item_widget)
+            return section_widget
+
         def set_section_ui(section_label, section):
             #if self.current_section_widget is not None:
             #    self.current_section_widget.hide()
             logger.debug('Set section widget for %s, language: %s',
                          section_label, section.tr.language)
-            section_widgets = section_widgets_by_language[section.tr.language]
             if section_label not in section_widgets:
-                section_widget = QtWidgets.QWidget(form_widget)
-                _section_ui = ui.section_ui.Ui_Form()
-                _section_ui.setupUi(section_widget)
-                section_title = section.tr['title']
-                if section_title is not None and len(section_title)>0:
-                    _section_ui.title_label.setText(section_title)
-                else:
-                    _section_ui.frame_title.hide()
-                for item in section.items:
-                    if self.logic.workbook.user_role >= UserRole.ADMIN or \
-                       ((len(item.keys)==0 or \
-                         not next(iter(item.keys.keys())).startswith('__')) and \
-                        ((not item.hidden) or \
-                         self.logic.workbook.user_role >= UserRole.MANAGER)):
-                        item_widget = make_item_widget(section_widget, item)
-                        _section_ui.verticalLayout.addWidget(item_widget)
-                _form_ui.sections_stack.addWidget(section_widget)
+                section_widget = make_section_widget(section_label, section)
                 section_widgets[section_label] = section_widget
+                _form_ui.scroll_section_content_layout.addWidget(section_widget,
+                                                                 0,
+                                                                 QtCore.Qt.AlignTop)
             else:
                 section_widget = section_widgets[section_label]
+            logger.debug('set_section_ui, show widget of %s, ',
+                         section_label)
+            section_widget.show()
 
-            _form_ui.sections_stack.setCurrentWidget(section_widget)
-
+            #_form_ui.sections_stack.setCurrentWidget(section_widget)
             #_form_ui.scroll_section.setWidget(section_widget)
-                #
-                # self.stacked.addWidget(self.lineedit)
+            #
+            # self.stacked.addWidget(self.lineedit)
             # except RuntimeError:
             #     from IPython import embed; embed()
             #self.current_section_widget = section_widget
             #self.current_section_widget.show()
+
+            # End of def set_section_ui
 
         set_section_ui(form.current_section_name, form.current_section)
         tab_idx = tab_widget.insertTab(tab_idx, form_widget, tab_name)
@@ -8618,9 +8737,10 @@ class PiccelApp(QtWidgets.QApplication):
                     self.language = language
                 def __call__(self, state):
                     if state:
-                        form.current_section.set_language(self.language)
-                        set_section_ui(form.current_section_name,
-                                       form.current_section)
+                        logger.debug('Process language toggle to %s, '\
+                                     'current section: %s ', self.language,
+                                     form.current_section_name)
+                        form.set_language(self.language)
             radio_button.toggled.connect(ChoiceProcess(language))
             if language == form.current_section.tr.language:
                 radio_language_group.button(idx).setChecked(True)
@@ -8631,8 +8751,12 @@ class PiccelApp(QtWidgets.QApplication):
             # _form_ui.section_widget = \
             #     dict_lazy_setdefault(sections, form.previous_section(),
             #                          gen_section)
+            logger.debug('Prev_sec, hide widget of %s, ',
+                         form.current_section_name)
+            section_widgets[form.current_section_name].hide()
             set_section_ui(form.previous_section(),
                            form.to_previous_section())
+            _form_ui.scroll_section.ensureVisible(0, 0)
         _form_ui.button_previous.clicked.connect(prev_sec)
 
         def next_sec():
@@ -8642,8 +8766,12 @@ class PiccelApp(QtWidgets.QApplication):
             # _form_ui.section_widget = \
             #     dict_lazy_setdefault(sections, form.next_section(),
             #                          gen_section)
+            logger.debug('Next_sec, hide widget of %s',
+                         form.current_section_name)
+            section_widgets[form.current_section_name].hide()
             set_section_ui(form.next_section(),
                            form.to_next_section())
+            _form_ui.scroll_section.ensureVisible(0, 0)
 
         _form_ui.button_next.clicked.connect(next_sec)
 
@@ -8834,4 +8962,3 @@ class PiccelApp(QtWidgets.QApplication):
         logger.debug('Current logic state: %s',
                      PiccelLogic.STATES[self.logic.state])
         self.current_widget = self.screen_show[self.logic.state]()
-
