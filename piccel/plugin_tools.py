@@ -831,7 +831,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
     if interview_df_fresher.shape[0] > 0:
         try:
             map_set(dashboard_df, column_status,
-                    {'%s_ok' % interview_tag:
+                    {'%s_done' % interview_tag:
                      And((interview_df_fresher, 'Session_Action', ['do_session']),
                          (interview_df_fresher, 'Session_Status', ['done'])),
                      '%s_redo' % interview_tag:

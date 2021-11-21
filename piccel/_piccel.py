@@ -330,6 +330,8 @@ class FormJsonHook:
             parsed_dict[k] = v
         return parsed_dict
 
+class InconsistentForms(Exception): pass
+
 class Form:
     """
 
@@ -539,28 +541,32 @@ function snakeCaseToCamelCase(s) {
                              section_name, section.next_section_definition)
 
             for item in section.items:
-                for key in item.keys:
-                    self.key_to_items[key].append(item)
-                if item.freeze_on_update:
-                    self.to_freeze_on_update.add(item)
                 if item.unique:
                     assert(len(item.keys)==1) # no multiindex yet
-                    self.unique_keys.add(key)
                     self.unique_items.append(item)
-                if item.vtype == 'date':
-                    self.date_keys.add(key)
-                elif item.vtype == 'datetime':
-                    self.datetime_keys.add(key)
-                elif item.vtype == 'int':
-                    self.int_keys.add(key)
-                elif item.vtype == 'float':
-                    self.float_keys.add(key)
-                elif item.vtype == 'text':
-                    self.text_keys.add(key)
-                elif item.vtype == 'boolean':
-                    self.boolean_keys.add(key)
-                elif item.vtype == 'user_name':
+                if item.freeze_on_update:
+                    self.to_freeze_on_update.add(item)
+                if item.vtype == 'user_name':
                     self.user_items.append(item)
+
+                for key in item.keys:
+                    self.key_to_items[key].append(item)
+
+                    if item.unique:
+                        self.unique_keys.add(key)
+
+                    if item.vtype == 'date':
+                        self.date_keys.add(key)
+                    elif item.vtype == 'datetime':
+                        self.datetime_keys.add(key)
+                    elif item.vtype == 'int':
+                        self.int_keys.add(key)
+                    elif item.vtype == 'float':
+                        self.float_keys.add(key)
+                    elif item.vtype == 'text':
+                        self.text_keys.add(key)
+                    elif item.vtype == 'boolean':
+                        self.boolean_keys.add(key)
 
         self.sheet = None
 
@@ -1281,6 +1287,7 @@ class FormSection:
         self.tr.set_language(language)
         for item in self.items:
             item.set_language(language)
+        self.notifier.notify('language_changed')
 
     def __getitem__(self, key):
         return self.key_to_items[key]
@@ -1827,12 +1834,13 @@ class DataSheet:
 
     def __init__(self, label, form_master=None, df=None, user=None,
                  filesystem=None, live_forms=None, watchers=None,
-                 workbook=None):
+                 workbook=None, properties=None):
         """
         filesystem.root is the sheet-specific folder where to save all data
         and pending forms
         """
         self.label = self.validate_sheet_label(label)
+        self.set_properties(properties if properties is not None else {})
 
         if df is not None and form_master is None:
             raise Exception('Form master cannot be None if df is given')
@@ -1920,9 +1928,10 @@ class DataSheet:
         form_master = DataSheet.load_form_master(filesystem)
         logger.debug('Create sheet %s, using filesystem(root=%s)',
                      label, filesystem.full_path(filesystem.root_folder))
+        sheet_properties = DataSheet.load_properties_from_file(filesystem)
         sheet = DataSheet(label, form_master=form_master, df=None, user=user,
                           filesystem=filesystem, watchers=watchers,
-                          workbook=workbook)
+                          workbook=workbook, properties=sheet_properties)
         sheet.load_plugin()
         return sheet
 
@@ -1975,6 +1984,32 @@ class DataSheet:
             self.set_plugin(plugin_module.CustomSheetPlugin(self))
         else:
             logger.info('No plugin to load for sheet %s', self.label)
+
+    @staticmethod
+    def load_properties_from_file(filesystem):
+        property_fn = 'properties.json'
+        properties = {'access_level' : UserRole.VIEWER}
+        if filesystem.exists(property_fn):
+            prop = json.loads(filesystem.load(property_fn))
+            prop['access_level'] = UserRole[prop.get('access_level', 'VIEWER')]
+            properties.update(prop)
+        else:
+            logger.debug('No property file to load from %s',
+                         filesystem.root_folder)
+        return properties
+
+    def set_properties(self, properties):
+        self.access_level = properties.get('access_level', UserRole.VIEWER)
+
+    def save_properties(self, overwrite=False):
+        if self.filesystem is None:
+            raise Exception('No filesystem available to save properties '\
+                            'for sheet %s', self.label)
+        logger.info('Save properties of sheet %s' % self.label)
+        self.filesystem.save('properties.json',
+                             json.dumps({'access_level' :
+                                         self.access_level.name}),
+                             overwrite=overwrite)
 
     @staticmethod
     def load_form_master(filesystem):
@@ -2124,6 +2159,7 @@ class DataSheet:
             self.filesystem.makedirs('data')
 
         self.save_form_master()
+        self.save_properties()
         self.save_all_data()
         for form_id, form in self.live_forms.items():
             for section_name, section in form.sections.items():
@@ -3066,7 +3102,8 @@ class TestDataSheet(unittest.TestCase):
         self.sheet_ts = DataSheet(self.sheet_id,
                                   Form.from_dict(self.form_def_ts_data),
                                   self.data_df_ts_data,
-                                  self.user, self.filesystem)
+                                  self.user, self.filesystem,
+                                  properties={'access_level' : UserRole.MANAGER})
         self.sheet_ts.save()
         logger.debug('--------------------')
         logger.debug('utest setUp finished')
@@ -3155,6 +3192,10 @@ class TestDataSheet(unittest.TestCase):
                            datetime(2020,1,5,13,37)]),
         ]))
         self.assertFalse(df_weak_equal(df1, df2))
+
+    def test_properties(self):
+        self.assertEqual(self.sheet_ts.access_level, UserRole.MANAGER)
+        self.assertEqual(self.sheet.access_level, UserRole.VIEWER)
 
     def test_form_user(self):
         form_def = {
@@ -4375,14 +4416,14 @@ class WorkBook:
         for linked_wb, sheet_filter in self.linked_books:
             linked_wb.decrypt(access_pwd)
             linked_user_roles = linked_wb._load_user_roles()
-            for user, role in self.user_roles.items():
+            for user, role in self.user_roles.copy().items():
                 if user in linked_user_roles:
                     if linked_user_roles[user] > role:
                         logger.info('Use higher role %s from linked workbook %s'\
                                     'instead of role %s for user %s',
-                                    linked_role,
-                                    linked_workbook_fn, role, user)
-                        self.user_roles[user] = linked_role
+                                    linked_user_roles[user],
+                                    linked_wb.label, role, user)
+                        self.user_roles[user] = linked_user_roles[user]
                 else:
                     raise UnknownUser('%s in %s', linked_wb.label)
         return True
@@ -4458,7 +4499,7 @@ class WorkBook:
         WorkBook class.
         If a user has write access to the workbook files and has the data access
         password, then they can modify workbook files as they want.
-        There is no mechanism that strictly proctects admin operations.
+        There is no mechanism that strictly protects admin operations.
 
         Write access must be handled by the file system.
         """
@@ -5693,7 +5734,7 @@ class TestWorkBook(unittest.TestCase):
                                     'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_ok')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_done')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
@@ -6413,7 +6454,10 @@ class FormItem:
 
     def set_language(self, language):
         logger.debug2('Set %s as language for %s', language, self)
+        values = self.get_items(error_when_invalid=False)
         self.tr.set_language(language)
+        for k,v in values.items():
+            self.set_value(k, v, force=True)
         self.notifier.notify('language_changed')
 
     def _set_validity(self, validity, message, key=None):
@@ -6513,7 +6557,7 @@ class FormItem:
                          else '')
         self.set_input_str(value_str, key, force=force)
 
-    def get_value(self, key=None):
+    def get_value(self, key=None, error_when_invalid=True):
         """ Return the current value, without using submission generator """
         if len(self.keys) == 0:
             return None
@@ -6522,7 +6566,7 @@ class FormItem:
             assert(len(self.keys)==1)
             key = next(iter(self.keys))
 
-        if not self.validity:
+        if not self.validity and error_when_invalid:
             raise InvalidValue("%s: %s" %(key,self.validity_message))
 
         value_str = self.values_str[key]
@@ -6532,9 +6576,8 @@ class FormItem:
 
         return self.unformat(value_str) if len(value_str)>0 else None
 
-    def get_items(self):
-        return {k : self.get_value(k) for k in self.keys}
-
+    def get_items(self, error_when_invalid=True):
+        return {k : self.get_value(k, error_when_invalid) for k in self.keys}
 
     def split_qdatetime_str(self, key):
         vdate = None
@@ -8050,6 +8093,11 @@ class DataSheetModel(QtCore.QAbstractTableModel):
             value_str = str(value) if not pd.isna(value) else ''
             if role == QtCore.Qt.DisplayRole:
                 return value_str
+            if role == QtCore.Qt.TextAlignmentRole:
+                if index.column()==0:
+                    return QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+                else:
+                    return QtCore.Qt.AlignCenter
             else:
                 if role == QtCore.Qt.BackgroundRole:
                     validity = (self.sheet.view_validity(for_display=True)
@@ -8165,7 +8213,11 @@ def make_item_input_widget(item_widget, item, key, key_label,
         # Single line input field
         _input_ui = ui.item_single_line_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
-        _input_ui.label_key.setText(item.tr[key])
+        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
+        refresh_label_key()
+        if not item_is_single:
+            item.notifier.add_watcher('language_changed', refresh_label_key)
+        #_input_ui.label_key.setText(item.tr[key])
         _input_ui.value_field.setText(init_value)
         callback = text_connect(_input_ui.value_field.text, item.set_input_str)
         _input_ui.value_field.editingFinished.connect(callback)
@@ -8174,14 +8226,19 @@ def make_item_input_widget(item_widget, item, key, key_label,
         # Multi line input field
         _input_ui = ui.item_text_multi_line_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
-        _input_ui.label_key.setText(item.tr[key])
+        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
+        refresh_label_key()
+        item.notifier.add_watcher('language_changed', refresh_label_key)
         _input_ui.value_field.setPlainText(init_value)
-        callback = text_connect(_input_ui.value_field.toPlainText, item.set_input_str)
+        callback = text_connect(_input_ui.value_field.toPlainText,
+                                item.set_input_str)
         _input_ui.value_field.editingFinished.connect(callback)
     elif (item.vtype == 'boolean' and not item_is_single):
         _input_ui = ui.item_boolean_checkboxes_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
-        _input_ui.check_box.setText(item.tr[key])
+        refresh_label_key = refresh_text(item, key, _input_ui.check_box)
+        refresh_label_key()
+        item.notifier.add_watcher('language_changed', refresh_label_key)
         _input_ui.check_box.toggled.connect(lambda b: item.set_input_str('%s'%b))
         if init_value != '':
             _input_ui.check_box.setChecked(item.get_value())
@@ -8190,23 +8247,29 @@ def make_item_input_widget(item_widget, item, key, key_label,
         # Radio buttons
         _input_ui = ui.item_choice_radio_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
-        _input_ui.label_key.setText(item.tr[key])
+        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
+        refresh_label_key()
+        if not item_is_single:
+            item.notifier.add_watcher('language_changed', refresh_label_key)
+
         radio_group = QtWidgets.QButtonGroup(input_widget)
         for idx, choice in enumerate(item.choices.keys()):
-            txt = item.tr[choice]
             frame = _input_ui.radio_frame
-            radio_button = QtWidgets.QRadioButton(txt, frame)
+            radio_button = QtWidgets.QRadioButton(frame)
+            refresh_radio_text = refresh_text(item, choice, radio_button)
+            refresh_radio_text()
+            item.notifier.add_watcher('language_changed', refresh_radio_text)
             radio_button.setObjectName("radio_button_"+choice)
             _input_ui.radio_layout.addWidget(radio_button, idx)
             radio_group.addButton(radio_button, idx)
             class ChoiceProcess:
-                def __init__(self, item, choice):
+                def __init__(self, item, choice_button):
                     self.item = item
-                    self.choice = choice
+                    self.choice_button = choice_button
                 def __call__(self, state):
                     if state:
-                        self.item.set_input_str(self.choice)
-            radio_button.toggled.connect(ChoiceProcess(item, txt))
+                        self.item.set_input_str(self.choice_button.text())
+            radio_button.toggled.connect(ChoiceProcess(item, radio_button))
             # if item.vtype == 'boolean':
             #     from IPython import embed; embed()
             if item.is_valid() and item.value_to_str() == choice:
@@ -8228,7 +8291,9 @@ def make_item_input_widget(item_widget, item, key, key_label,
         # Date/Time input
         _input_ui = ui.item_datetime_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
-        _input_ui.label_key.setText(item.tr[key])
+        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
+        refresh_label_key()
+        item.notifier.add_watcher('language_changed', refresh_label_key)
         date_str, date_fmt, hour, mins = item.split_qdatetime_str(key)
 
         if date_str is not None:
@@ -8670,11 +8735,11 @@ class PiccelApp(QtWidgets.QApplication):
                                          section.tr.language)
             _section_ui = ui.section_ui.Ui_Form()
             _section_ui.setupUi(section_widget)
-            section_title = section.tr['title']
-            if section_title is not None and len(section_title)>0:
-                _section_ui.title_label.setText(section_title)
-            else:
-                _section_ui.frame_title.hide()
+            refresh_title = refresh_text(section, 'title', _section_ui.title_label,
+                                         hide_on_empty=True)
+            refresh_title()
+            section.notifier.add_watcher('language_changed', refresh_title)
+
             for item in section.items:
                 if self.logic.workbook.user_role >= UserRole.ADMIN or \
                    ((len(item.keys)==0 or \
@@ -8843,7 +8908,7 @@ class PiccelApp(QtWidgets.QApplication):
             sh.notifier.add_watcher('clear_data', model.update_after_clear)
 
             _data_sheet_ui.tableView.setModel(model)
-            _data_sheet_ui.tableView.horizontalHeader().setMaximumSectionSize(500) # TODO expose param
+            _data_sheet_ui.tableView.horizontalHeader().setMaximumSectionSize(700) # TODO expose param
             _data_sheet_ui.tableView.resizeColumnsToContents()
 
             def f_cell_action(idx):
@@ -8948,9 +9013,12 @@ class PiccelApp(QtWidgets.QApplication):
             # TODO: load pending forms
             # TODO: attach file change watcher to datasheet -> trigger refresh when change
             for sheet_name, sheet in self.logic.workbook.sheets.items():
-                logger.info('Load sheet %s in UI', sheet_name)
-                make_tab_sheet(sheet_name, sheet)
-
+                if self.logic.workbook.user_role >= sheet.access_level:
+                    logger.info('Load sheet %s in UI', sheet_name)
+                    make_tab_sheet(sheet_name, sheet)
+                else:
+                    logger.info('Sheet %s not loaded in UI because user role %s < %s',
+                                sheet_name, self.logic.workbook.user_role, sheet.access_level)
         self.workbook_screen.show()
         return self.workbook_screen
 
