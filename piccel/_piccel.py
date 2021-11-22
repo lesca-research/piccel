@@ -2049,7 +2049,7 @@ class DataSheet:
                 logger.debug('Available data files for sheet %s:\n%s',
                              self.label, '\n'.join(data_bfns))
             if len(data_bfns) > 0:
-                self.df = None
+                self.df.drop(self.df.index, inplace=True)
                 self.notifier.notify('cleared_data')
                 # Associated view will be cleared
                 # Expect watchers to react
@@ -2904,10 +2904,7 @@ class DataSheet:
             logger.debug2('Empty entry not appended to sheet %s', self.label)
             return None
 
-        if self.df is None:
-            self.df = entry_df.copy()
-        else:
-            self.df = self.df.append(entry_df)
+        self.df = self.df.append(entry_df)
         entry_index = self.fix_conflicting_entries(index_to_track=entry_df.index[0])
         logger.debug2('Entry has been appended to sheet %s', self.label)
         logger.debug2('Resulting df has columns: %s)', ','.join(self.df.columns))
@@ -8421,6 +8418,7 @@ class PiccelApp(QtWidgets.QApplication):
                  role_pwd=None, cfg_fns=None, refresh_rate_ms=0):
         super(PiccelApp, self).__init__(argv)
 
+        self.setStyle('Fusion')
         Hints.preload(self)
 
         self.refresh_rate_ms = refresh_rate_ms
