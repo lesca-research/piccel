@@ -281,6 +281,12 @@ class SectionNotFound(Exception): pass
 class InvalidSectionMove(Exception): pass
 class BadLabelFormat(Exception): pass
 
+class UserRole(IntEnum):
+    ADMIN = 3
+    MANAGER = 2
+    EDITOR = 1
+    VIEWER = 0
+
 def nexts(l):
     """
     ASSUME: l has unique elements
@@ -652,11 +658,12 @@ function snakeCaseToCamelCase(s) {
     def first_section(self):
         return next(iter(self.sections))
 
-    def _prepend(self, key, value, vtype, hidden=True, editable=False):
+    def _prepend(self, key, value, vtype, access_level=UserRole.ADMIN,
+                 editable=False):
         section0 = next(iter(self.sections.values()))
         item = FormItem({key:None}, section0.tr.language,
                         section0.tr.supported_languages, vtype=vtype,
-                        hidden=hidden, editable=editable,
+                        access_level=access_level, editable=editable,
                         init_values={key:value})
         section0.add_item(item, position=0, watch_validity=False)
         self.key_to_items[key].append(item)
@@ -3103,7 +3110,7 @@ class TestDataSheet(unittest.TestCase):
                                   Form.from_dict(self.form_def_ts_data),
                                   self.data_df_ts_data,
                                   self.user, self.filesystem,
-                                  properties={'access_level' : UserRole.MANAGER})
+                                  properties={'access_level':UserRole.MANAGER})
         self.sheet_ts.save()
         logger.debug('--------------------')
         logger.debug('utest setUp finished')
@@ -4197,13 +4204,6 @@ class check_role(object):
             else:
                 return func(*args, **kwargs)
         return _check
-
-
-class UserRole(IntEnum):
-    ADMIN = 3
-    MANAGER = 2
-    EDITOR = 1
-    VIEWER = 0
 
 class AnyMatch:
     def __init__(self):
@@ -6112,18 +6112,6 @@ def is_valid_html(html):
             html_ok = False
     return html_ok
 
-
-# class FormItemLabel:
-#     def __init__(self, default_language, supported_languages,
-#                  title=None, description='', hidden=False, nb_lines=1):
-
-#         self.tr = Translator(default_language=default_language,
-#                              supported_languages=supported_languages)
-#         self.tr.register('title', title)
-#         self.tr.register('description', description)
-#         self.hidden = hidden
-#         self.nb_lines = nb_lines
-
 class FormItem:
     """
     Validate and process and input entries, all having the same type.
@@ -6219,7 +6207,8 @@ class FormItem:
                  regexp='[\s\S]*', regexp_invalid_message='',
                  allow_empty=True, choices=None, other_choice_label=None,
                  unique=False, unique_view=None, generator=None,
-                 hidden=False, editable=True, freeze_on_update=False,
+                 hidden=None, access_level=UserRole.VIEWER,
+                 editable=True, freeze_on_update=False,
                  number_interval=None, nb_lines=1, watchers=None):
         """
         watchers : dict(event : [callables])
@@ -6280,7 +6269,16 @@ class FormItem:
         self.freeze_on_update = freeze_on_update
         self.set_editable(editable)
 
-        self.hidden = hidden
+        self.access_level = (access_level if isinstance(access_level, UserRole) \
+                             else UserRole[access_level])
+        if hidden is not None:
+            logger.warning('hidden parameter of FormItem is deprecated.'
+                           'Use access_level=UserRole instead.')
+            if hidden:
+                self.access_level = UserRole.MANAGER
+            else:
+                self.access_level = UserRole.VIEWER
+
         self.nb_lines = nb_lines
 
         self.set_init_values(init_values)
@@ -6403,7 +6401,7 @@ class FormItem:
                 'init_values' : self.init_values,
                 'unique' : self.unique,
                 'generator' : self.generator,
-                'hidden' : self.hidden,
+                'access_level' : self.access_level.name,
                 'editable' : self.editable,
                 'freeze_on_update' : self.freeze_on_update,
                 # TODO: resolve from number_interval:
@@ -8741,11 +8739,7 @@ class PiccelApp(QtWidgets.QApplication):
             section.notifier.add_watcher('language_changed', refresh_title)
 
             for item in section.items:
-                if self.logic.workbook.user_role >= UserRole.ADMIN or \
-                   ((len(item.keys)==0 or \
-                     not next(iter(item.keys.keys())).startswith('__')) and \
-                    ((not item.hidden) or \
-                     self.logic.workbook.user_role >= UserRole.MANAGER)):
+                if self.logic.workbook.user_role >= item.access_level:
                     item_widget = make_item_widget(section_widget, item)
                     _section_ui.verticalLayout.addWidget(item_widget)
             return section_widget
