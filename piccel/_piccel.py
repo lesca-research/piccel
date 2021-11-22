@@ -1847,7 +1847,9 @@ class DataSheet:
         and pending forms
         """
         self.label = self.validate_sheet_label(label)
-        self.set_properties(properties if properties is not None else {})
+        self.properties = {}
+        self.access_level = UserRole.VIEWER
+        self.update_properties(properties if properties is not None else {})
 
         if df is not None and form_master is None:
             raise Exception('Form master cannot be None if df is given')
@@ -2005,8 +2007,14 @@ class DataSheet:
                          filesystem.root_folder)
         return properties
 
-    def set_properties(self, properties):
-        self.access_level = properties.get('access_level', UserRole.VIEWER)
+    def update_properties(self, properties):
+        if 'access_level' in properties:
+            self.access_level = properties.pop('access_level')
+        self.properties.update(properties)
+
+    def get_property(self, label):
+        assert(label != 'access_level')
+        return self.properties[label]
 
     def save_properties(self, overwrite=False):
         if self.filesystem is None:
@@ -2014,8 +2022,9 @@ class DataSheet:
                             'for sheet %s', self.label)
         logger.info('Save properties of sheet %s' % self.label)
         self.filesystem.save('properties.json',
-                             json.dumps({'access_level' :
-                                         self.access_level.name}),
+                             json.dumps({**{'access_level' :
+                                            self.access_level.name},
+                                         **self.properties}),
                              overwrite=overwrite)
 
     @staticmethod
@@ -2157,7 +2166,7 @@ class DataSheet:
                      self.label, view, value_dict, matched_index)
         return matched_index
 
-    def save(self):
+    def save(self, overwrite=False):
         if self.filesystem is None:
             raise IOError('Cannot save data of sheet %s (no associated '\
                           'filesystem)')
@@ -2165,8 +2174,8 @@ class DataSheet:
         if not self.filesystem.exists('data'):
             self.filesystem.makedirs('data')
 
-        self.save_form_master()
-        self.save_properties()
+        self.save_form_master(overwrite=overwrite)
+        self.save_properties(overwrite=overwrite)
         self.save_all_data()
         for form_id, form in self.live_forms.items():
             for section_name, section in form.sections.items():
@@ -3203,6 +3212,13 @@ class TestDataSheet(unittest.TestCase):
     def test_properties(self):
         self.assertEqual(self.sheet_ts.access_level, UserRole.MANAGER)
         self.assertEqual(self.sheet.access_level, UserRole.VIEWER)
+
+        self.sheet_ts.update_properties({'lesca_participant_sheet' : True})
+        self.sheet_ts.save_properties(overwrite=True)
+
+        sheet_ts2 = DataSheet.from_files(self.user, self.sheet_ts.filesystem.clone())
+        self.assertEqual(sheet_ts2.access_level, UserRole.MANAGER)
+        self.assertTrue(sheet_ts2.get_property('lesca_participant_sheet'))
 
     def test_form_user(self):
         form_def = {
