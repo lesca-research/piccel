@@ -8410,6 +8410,56 @@ def language_abbrev(language):
     return {'French' : 'Fre',
             'English' : 'Eng'}[language]
 
+
+
+#!/usr/bin/python3
+import sys
+from PyQt5 import QtCore, QtGui, QtWidgets
+ 
+ 
+CSS = \
+{
+    'QWidget':
+    {
+        'background-color': '#333333',
+    },
+    'QLabel#label':
+    {
+        'color': '#888888',
+        'background-color': '#444444',
+        'font-weight': 'bold',
+    },
+    'QLabel#label:active':
+    {
+        'color': '#1d90cd',
+    },
+    'QPushButton#button':
+    {
+        'color': '#888888',
+        'background-color': '#444444',
+        'font-weight': 'bold',
+        'border': 'none',
+        'padding': '5px',
+    },
+    'QPushButton#button:active':
+    {
+        'color': '#ffffff',
+    },
+    'QPushButton#button:hover':
+    {
+        'color': '#1d90cd',
+    }
+}
+ 
+def dictToCSS(dictionnary):
+    stylesheet = ""
+    for item in dictionnary:
+        stylesheet += item + "\n{\n"
+        for attribute in dictionnary[item]:
+            stylesheet += "  " + attribute + ": " + dictionnary[item][attribute] + ";\n"
+        stylesheet += "}\n"
+    return stylesheet
+
 class PiccelApp(QtWidgets.QApplication):
 
     USER_FILE = 'piccel.json'
@@ -8418,7 +8468,9 @@ class PiccelApp(QtWidgets.QApplication):
                  role_pwd=None, cfg_fns=None, refresh_rate_ms=0):
         super(PiccelApp, self).__init__(argv)
 
-        self.setStyle('Fusion')
+        # self.setStyle('Fusion')
+        # self.setStyleSheet(dictToCSS(CSS))
+        self.setStyleSheet('QWidget {font: "Vernada"}')
         Hints.preload(self)
 
         self.refresh_rate_ms = refresh_rate_ms

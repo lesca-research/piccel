@@ -61,7 +61,8 @@ color: rgb(255, 255, 255);</string>
         </property>
         <property name="font">
          <font>
-          <pointsize>14</pointsize>
+          <family>Verdana</family>
+          <pointsize>16</pointsize>
           <weight>75</weight>
           <bold>true</bold>
          </font>
@@ -138,7 +139,7 @@ color: rgb(255, 255, 255);</string>
         <x>0</x>
         <y>0</y>
         <width>784</width>
-        <height>169</height>
+        <height>164</height>
        </rect>
       </property>
       <property name="sizePolicy">

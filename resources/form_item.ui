@@ -119,7 +119,8 @@ background-color: rgb(136, 153,170);</string>
            </property>
            <property name="font">
             <font>
-             <pointsize>12</pointsize>
+             <family>Verdana</family>
+             <pointsize>14</pointsize>
             </font>
            </property>
            <property name="text">
@@ -179,6 +180,8 @@ background-color: rgb(136, 153,170);</string>
            </property>
            <property name="font">
             <font>
+             <family>Verdana</family>
+             <pointsize>12</pointsize>
              <italic>true</italic>
             </font>
            </property>
@@ -209,6 +212,7 @@ background-color: rgb(136, 153,170);</string>
            </property>
            <property name="font">
             <font>
+             <family>Verdana</family>
              <weight>75</weight>
              <bold>true</bold>
             </font>
