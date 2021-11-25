@@ -8470,10 +8470,7 @@ class PiccelApp(QtWidgets.QApplication):
         super(PiccelApp, self).__init__(argv)
 
         self.setStyle('Fusion')
-        # self.setStyleSheet(dictToCSS(CSS))
-        with open(op.join(op.dirname(ui.__file__), 'main.qss')) as fin:
-                  css = fin.read()
-        self.setStyleSheet(css)
+        self.setStyleSheet(ui.main_qss.main_style)
         Hints.preload(self)
 
         self.refresh_rate_ms = refresh_rate_ms

@@ -15,3 +15,4 @@ from .generated import selector_ui
 from .generated import text_editor_ui
 from .generated import workbook_ui
 from . import widgets
+from . import main_qss

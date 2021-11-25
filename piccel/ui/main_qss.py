@@ -1,4 +1,4 @@
-
+main_style = """
 QLabel {
    font-family: "Verdana";
    font-size : 12pt;
@@ -53,5 +53,5 @@ QPushButton#button_next {
     border-top-right-radius: 15px;
     border-bottom-right-radius: 15px;
 }
-
+"""
 
