@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1086</width>
+    <width>1349</width>
     <height>757</height>
    </rect>
   </property>
@@ -69,7 +69,13 @@
        </widget>
       </item>
       <item>
-       <widget class="QComboBox" name="comboBox_view"/>
+       <widget class="QComboBox" name="comboBox_view">
+        <property name="font">
+         <font>
+          <family>Verdana</family>
+         </font>
+        </property>
+       </widget>
       </item>
       <item>
        <widget class="Line" name="line">
@@ -83,6 +89,11 @@
         <property name="enabled">
          <bool>false</bool>
         </property>
+        <property name="font">
+         <font>
+          <family>Verdana</family>
+         </font>
+        </property>
         <property name="text">
          <string>Find</string>
         </property>
@@ -90,6 +101,11 @@
       </item>
       <item>
        <widget class="QPushButton" name="button_new_entry">
+        <property name="font">
+         <font>
+          <family>Verdana</family>
+         </font>
+        </property>
         <property name="text">
          <string>New entry</string>
         </property>
@@ -97,6 +113,11 @@
       </item>
       <item>
        <widget class="QPushButton" name="button_edit_entry">
+        <property name="font">
+         <font>
+          <family>Verdana</family>
+         </font>
+        </property>
         <property name="text">
          <string>Edit entry</string>
         </property>
@@ -104,6 +125,11 @@
       </item>
       <item>
        <widget class="QPushButton" name="button_delete_entry">
+        <property name="font">
+         <font>
+          <family>Verdana</family>
+         </font>
+        </property>
         <property name="text">
          <string>Delete entry</string>
         </property>
@@ -111,6 +137,11 @@
       </item>
       <item>
        <widget class="QPushButton" name="button_edit_form">
+        <property name="font">
+         <font>
+          <family>Verdana</family>
+         </font>
+        </property>
         <property name="text">
          <string>Form</string>
         </property>
@@ -118,6 +149,11 @@
       </item>
       <item>
        <widget class="QPushButton" name="button_edit_plugin">
+        <property name="font">
+         <font>
+          <family>Verdana</family>
+         </font>
+        </property>
         <property name="text">
          <string>Plugin</string>
         </property>
@@ -169,6 +205,9 @@
    </item>
    <item>
     <widget class="QFrame" name="frame">
+     <property name="styleSheet">
+      <string notr="true">font-family: Verdana;</string>
+     </property>
      <property name="frameShape">
       <enum>QFrame::StyledPanel</enum>
      </property>
@@ -182,6 +221,18 @@
          <enum>Qt::Horizontal</enum>
         </property>
         <widget class="FreezeTableWidget" name="tableView">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+           <horstretch>2</horstretch>
+           <verstretch>0</verstretch>
+          </sizepolicy>
+         </property>
+         <property name="font">
+          <font>
+           <family>Verdana</family>
+           <pointsize>12</pointsize>
+          </font>
+         </property>
          <property name="alternatingRowColors">
           <bool>true</bool>
          </property>
@@ -213,6 +264,12 @@
               <horstretch>0</horstretch>
               <verstretch>0</verstretch>
              </sizepolicy>
+            </property>
+            <property name="font">
+             <font>
+              <family>Verdana</family>
+              <pointsize>11</pointsize>
+             </font>
             </property>
            </widget>
           </item>

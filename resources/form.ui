@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>797</width>
-    <height>288</height>
+    <height>394</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -21,22 +21,21 @@
     <number>0</number>
    </property>
    <item>
-    <widget class="QFrame" name="frame_title">
+    <widget class="QFrame" name="form_title_frame">
      <property name="sizePolicy">
       <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
        <horstretch>0</horstretch>
        <verstretch>0</verstretch>
       </sizepolicy>
      </property>
-     <property name="styleSheet">
-      <string notr="true">background-color: rgb(73, 88, 103);
-color: rgb(255, 255, 255);</string>
-     </property>
      <property name="frameShape">
       <enum>QFrame::StyledPanel</enum>
      </property>
      <property name="frameShadow">
       <enum>QFrame::Raised</enum>
+     </property>
+     <property name="title" stdset="0">
+      <bool>true</bool>
      </property>
      <layout class="QHBoxLayout" name="horizontalLayout">
       <property name="leftMargin">
@@ -62,7 +61,7 @@ color: rgb(255, 255, 255);</string>
         <property name="font">
          <font>
           <family>Verdana</family>
-          <pointsize>16</pointsize>
+          <pointsize>14</pointsize>
           <weight>75</weight>
           <bold>true</bold>
          </font>
@@ -81,6 +80,9 @@ color: rgb(255, 255, 255);</string>
         </property>
         <property name="textInteractionFlags">
          <set>Qt::TextSelectableByMouse</set>
+        </property>
+        <property name="title" stdset="0">
+         <bool>true</bool>
         </property>
        </widget>
       </item>
@@ -139,7 +141,7 @@ color: rgb(255, 255, 255);</string>
         <x>0</x>
         <y>0</y>
         <width>784</width>
-        <height>164</height>
+        <height>273</height>
        </rect>
       </property>
       <property name="sizePolicy">
@@ -171,16 +173,22 @@ color: rgb(255, 255, 255);</string>
       <enum>QFrame::Raised</enum>
      </property>
      <layout class="QHBoxLayout" name="horizontalLayout_2">
+      <property name="spacing">
+       <number>15</number>
+      </property>
       <property name="leftMargin">
-       <number>0</number>
+       <number>15</number>
       </property>
       <property name="rightMargin">
-       <number>0</number>
+       <number>15</number>
       </property>
       <item>
        <widget class="QPushButton" name="button_previous">
         <property name="text">
          <string>Previous</string>
+        </property>
+        <property name="flat">
+         <bool>false</bool>
         </property>
        </widget>
       </item>

@@ -69,6 +69,12 @@
          </property>
          <item>
           <widget class="QFrame" name="frame_5">
+           <property name="font">
+            <font>
+             <family>Verdana</family>
+             <pointsize>14</pointsize>
+            </font>
+           </property>
            <property name="styleSheet">
             <string notr="true">background-color: rgb(174, 180, 169);</string>
            </property>
@@ -92,6 +98,7 @@
              <widget class="QLabel" name="workbook_label">
               <property name="font">
                <font>
+                <family>Verdana</family>
                 <pointsize>14</pointsize>
                 <weight>75</weight>
                 <bold>true</bold>
@@ -122,6 +129,12 @@
            <layout class="QFormLayout" name="formLayout">
             <item row="0" column="0">
              <widget class="QLabel" name="label">
+              <property name="font">
+               <font>
+                <family>Verdana</family>
+                <pointsize>12</pointsize>
+               </font>
+              </property>
               <property name="layoutDirection">
                <enum>Qt::LeftToRight</enum>
               </property>
@@ -134,12 +147,25 @@
              </widget>
             </item>
             <item row="0" column="1">
-             <widget class="QComboBox" name="user_list"/>
+             <widget class="QComboBox" name="user_list">
+              <property name="font">
+               <font>
+                <family>Verdana</family>
+                <pointsize>12</pointsize>
+               </font>
+              </property>
+             </widget>
             </item>
             <item row="1" column="0">
              <widget class="QLabel" name="other_password_label">
               <property name="enabled">
                <bool>true</bool>
+              </property>
+              <property name="font">
+               <font>
+                <family>Verdana</family>
+                <pointsize>12</pointsize>
+               </font>
               </property>
               <property name="text">
                <string>Other password:</string>
@@ -180,6 +206,11 @@
            <layout class="QHBoxLayout" name="horizontalLayout_2">
             <item>
              <widget class="QPushButton" name="button_cancel">
+              <property name="font">
+               <font>
+                <family>Verdana</family>
+               </font>
+              </property>
               <property name="text">
                <string>Cancel</string>
               </property>
@@ -187,6 +218,11 @@
             </item>
             <item>
              <widget class="QPushButton" name="button_ok">
+              <property name="font">
+               <font>
+                <family>Verdana</family>
+               </font>
+              </property>
               <property name="text">
                <string>Ok</string>
               </property>

@@ -10,12 +10,52 @@
     <height>66</height>
    </rect>
   </property>
+  <property name="font">
+   <font>
+    <family>Verdana</family>
+   </font>
+  </property>
   <property name="windowTitle">
    <string>Form</string>
   </property>
-  <layout class="QFormLayout" name="formLayout">
-   <item row="0" column="1">
+  <property name="styleSheet">
+   <string notr="true">border-bottom-left-radius: 0px;
+ border-bottom-right-radius: 0px;
+ border-width: 1px;
+ border-style: solid;
+border-color: lightgray;</string>
+  </property>
+  <layout class="QHBoxLayout" name="horizontalLayout_3">
+   <item>
+    <widget class="QLabel" name="label_key">
+     <property name="sizePolicy">
+      <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+       <horstretch>0</horstretch>
+       <verstretch>0</verstretch>
+      </sizepolicy>
+     </property>
+     <property name="font">
+      <font>
+       <pointsize>12</pointsize>
+      </font>
+     </property>
+     <property name="styleSheet">
+      <string notr="true">border-style: none;</string>
+     </property>
+     <property name="text">
+      <string>Key</string>
+     </property>
+    </widget>
+   </item>
+   <item>
     <widget class="QFrame" name="datetime_frame">
+     <property name="styleSheet">
+      <string notr="true">border-bottom-left-radius: 0px;
+ border-bottom-right-radius: 0px;
+ border-width: 1px;
+ border-style: none;
+border-color: lightgray;</string>
+     </property>
      <property name="frameShape">
       <enum>QFrame::StyledPanel</enum>
      </property>
@@ -101,6 +141,11 @@
       </item>
       <item>
        <widget class="QPushButton" name="button_clear">
+        <property name="font">
+         <font>
+          <family>Verdana</family>
+         </font>
+        </property>
         <property name="text">
          <string>Clear</string>
         </property>
@@ -120,19 +165,6 @@
        </spacer>
       </item>
      </layout>
-    </widget>
-   </item>
-   <item row="0" column="0">
-    <widget class="QLabel" name="label_key">
-     <property name="sizePolicy">
-      <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-       <horstretch>0</horstretch>
-       <verstretch>0</verstretch>
-      </sizepolicy>
-     </property>
-     <property name="text">
-      <string>Key</string>
-     </property>
     </widget>
    </item>
   </layout>

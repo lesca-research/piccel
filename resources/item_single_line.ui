@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>450</width>
+    <width>455</width>
     <height>44</height>
    </rect>
   </property>
@@ -31,6 +31,12 @@
        <verstretch>0</verstretch>
       </sizepolicy>
      </property>
+     <property name="font">
+      <font>
+       <family>Verdana</family>
+       <pointsize>12</pointsize>
+      </font>
+     </property>
      <property name="text">
       <string>Key</string>
      </property>
@@ -43,6 +49,18 @@
        <width>400</width>
        <height>0</height>
       </size>
+     </property>
+     <property name="styleSheet">
+      <string notr="true">QLineEdit{ background-color:rgb(253, 253, 253);
+border: 1px solid lightgray;
+border-radius: 5px;
+padding: 0 8px;
+selection-background-color:darkgray;
+color: black;}
+QLineEdit:focus { background-color:rgb(255, 255, 255);}</string>
+     </property>
+     <property name="text">
+      <string>dfff</string>
      </property>
     </widget>
    </item>

@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>814</width>
-    <height>472</height>
+    <height>438</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -68,15 +68,15 @@
           <number>1</number>
          </property>
          <item>
-          <widget class="QFrame" name="frame_5">
-           <property name="styleSheet">
-            <string notr="true">background-color: rgb(174, 180, 169);</string>
-           </property>
+          <widget class="QFrame" name="title_frame">
            <property name="frameShape">
             <enum>QFrame::StyledPanel</enum>
            </property>
            <property name="frameShadow">
             <enum>QFrame::Raised</enum>
+           </property>
+           <property name="title" stdset="0">
+            <bool>true</bool>
            </property>
            <layout class="QVBoxLayout" name="verticalLayout_3">
             <property name="leftMargin">
@@ -90,13 +90,6 @@
             </property>
             <item>
              <widget class="QLabel" name="workbook_label">
-              <property name="font">
-               <font>
-                <pointsize>14</pointsize>
-                <weight>75</weight>
-                <bold>true</bold>
-               </font>
-              </property>
               <property name="autoFillBackground">
                <bool>false</bool>
               </property>
@@ -105,6 +98,9 @@
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
+              </property>
+              <property name="title" stdset="0">
+               <bool>true</bool>
               </property>
              </widget>
             </item>
@@ -122,6 +118,11 @@
            <layout class="QFormLayout" name="formLayout">
             <item row="0" column="0">
              <widget class="QLabel" name="label_2">
+              <property name="font">
+               <font>
+                <family>Verdana</family>
+               </font>
+              </property>
               <property name="text">
                <string>Access password:</string>
               </property>
@@ -129,6 +130,11 @@
             </item>
             <item row="0" column="1">
              <widget class="QLineEdit" name="access_password_field">
+              <property name="font">
+               <font>
+                <family>Verdana</family>
+               </font>
+              </property>
               <property name="echoMode">
                <enum>QLineEdit::Password</enum>
               </property>
@@ -155,6 +161,11 @@
            <layout class="QHBoxLayout" name="horizontalLayout_2">
             <item>
              <widget class="QPushButton" name="button_cancel">
+              <property name="font">
+               <font>
+                <family>Verdana</family>
+               </font>
+              </property>
               <property name="text">
                <string>Cancel</string>
               </property>
@@ -162,6 +173,11 @@
             </item>
             <item>
              <widget class="QPushButton" name="button_ok">
+              <property name="font">
+               <font>
+                <family>Verdana</family>
+               </font>
+              </property>
               <property name="text">
                <string>Ok</string>
               </property>
@@ -172,6 +188,11 @@
          </item>
          <item>
           <widget class="QProgressBar" name="progressBar">
+           <property name="font">
+            <font>
+             <family>Verdana</family>
+            </font>
+           </property>
            <property name="value">
             <number>0</number>
            </property>

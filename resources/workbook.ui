@@ -10,12 +10,22 @@
     <height>663</height>
    </rect>
   </property>
+  <property name="font">
+   <font>
+    <family>Verdana</family>
+   </font>
+  </property>
   <property name="windowTitle">
    <string>Form</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
     <widget class="QTabWidget" name="tabWidget">
+     <property name="font">
+      <font>
+       <family>Verdana</family>
+      </font>
+     </property>
      <property name="tabPosition">
       <enum>QTabWidget::South</enum>
      </property>
