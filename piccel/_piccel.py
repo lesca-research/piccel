@@ -2049,8 +2049,9 @@ class DataSheet:
                 logger.debug('Available data files for sheet %s:\n%s',
                              self.label, '\n'.join(data_bfns))
             if len(data_bfns) > 0:
-                self.df.drop(self.df.index, inplace=True)
-                self.notifier.notify('cleared_data')
+                if self.df.shape[0] > 0:
+                    self.df.drop(self.df.index, inplace=True)
+                    self.notifier.notify('cleared_data')
                 # Associated view will be cleared
                 # Expect watchers to react
                 for data_bfn in data_bfns:
@@ -8352,7 +8353,7 @@ class refresh_text:
     def __call__(self):
         text = self.item.tr[self.item_tr_label]
         self.ui_label.setText(text)
-        if  self.hide_on_empty and (text is None or len(text)==0):
+        if self.hide_on_empty and (text is None or len(text)==0):
             self.ui_label.hide()
         else:
             self.ui_label.show()
@@ -8468,9 +8469,11 @@ class PiccelApp(QtWidgets.QApplication):
                  role_pwd=None, cfg_fns=None, refresh_rate_ms=0):
         super(PiccelApp, self).__init__(argv)
 
-        # self.setStyle('Fusion')
+        self.setStyle('Fusion')
         # self.setStyleSheet(dictToCSS(CSS))
-        self.setStyleSheet('QWidget {font: "Vernada"}')
+        with open(op.join(op.dirname(ui.__file__), 'main.qss')) as fin:
+                  css = fin.read()
+        self.setStyleSheet(css)
         Hints.preload(self)
 
         self.refresh_rate_ms = refresh_rate_ms
@@ -8799,7 +8802,8 @@ class PiccelApp(QtWidgets.QApplication):
                                          section.tr.language)
             _section_ui = ui.section_ui.Ui_Form()
             _section_ui.setupUi(section_widget)
-            refresh_title = refresh_text(section, 'title', _section_ui.title_label,
+            refresh_title = refresh_text(section, 'title',
+                                         _section_ui.title_label,
                                          hide_on_empty=True)
             refresh_title()
             section.notifier.add_watcher('language_changed', refresh_title)
@@ -8927,9 +8931,15 @@ class PiccelApp(QtWidgets.QApplication):
             _form_ui.button_submit.setFocus()
             try:
                 form.submit()
-                tab_widget.removeTab(tab_idx)
             except Exception as e:
-                logger.error('Exception occured while submitting:\n%s', repr(e))
+                msg = 'Error occured while submitting:\n%s', repr(e)
+                logger.error(msg)
+                message_box = QtWidgets.QMessageBox()
+                message_box.setIcon(QtWidgets.QMessageBox.Critical)
+                message_box.setText(msg)
+                message_box.exec_()
+            tab_widget.removeTab(tab_idx)
+
         _form_ui.button_submit.clicked.connect(submit)
 
 

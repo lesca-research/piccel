@@ -73,15 +73,23 @@ class LescaDashboard(SheetPlugin):
                 self.sheet.invalidate_cached_views()
                 self.sheet.notifier.notify('deleted_entry', entry_df=entry_df)
                 return
+
+        if clear or deletion: # Should not happen very often, only when maintenance
+            # Refresh all:
+            self.refresh_entries(self.df.index)
+            self.sheet.invalidate_cached_views()
+            self.sheet.notifier.notify('cleared_data')
+            return
+
         entry_df = entry_df.set_index('Participant_ID')
 
         if sheet_source.label == self.pp.label and \
-           entry_df.index.array[0] not in self.df.index:
+           entry_df.index[0] not in self.df.index:
+            # New participant
             empty_df = pd.DataFrame([], index=entry_df.index)
             self.df = self.df.append(empty_df)
             self.sheet.invalidate_cached_views()
             self.sheet.notifier.notify('appended_entry')
-            # self.df.sort_index(inplace=True) # TODO: handle in UI view
         if entry_df.index[0] in self.df.index:
             self.refresh_entries(entry_df.index)
             self.sheet.invalidate_cached_views()
