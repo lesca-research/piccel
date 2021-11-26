@@ -19,7 +19,7 @@ QFrame[title=True] {
 }
 
 QPushButton {
-    background-color:  rgb(12,80,122); 
+    background-color:  rgb(12,80,122);
     border-color: rgb(12,80,122);
     border-style: solid;
     border-width: 1px;
@@ -41,6 +41,7 @@ QPushButton:pressed {
 QPushButton:disabled {
     background-color: gray;
     border-color: gray;
+    color:lightgray;
 }
 
 

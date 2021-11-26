@@ -2080,19 +2080,31 @@ class DataSheet:
         if self.filesystem is not None:
             modified_files, new_files, deleted_files = \
                 self.filesystem.external_changes()
-            logger.debug2('Files externally added: %s', new_files)
-            logger.debug2('Files externally modified: %s', modified_files)
-            logger.debug2('Files externally deleted: %s', deleted_files)
-            if len(modified_files) > 0 or len(deleted_files) > 0:
+            logger.debug('Files externally added: %s', new_files)
+            logger.debug('Files externally modified: %s', modified_files)
+            logger.debug('Files externally deleted: %s', deleted_files)
+
+            # TODO: IMPORTANT new form data is ignored here
+            new_data_files = [fn for fn in new_files if fn.startswith('data')]
+            modified_data_files = [fn for fn in modified_files \
+                                   if fn.startswith('data')]
+            deleted_data_files = [fn for fn in deleted_files \
+                                  if fn.startswith('data')]
+
+            if len(modified_data_files) > 0 or len(deleted_data_files) > 0:
                 self.reload_all_data()
             else:
-                for data_fn in new_files:
+                for data_fn in new_data_files:
+                    logger.debug('Sheet %s, load new data file: %s',
+                                 self.label, data_fn)
                     df_content = self.filesystem.load(data_fn)
                     entry_df = self.df_from_str(df_content)
                     if not data_fn.endswith('main.csv'):
                         entry_df['__fn__'] = data_fn
                     self._append_df(entry_df)
-                self.filesystem.accept_all_changes()
+
+            # TODO: IMPORTANT changed form data is ignored hereOA
+            self.filesystem.accept_all_changes()
 
     def set_form_master(self, form):
         # TODO: utest and check consistency with pending live forms
@@ -3828,7 +3840,7 @@ class TestDataSheet(unittest.TestCase):
                     if form_folder.endswith('_dummy'):
                         form_folder = op.join(form_top_folder, form_folder)
                         form_afolder = self.filesystem.full_path(form_folder)
-                        os.rename(form_afolder, form_afolder.rstrip('_dummy'))
+                        os.rename(form_afolder, form_afolder[:-len('_dummy')])
 
             def clean_live_form(self, form_id):
                 self.rename_form_folder(self.get_live_form_folder(form_id))
@@ -5460,6 +5472,10 @@ class TestWorkBook(unittest.TestCase):
                           vtype='text', supported_languages={'French'},
                           default_language='French',
                           allow_empty=True),
+                 FormItem(keys={'Date_Is_Set':None},
+                          vtype='boolean', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=True),
                  FormItem(keys={'Callback_Days':None},
                           vtype='int', supported_languages={'French'},
                           default_language='French',
@@ -5602,27 +5618,30 @@ class TestWorkBook(unittest.TestCase):
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(df.loc[pid, 'Eval'], 'eval_not_done')
         self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
-        self.assertEqual(df.loc[pid, 'Eval_Date'], 'eval_plan')
+        self.assertEqual(df.loc[pid, 'Eval_Plan'], 'eval_plan')
 
         logger.debug('------- Pid %s: Plan interview date, no email --------',
                      pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11)
         form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Date')
+                                                        'Eval_Plan')
+        print('action_label:', action_label)
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
 
         form.set_values_from_entry({'Plan_Action' : 'plan',
                                     'Interview_Date' : idate,
                                     'Availability' : 'ignored',
+                                    'Date_Is_Set' : True,
                                     'Send_Email' : False,
                                     'Timestamp_Submission' : ts})
+        # TODO: test Date_Is_Set False but date is not None
         form.submit()
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(df.loc[pid, 'Eval'], 'eval_scheduled')
         self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
-        self.assertEqual(df.loc[pid, 'Eval_Date'],
+        self.assertEqual(df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATE_FMT))
 
         logger.debug('-- Pid %s: No planned date, availability, no callback --',
@@ -5630,12 +5649,13 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11,30)
         form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Date')
+                                                        'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Plan_Action' : 'plan',
                                     'Interview_Date' : None,
                                     'Availability' : 'parfois',
+                                    'Date_Is_Set' : False,
                                     'Callback_days' : 0,
                                     'Send_Email' : False,
                                     'Timestamp_Submission' : ts})
@@ -5643,7 +5663,7 @@ class TestWorkBook(unittest.TestCase):
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_not_done')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'parfois')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
         logger.debug('-- Pid %s: No planned date, availability, '\
                      'callback in 7 days --', pid)
@@ -5651,7 +5671,7 @@ class TestWorkBook(unittest.TestCase):
         ts = datetime(2021,9,10,10,11,35)
         wb['Dashboard'].plugin.date_now = ts
         form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Date')
+                                                        'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         callback_nb_days = 7
@@ -5662,7 +5682,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_callback_%dD' % callback_nb_days)
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'parfois')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
         wb['Dashboard'].plugin.date_now = ts + timedelta(days=1)
         wb['Dashboard'].plugin.refresh_all()
@@ -5670,38 +5690,39 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_callback_%dD' % (callback_nb_days-1))
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'parfois')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
         wb['Dashboard'].plugin.date_now = ts + timedelta(days=callback_nb_days+1)
         wb['Dashboard'].plugin.refresh_all()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_callback' )
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'parfois')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
         logger.debug('------- Pid %s: Plan interview date, with email --------',
                      pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,12)
         form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Date')
+                                                        'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Interview_Date' : idate,
+                                    'Date_Is_Set' : True,
                                     'Send_Email' : True,
                                     'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_email_pending')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATE_FMT))
 
         logger.debug('------- Interview email sent for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,13)
         form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Date')
+                                                        'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Email_Status' : 'sent',
@@ -5712,7 +5733,7 @@ class TestWorkBook(unittest.TestCase):
                          'eval_email_sent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATE_FMT))
 
 
@@ -5720,7 +5741,7 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,14)
         form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Date')
+                                                        'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Email_Status' : 'error',
@@ -5731,7 +5752,7 @@ class TestWorkBook(unittest.TestCase):
                          'eval_email_error')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATE_FMT))
 
         logger.debug('------- Interview done for %s --------' % pid)
@@ -5751,7 +5772,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_done')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          ts.strftime(DATE_FMT))
 
         logger.debug('------- Interview to redo for %s --------' % pid)
@@ -5769,7 +5790,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_redo')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          ts.strftime(DATE_FMT))
 
         logger.debug('------- Interview cancelled for %s --------' % pid)
@@ -5787,17 +5808,18 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_cancelled')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'], 'eval_plan')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'eval_plan')
 
         logger.debug('--- Pid %s: Plan interview date again, with email ----',
                      pid)
         idate = datetime(2021,10,15,10,10)
         ts = datetime(2021,9,10,10,29)
         form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Date')
+                                                        'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Interview_Date' : idate,
+                                    'Date_Is_Set' : True,
                                     'Staff' : 'Catherine-Alexandra Grégoire',
                                     'Send_Email' : True,
                                     'Email_Status' : 'to_send',
@@ -5808,7 +5830,7 @@ class TestWorkBook(unittest.TestCase):
                          'eval_email_pending')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Catherine-Alexandra Grégoire')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Date'],
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATE_FMT))
 
     def test_dashboard_emailled_poll_track(self):
@@ -8975,7 +8997,9 @@ class PiccelApp(QtWidgets.QApplication):
             sh.notifier.add_watcher('clear_data', model.update_after_clear)
 
             _data_sheet_ui.tableView.setModel(model)
-            _data_sheet_ui.tableView.horizontalHeader().setMaximumSectionSize(700) # TODO expose param
+            hHeader = _data_sheet_ui.tableView.horizontalHeader()
+            hHeader.setMaximumSectionSize(400) # TODO expose param
+            hHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
             _data_sheet_ui.tableView.resizeColumnsToContents()
 
             def f_cell_action(idx):

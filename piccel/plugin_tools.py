@@ -449,8 +449,8 @@ def interview_action(entry_df, interview_column, workbook,
     action_label = ''
     plan_sheet = workbook[plan_sheet_label]
 
-    if interview_column.endswith('_Date'):
-        interview_label = interview_column.rstrip('_Date')
+    if interview_column.endswith('_Plan'):
+        interview_label = interview_column[:-len('_Plan')]
         return form_update_or_new(plan_sheet_label, workbook,
                                   {'Participant_ID' : participant_id,
                                    'Interview_Type' : interview_label},
@@ -463,7 +463,7 @@ def interview_action(entry_df, interview_column, workbook,
         #  value.endswith('_email_sent') or value.endswith('_email_error') or \
         #  value.endswith('_ok') or value.endswith('_redo'):
     elif interview_column.endswith('_Staff'):
-        interview_label = interview_column.rstrip('_Staff')
+        interview_label = interview_column[:-len('_Staff')]
         return form_update_or_new(plan_sheet_label, workbook,
                                   {'Participant_ID' : participant_id,
                                    'Interview_Type' : interview_label},
@@ -531,8 +531,8 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
       (Evaluation_Type matches given interview_label) and action != cancel_date
          If action != cancel_date:
              If Reachable:
-                 If Interview_Date != NA:
-                     -> show Interview_Date
+                 If Interview_Plan != NA:
+                     -> show Interview_Plan
                  Else If Availability != NA:
                      -> show Availability
 
@@ -645,7 +645,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
     if show_staff_column and column_staff not in dashboard_df.columns:
         dashboard_df[column_staff] = pd.NA
 
-    column_date = '%s_Date' % interview_label
+    column_date = '%s_Plan' % interview_label
     default_date = ('%s_plan' % interview_tag)
     if column_date not in dashboard_df.columns:
         dashboard_df[column_date] = pd.NaT
@@ -784,30 +784,35 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
                     conditions={'%s_scheduled' % interview_tag:
                      And((plan_df_fresher, 'Plan_Action', ['plan']),
                          (plan_df_fresher, 'Send_Email', [False]),
+                         (plan_df_fresher, 'Date_Is_Set', [True]),
                          (plan_df_fresher, 'Interview_Date', IsNotNA())),
                      '%s_callback_tbd' % interview_tag:
                      And((plan_df_fresher, 'Plan_Action', ['plan']),
-                         (plan_df_fresher, 'Interview_Date', IsNA()),
+                         (plan_df_fresher, 'Date_Is_Set', [False]),
                          (plan_df_fresher, 'Callback_Days', IsNotNA()),
-                         (plan_df_fresher, 'Timestamp_Submission', Greater(cb_ts))),
+                         (plan_df_fresher, 'Timestamp_Submission',
+                          Greater(cb_ts))),
                     '%s_callback' % interview_tag:
                      And((plan_df_fresher, 'Plan_Action', ['plan']),
-                         (plan_df_fresher, 'Interview_Date', IsNA()),
+                         (plan_df_fresher, 'Date_Is_Set', [False]),
                          (plan_df_fresher, 'Callback_Days', IsNotNA()),
                          (plan_df_fresher, 'Timestamp_Submission', Lower(cb_ts))),
                      '%s_email_pending' % interview_tag:
                      And((plan_df_fresher, 'Plan_Action', ['plan']),
                          (plan_df_fresher, 'Interview_Date', IsNotNA()),
+                         (plan_df_fresher, 'Date_Is_Set', [True]),
                          (plan_df_fresher, 'Send_Email', [True]),
                          (plan_df_fresher, 'Email_Status', ['to_send'])),
                      '%s_email_sent' % interview_tag:
                      And((plan_df_fresher, 'Plan_Action', ['plan']),
                          (plan_df_fresher, 'Interview_Date', IsNotNA()),
+                         (plan_df_fresher, 'Date_Is_Set', [True]),
                          (plan_df_fresher, 'Send_Email', [True]),
                          (plan_df_fresher, 'Email_Status', ['sent'])),
                      '%s_email_error' % interview_tag:
                      And((plan_df_fresher, 'Plan_Action', ['plan']),
                          (plan_df_fresher, 'Interview_Date', IsNotNA()),
+                         (plan_df_fresher, 'Date_Is_Set', [True]),
                          (plan_df_fresher, 'Send_Email', [True]),
                          (plan_df_fresher, 'Email_Status', ['error'])),
                     })
