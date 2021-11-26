@@ -686,12 +686,12 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
 
     def set_date_from_plan(plan_sel_df):
         availability = plan_sel_df[((plan_sel_df['Plan_Action']=='plan') & \
-                                    (~pd.isna(plan_sel_df['Availability'])))]
+                                    (~plan_sel_df['Date_Is_Set']))]
         dashboard_df.loc[availability.index, column_date] = \
             availability.loc[availability.index, 'Availability']
 
         planned = plan_sel_df[((plan_sel_df['Plan_Action']=='plan') & \
-                               (~pd.isna(plan_sel_df['Interview_Date'])))]
+                               (plan_sel_df['Date_Is_Set']))]
 
         dates = (planned.loc[planned.index, 'Interview_Date']
                  .apply(lambda x: x.strftime(DATE_FMT)))
@@ -777,7 +777,9 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
         try:
 
             def cb_ts(plan_df, plan_col):
-                f_ts = lambda x: date_now - timedelta(days=x)
+                f_ts = lambda x: (date_now - timedelta(days=x)
+                                  if not pd.isna(x)
+                                  else pd.NA)
                 return plan_df['Callback_Days'].apply(f_ts)
 
             map_set(dashboard_df, column_status,
@@ -792,7 +794,7 @@ def track_interview(dashboard_df, interview_label, workbook, pids,
                          (plan_df_fresher, 'Callback_Days', IsNotNA()),
                          (plan_df_fresher, 'Timestamp_Submission',
                           Greater(cb_ts))),
-                    '%s_callback' % interview_tag:
+                    '%s_callback_now' % interview_tag:
                      And((plan_df_fresher, 'Plan_Action', ['plan']),
                          (plan_df_fresher, 'Date_Is_Set', [False]),
                          (plan_df_fresher, 'Callback_Days', IsNotNA()),

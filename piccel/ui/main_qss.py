@@ -54,5 +54,14 @@ QPushButton#button_next {
     border-top-right-radius: 15px;
     border-bottom-right-radius: 15px;
 }
+
+QTableView::item
+{
+  border: 0px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  padding-left: 5px;
+  padding-right: 5px;
+}
 """
 

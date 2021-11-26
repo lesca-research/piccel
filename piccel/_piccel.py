@@ -1051,7 +1051,8 @@ class Predicate:
     def __call__(self, key_values):
         result = eval(self.code, {}, key_values)
         if not isinstance(result, bool):
-            raise InvalidPredicateResult('Result "%s" is not bool' % result)
+            raise InvalidPredicateResult('Result "%s" (type:%s) is not bool' % \
+                                         (result, type(result)))
         return result
 
 class DateTimeCollector:
@@ -8985,9 +8986,9 @@ class PiccelApp(QtWidgets.QApplication):
             view_icon = QtGui.QIcon(':/icons/view_icon').pixmap(QtCore.QSize(24,24))
             _data_sheet_ui.label_view.setPixmap(view_icon)
 
-            button_icon = QtGui.QIcon(':/icons/refresh_icon')
-            _data_sheet_ui.button_refresh.setIcon(button_icon)
-            _data_sheet_ui.button_refresh.clicked.connect(sh.refresh_data)
+            # button_icon = QtGui.QIcon(':/icons/refresh_icon')
+            # _data_sheet_ui.button_refresh.setIcon(button_icon)
+            # _data_sheet_ui.button_refresh.clicked.connect(sh.refresh_data)
 
             model = DataSheetModel(sh)
             sh.notifier.add_watcher('appended_entry', model.update_after_append)
@@ -9000,7 +9001,9 @@ class PiccelApp(QtWidgets.QApplication):
             hHeader = _data_sheet_ui.tableView.horizontalHeader()
             hHeader.setMaximumSectionSize(400) # TODO expose param
             hHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-            _data_sheet_ui.tableView.resizeColumnsToContents()
+
+            vHeader = _data_sheet_ui.tableView.verticalHeader()
+            vHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
 
             def f_cell_action(idx):
                 row_df = sh.get_df_view().iloc[[idx.row()]]
