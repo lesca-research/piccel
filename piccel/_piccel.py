@@ -5696,7 +5696,7 @@ class TestWorkBook(unittest.TestCase):
         wb['Dashboard'].plugin.date_now = ts + timedelta(days=callback_nb_days+1)
         wb['Dashboard'].plugin.refresh_all()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_callback' )
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_callback_now' )
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 

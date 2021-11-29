@@ -117,41 +117,6 @@
               </layout>
              </widget>
             </item>
-            <item>
-             <widget class="QFrame" name="frame_5">
-              <property name="frameShape">
-               <enum>QFrame::NoFrame</enum>
-              </property>
-              <property name="frameShadow">
-               <enum>QFrame::Raised</enum>
-              </property>
-              <layout class="QVBoxLayout" name="verticalLayout_2">
-               <item>
-                <widget class="QPushButton" name="pushButton">
-                 <property name="text">
-                  <string/>
-                 </property>
-                 <property name="iconSize">
-                  <size>
-                   <width>48</width>
-                   <height>48</height>
-                  </size>
-                 </property>
-                 <property name="flat">
-                  <bool>true</bool>
-                 </property>
-                </widget>
-               </item>
-               <item>
-                <widget class="QLabel" name="label_2">
-                 <property name="text">
-                  <string>Create Workbook</string>
-                 </property>
-                </widget>
-               </item>
-              </layout>
-             </widget>
-            </item>
            </layout>
           </widget>
          </item>
