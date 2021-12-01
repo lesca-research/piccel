@@ -1,24 +1,30 @@
+from PyQt5 import QtGui
+
+style_defs = {
+    'default_bg_color' : (255, 248, 240)
+}
+
 main_style = """
-QLabel {
+QLabel {{
    font-family: "Verdana";
    font-size : 12pt;
    color: black;
-}
+}}
 
-QWidget {
-    background-color: rgb(255, 248, 240);
-}
+QWidget {{
+    background-color: rgb{default_bg_color};
+}}
 
-QLabel[title=True] {
+QLabel[title=True] {{
    color: white;
    font-size : 14pt;
    background-color: rgb(73, 88, 103);
-}
-QFrame[title=True] {
+}}
+QFrame[title=True] {{
    background-color: rgb(73, 88, 103);
-}
+}}
 
-QPushButton {
+QPushButton {{
     background-color:  rgb(12,80,122);
     border-color: rgb(12,80,122);
     border-style: solid;
@@ -31,30 +37,37 @@ QPushButton {
     color: white;
     font-family: "Verdana";
     font-size : 12pt;
-}
+}}
 
-QPushButton:pressed {
+QPushButton:pressed {{
     background-color: rgb(15, 97, 149);
     border-color: rgb(15, 97, 149);
-}
+}}
 
-QPushButton:disabled {
+QPushButton:disabled {{
     background-color: gray;
     border-color: gray;
     color:lightgray;
-}
+}}
 
 
-QPushButton#button_previous {
+QPushButton#button_previous {{
     border-top-left-radius: 15px;
     border-bottom-left-radius: 15px;
-}
+}}
 
-QPushButton#button_next {
+QPushButton#button_next {{
     border-top-right-radius: 15px;
     border-bottom-right-radius: 15px;
-}
+}}
+""".format(**style_defs)
 
+error_color = QtGui.QColor('#9C0006')
+default_bg_qcolor = QtGui.QColor(*style_defs['default_bg_color'])
+table_cell_even_row_darker_factor = 105
+
+# table_cell_darker_qcolor = default_bg_qcolor.darker(110)
+"""
 QTableView::item
 {
   border: 0px;
@@ -64,4 +77,3 @@ QTableView::item
   padding-right: 5px;
 }
 """
-

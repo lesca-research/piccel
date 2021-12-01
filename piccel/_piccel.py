@@ -2617,6 +2617,7 @@ class DataSheet:
             # Entry already there -> modification
             tmp_df = self.df[[key]].copy()
             tmp_df.loc[[(entry_id, update_idx, conflict_idx)], key] = value
+            tmp_entry_df = tmp_df.loc[[(entry_id, update_idx, conflict_idx)]]
         else:
             # Entry to update
             tmp_entry_df = (pd.DataFrame({key:[value],
@@ -2629,7 +2630,10 @@ class DataSheet:
         duplicate_entry_ids = self.duplicate_entries(tmp_df,
                                                      cols_to_check=[key])
         duplicate_entry_ids.difference_update(self.concurrent_updated_entries(tmp_df))
-        unique_ok = len(duplicate_entry_ids) == 0
+        duplicate_candidate_ids = [ii[0] for ii in duplicate_entry_ids]
+        unique_ok = tmp_entry_df.index[0][0] not in duplicate_candidate_ids
+        logger.debug2('Check if %s is in duplicate candidates %s', entry_id,
+                      duplicate_candidate_ids)
         if not unique_ok:
             logger.warning('Value %s for key %s is not unique', value, key)
         return unique_ok
@@ -3267,6 +3271,51 @@ class TestDataSheet(unittest.TestCase):
         form = sheet.form_new_entry()
         self.assertIsNone(form_master['section1']['User'].get_value())
         self.assertEqual(form['section1']['User'].get_value(), user)
+
+    def test_unique_form_check(self):
+        form_def = {
+            'title' : {'French' : 'Un formulaire'},
+            'default_language' : 'French',
+            'supported_languages' : {'French'},
+            'sections' : {
+                'section1' : {
+                    'items' : [
+                        {'keys' : {'Participant_ID' :
+                                   {'French':'Code Participant'}},
+                         'unique' : True,
+                         'freeze_on_update' : True,
+                        },
+                        {'keys' : {'Name' : {'French':'Nom'}}}
+                    ]
+                }
+            }
+        }
+        data = pd.DataFrame(OrderedDict([
+            ('Participant_ID', ['P1', 'P1', 'P2']), # last is dup
+            ('__entry_id__',   np.array([0, 0, 1], dtype=np.int64)),
+            ('__update_idx__', np.array([0, 1, 0], dtype=np.int64)),
+            ('__conflict_idx__', np.array([0, 0, 0], dtype=np.int64)),
+            ('Name', ['John', 'Jon', 'Robert']),
+        ])).set_index(['__entry_id__', '__update_idx__', '__conflict_idx__'])
+
+        sheet_id = 'pinfo'
+        user = 'me'
+        sheet_folder = op.join(self.tmp_dir, sheet_id)
+        os.makedirs(sheet_folder)
+        filesystem = LocalFileSystem(sheet_folder)
+
+        logger.debug('utest: create sheet')
+        sheet = DataSheet(sheet_id, Form.from_dict(form_def),
+                          data, user, filesystem)
+
+        logger.debug('utest: create update form')
+        form = sheet.form_update_entry(sheet.df.index[0])
+        self.assertTrue(form.is_valid())
+
+        logger.debug('utest: create new entry form')
+        form = sheet.form_new_entry()
+        form.set_values_from_entry({'Participant_ID' : 'P1'})
+        self.assertFalse(form.is_valid())
 
     def test_inconsistencies(self):
         form_def = {
@@ -8167,10 +8216,12 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         icol = index.column()
         if index.isValid():
             if role == QtCore.Qt.TextAlignmentRole:
-                if icol == 0:
-                    return QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
-                else:
-                    return QtCore.Qt.AlignCenter
+                # TODO let hint define alignement!
+                return QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+                # if icol == 0:
+                #     return QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+                # else:
+                #     return QtCore.Qt.AlignCenter
             else:
                 irow = self.sort_idx[index.row()]
                 value = self.view[icol][irow]
@@ -8178,22 +8229,28 @@ class DataSheetModel(QtCore.QAbstractTableModel):
                     value_str = str(value) if not pd.isna(value) else ''
                     return value_str
 
-                if role == QtCore.Qt.BackgroundRole:
-                    validity = self.view_validity[icol][irow]
-                    if not validity:
-                        return QtGui.QColor('#9C0006')
-
                 hint = self.sheet.plugin.hint(self.columns[icol], value)
                 if hint is not None:
-                    if role == QtCore.Qt.BackgroundRole:
-                        return hint.background_qcolor
-                    elif role == QtCore.Qt.ForegroundRole:
+                    if role == QtCore.Qt.ForegroundRole:
                         return hint.foreground_qcolor
                     elif role == QtCore.Qt.DecorationRole:
                         return hint.qicon
                     elif role == QtCore.Qt.ToolTipRole:
                         return hint.message
 
+                if role == QtCore.Qt.BackgroundRole:
+                    bg_color = ui.main_qss.default_bg_qcolor
+
+                    if not self.view_validity[icol][irow]:
+                        bg_color = ui.main_qss.error_color
+                    elif hint is not None and  hint.background_qcolor is not None:
+                        bg_color = hint.background_qcolor
+
+                    if index.row() % 2:
+                        f = ui.main_qss.table_cell_even_row_darker_factor
+                        bg_color = bg_color.darker(f)
+
+                    return bg_color
         return None
 
     def entry_id(self, index):
@@ -9052,6 +9109,7 @@ class PiccelApp(QtWidgets.QApplication):
 
             vHeader = _data_sheet_ui.tableView.verticalHeader()
             vHeader.setMaximumSectionSize(50)
+            vHeader.setMinimumSectionSize(40)
             #vHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
 
             def resize_table_view(*args, **kwargs):
