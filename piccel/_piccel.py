@@ -8256,7 +8256,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
     def entry_id(self, index):
         """ ASSUME: not called with "dynamic" sheet """
         if index.isValid():
-            return self.view_df.index[self.sort_idx[index.row()],:]
+            return self.view_df.index[self.sort_idx[index.row()]]
         return None
 
     def entry_df(self, index):
@@ -8280,7 +8280,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         return True
 
     def update_before_delete(self, entry_id):
-        irow = self.view_df.index.get_loc(entry_df.index[0])
+        irow = self.view_df.index.get_loc(entry_id)
         tree_view_irow = np.where(self.sort_idx==irow)[0][0]
         logger.debug('before_delete(%s) -> irow = %d',
                      entry_id, tree_view_irow)
@@ -8306,7 +8306,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
 
     @QtCore.pyqtSlot()
     def update_after_set(self, entry_idx):
-        irow = self.view_df.index.get_loc(entry_df.index[0])
+        irow = self.view_df.index.get_loc(entry_idx)
         tree_view_irow = np.where(self.sort_idx==irow)[0][0]
         ncols = self.view_df.shape[1]
         self.dataChanged.emit(self.createIndex(tree_view_irow, 0),
