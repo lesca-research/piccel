@@ -9108,12 +9108,10 @@ class PiccelApp(QtWidgets.QApplication):
             #hHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
 
             vHeader = _data_sheet_ui.tableView.verticalHeader()
-            vHeader.setMaximumSectionSize(50)
-            vHeader.setMinimumSectionSize(40)
             #vHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
 
             def resize_table_view(*args, **kwargs):
-                #_data_sheet_ui.tableView.resizeRowsToContents()
+                _data_sheet_ui.tableView.resizeRowsToContents()
                 _data_sheet_ui.tableView.resizeColumnsToContents()
 
             for notification in ['appended_entry', 'entry_set', 'pre_delete_entry',

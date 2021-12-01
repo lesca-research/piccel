@@ -116,6 +116,11 @@ class FreezeTableWidget(QTableView):
             self.frozenTableView.setColumnHidden(col, True)
 
     def init(self):
+        self.verticalHeader().setMaximumSectionSize(40)
+        self.verticalHeader().setMinimumSectionSize(40)
+        self.frozenTableView.verticalHeader().setMaximumSectionSize(40)
+        self.frozenTableView.verticalHeader().setMinimumSectionSize(40)
+
         self.frozenTableView.setFocusPolicy(Qt.NoFocus)
         self.frozenTableView.verticalHeader().hide()
         self.frozenTableView.horizontalHeader().setSectionResizeMode(
@@ -144,6 +149,7 @@ class FreezeTableWidget(QTableView):
 
     def updateSectionHeight(self, logicalIndex, oldSize, newSize):
         self.frozenTableView.setRowHeight(logicalIndex, newSize)
+        self.updateFrozenTableGeometry()
 
     def resizeEvent(self, event):
         super(FreezeTableWidget, self).resizeEvent(event)
