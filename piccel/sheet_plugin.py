@@ -40,8 +40,8 @@ class SheetPlugin:
         self._watch_sheets([self.workbook[l] \
                             for l in self.sheets_to_watch()])
 
-    def _on_entry_append(self, sheet):
-        self.update(sheet, sheet.df.tail(1))
+    def _on_entry_append(self, sheet, entry_df=None):
+        self.update(sheet, entry_df)
 
     def _on_entry_set(self, sheet, entry_id):
         self.update(sheet, sheet.df.loc[[entry_id]])

@@ -149,6 +149,10 @@ class FreezeTableWidget(QTableView):
         super(FreezeTableWidget, self).resizeEvent(event)
         self.updateFrozenTableGeometry()
 
+    def resizeColumnsToContents(self):
+        super(FreezeTableWidget, self).resizeColumnsToContents()
+        self.updateFrozenTableGeometry()
+
     def moveCursor(self, cursorAction, modifiers):
         current = super(FreezeTableWidget, self).moveCursor(cursorAction,
                                                             modifiers)
@@ -171,9 +175,9 @@ class FreezeTableWidget(QTableView):
 
     def updateFrozenTableGeometry(self):
         self.frozenTableView.setGeometry(
-                self.verticalHeader().width() + self.frameWidth() - 2,
-                self.frameWidth()-1, self.columnWidth(0)+2,
-                self.viewport().height() + self.horizontalHeader().height())
+            self.verticalHeader().width() + self.frameWidth() - 2,
+            self.frameWidth()-1, self.columnWidth(0)+2,
+            self.viewport().height() + self.horizontalHeader().height())
 
 def main(args):
     def split_and_strip(s, splitter):

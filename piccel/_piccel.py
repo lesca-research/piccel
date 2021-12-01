@@ -16,7 +16,7 @@ from pprint import pformat, pprint
 from uuid import uuid1, uuid4
 import re
 from enum import IntEnum
-from time import sleep
+from time import sleep, perf_counter
 from datetime import date, datetime, timedelta, time
 import os.path as op
 from collections import defaultdict
@@ -1456,7 +1456,12 @@ class Notifier:
 
     def notify(self, event, *args, **kwargs):
         for watcher in self.watchers[event]:
-            watcher(*args, **kwargs)
+            try:
+                watcher(*args, **kwargs)
+            except Exception as e:
+                logger.error('Error during notification of event %s, ' \
+                             'while calling %s', event, watcher)
+                raise e
 
 class FolderExistsError(Exception): pass
 class FileExistsError(Exception): pass
@@ -1952,8 +1957,9 @@ class DataSheet:
     def latest_update_df(self, df=None):
         if df is None:
             df = self.df
-        fm = lambda x : x.loc[[x.index.max()]]
-        latest = df.groupby(level=0, group_keys=False).apply(fm)
+        # fm = lambda x : x.loc[[x.index.max()]]
+        # latest = df.groupby(level=0, group_keys=False).apply(fm)
+        latest = df.groupby(level=0, group_keys=False).tail(1).sort_index()
         if latest.empty:
             latest = self.empty_df_from_master()
         return latest
@@ -2104,7 +2110,8 @@ class DataSheet:
                         entry_df['__fn__'] = data_fn
                     self._append_df(entry_df)
 
-            # TODO: IMPORTANT changed form data is ignored hereOA
+            # TODO: IMPORTANT changed form data is ignored here
+            
             self.filesystem.accept_all_changes()
 
     def set_form_master(self, form):
@@ -2148,7 +2155,6 @@ class DataSheet:
                 matched_index = value_to_index[sorted_cols][to_look_up]
             except KeyError:
                 pass
-        # from IPython import embed; embed()
         matched_index = list(matched_index)
 
         if full_mask_search or \
@@ -2207,7 +2213,7 @@ class DataSheet:
                 self.filesystem.makedirs('data')
             logger.info('Sheet %s: Save all data', self.label)
             self.filesystem.save(op.join('data', main_data_fn),
-                                 self.df_to_str(self.df),
+                                 self.df_to_str(self.df.drop(columns='__fn__')),
                                  overwrite=True)
 
             logger.info('Remove all single data entries of sheet %s',
@@ -2471,8 +2477,8 @@ class DataSheet:
         for col in df.columns:
             if col not in ['__entry_id__', '__update_idx__']:
                 logger.debug2('df_to_str: format column %s', col)
-                f = lambda v: self.form_master.format(col,v) \
-                    if not pd.isna(v) else ''
+                f = lambda v: (self.form_master.format(col,v) \
+                               if not pd.isna(v) else '')
                 df[[col]] = df[[col]].applymap(f)
 
         df = df.reset_index()
@@ -2489,6 +2495,7 @@ class DataSheet:
             self.cached_validity[view] = None
             self.cached_validity_for_display[view] = None
             self.cached_inconsistent_entries = None
+        self.notifier.notify('views_refreshed')
 
     def get_df_view(self, view_label=None, for_display=False):
 
@@ -2511,6 +2518,7 @@ class DataSheet:
             if for_display and self.plugin.reset_view_index_for_display():
                 view_df = view_df.reset_index()
             cached_views[view_label] = view_df
+
         return view_df
 
     def set_default_view(self, view_label):
@@ -2892,10 +2900,8 @@ class DataSheet:
             if not pd.isna(entry_fn):
                 self.filesystem.remove(entry_fn)
             else:
-                main_data_fn = 'main.csv'
-                df_str = self.df_to_str(self.df.drop(columns='__fn__'))
-                self.filesystem.save(op.join('data', main_data_fn), df_str,
-                                     overwrite=True)
+                self.save_all_data()
+
         # TODO: update conflit idx!
         self.resolve_conflicting_entries(entry_idx)
         self.invalidate_cached_views()
@@ -2919,11 +2925,12 @@ class DataSheet:
             return None
 
         self.df = self.df.append(entry_df)
+        self.df.sort_index(inplace=True)
         entry_index = self.fix_conflicting_entries(index_to_track=entry_df.index[0])
         logger.debug2('Entry has been appended to sheet %s', self.label)
         logger.debug2('Resulting df has columns: %s)', ','.join(self.df.columns))
         self.invalidate_cached_views()
-        self.notifier.notify('appended_entry')
+        self.notifier.notify('appended_entry', entry_df=entry_df)
 
         # Note: only the index of the first row of entry_df is returned.
         # This is expected to work only for single entries
@@ -3051,7 +3058,8 @@ def df_weak_equal(df1, df2):
 class TestDataSheet(unittest.TestCase):
 
     def setUp(self):
-        logger.setLevel(logging.DEBUG)
+        # logger.setLevel(logging.DEBUG)
+        logger.setLevel("DEBUG2")
         self.tmp_dir = tempfile.mkdtemp()
 
         self.form_def_ts_data = {
@@ -3425,6 +3433,14 @@ class TestDataSheet(unittest.TestCase):
         form.set_values_from_entry(entry)
         self.assertFalse(form.is_valid())
 
+    def test_duplicate_form_input(self):
+        form = self.sheet_ts.form_new_entry()
+        entry = {'Participant_ID' : 'CE0004', 'Age' : 55,
+                 'Taille' : 1.6, 'Date' : date(2010,1,3),
+                 'Phone_Number' : '555'}
+        form.set_values_from_entry(entry)
+        self.assertFalse(form.is_valid())
+
 
     def test_to_pdf(self):
         pdf_fn = op.join(self.tmp_dir, 'sheet.pdf')
@@ -3561,8 +3577,8 @@ class TestDataSheet(unittest.TestCase):
 
     def test_form_new_entry(self):
         watched_entry = []
-        def watch_entry():
-            watched_entry.append(self.sheet_ts.df.tail(1))
+        def watch_entry(entry_df):
+            watched_entry.append(entry_df)
         self.sheet_ts.notifier.add_watcher('appended_entry', watch_entry)
 
         form = self.sheet_ts.form_new_entry()
@@ -3579,8 +3595,7 @@ class TestDataSheet(unittest.TestCase):
         entry_id = (form['section1']['__entry_id__'].get_value(),
                     form['section1']['__update_idx__'].get_value(),
                     form['section1']['__conflict_idx__'].get_value())
-        last_entry = self.sheet_ts.df.tail(1)
-        self.assertEqual(last_entry.index[0], entry_id)
+        last_entry = self.sheet_ts.df.loc[[entry_id]]
         last_entry_dict = last_entry.to_dict('record')[0]
         self.assertEqual(last_entry_dict['Age'], entry['Age'])
         self.assertEqual(last_entry_dict['Participant_ID'],
@@ -3592,13 +3607,12 @@ class TestDataSheet(unittest.TestCase):
         self.assertEqual(watched_entry[0].to_dict('record')[0]['Age'],
                          entry['Age'])
 
-
     def test_form_entry_update(self):
         # Add a new entry from an existing one
 
         watched_entry = []
-        def watch_entry():
-            watched_entry.append(self.sheet_ts.df.tail(1))
+        def watch_entry(entry_df):
+            watched_entry.append(entry_df)
         self.sheet_ts.notifier.add_watcher('appended_entry', watch_entry)
 
         entry_to_update = self.sheet_ts.df.index[0]
@@ -3633,12 +3647,12 @@ class TestDataSheet(unittest.TestCase):
         logger.debug('utest: submit form')
         form.submit()
 
-        self.assertEqual(self.sheet_ts.df.tail(1).index[0][1], 2)
+
         entry_idx = (form['section1']['__entry_id__'].get_value(),
                      form['section1']['__update_idx__'].get_value(),
                      form['section1']['__conflict_idx__'].get_value())
-        last_entry = self.sheet_ts.df.tail(1)
-        self.assertEqual(last_entry.index[0], entry_idx)
+        self.assertEqual(entry_idx[1], 2)
+        last_entry = self.sheet_ts.df.loc[[entry_idx]]
         last_entry_dict = last_entry.to_dict('record')[0]
         self.assertEqual(last_entry_dict['Age'], entry['Age'])
         self.assertEqual(last_entry_dict['Participant_ID'], previous_pid)
@@ -3880,13 +3894,17 @@ class TestDataSheet(unittest.TestCase):
                  'Phone_Number' : '555'}
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
+
         form.submit()
+        entry_idx = (form['section1']['__entry_id__'].get_value(),
+                     form['section1']['__update_idx__'].get_value(),
+                     form['section1']['__conflict_idx__'].get_value())
 
         sheet_ts2.refresh_data()
-        last_entry = sheet_ts2.df.tail(1)
-        last_entry_dict = last_entry.to_dict('record')[0]
-        self.assertEqual(last_entry_dict['Age'], entry['Age'])
-        self.assertEqual(last_entry_dict['Participant_ID'],
+        last_entry = sheet_ts2.df.loc[entry_idx]
+        #last_entry_dict = last_entry.to_dict('record')[0]
+        self.assertEqual(last_entry['Age'], entry['Age'])
+        self.assertEqual(last_entry['Participant_ID'],
                          entry['Participant_ID'])
 class UserData:
 
@@ -8100,47 +8118,72 @@ class TestEncryption(unittest.TestCase):
         crypter2 = Encrypter.from_key(crypter.get_key())
         self.assertEqual(message, crypter2.decrypt_to_str(crypted_message))
 
+
+def df_to_list_of_arrays(df):
+    return [s.to_numpy() for c,s in df.iteritems()]
+
 class DataSheetModel(QtCore.QAbstractTableModel):
 
     def __init__(self, data_sheet):
         QtCore.QAbstractTableModel.__init__(self)
         self.sheet = data_sheet
 
-    def rowCount(self, parent=None):
         view_df = self.sheet.get_df_view(for_display=True)
-        if view_df is not None:
-            return view_df.shape[0]
-        else:
-            return 0
+        self.sort_icol = 0
+        self.sort_ascending = True
+        self.refresh_view()
+
+        self.sheet.notifier.add_watcher('views_refreshed', self.refresh_view)
+
+    def refresh_view(self):
+        self.view_df = self.sheet.get_df_view(for_display=True)
+        # assert(self.view_df.index.is_lexsorted())
+
+        self.nb_rows = 0
+        self.nb_cols = 0
+        self.view = []
+        self.colums = []
+        self.view_validity = []
+        self.sort_idx = []
+        if self.view_df is not None:
+            self.nb_rows = self.view_df.shape[0]
+            self.nb_cols = self.view_df.shape[1]
+            self.view = df_to_list_of_arrays(self.view_df)
+            self.columns = [c for c in self.view_df.columns]
+            view_validity_df = self.sheet.view_validity(for_display=True)
+            self.view_validity = df_to_list_of_arrays(view_validity_df)
+
+            self.sort_idx = np.argsort(self.view[self.sort_icol])
+            if not self.sort_ascending:
+                self.sort_idx = self.sort_idx[::-1]
+
+    def rowCount(self, parent=None):
+        return self.nb_rows
 
     def columnCount(self, parent=None):
-        view_df = self.sheet.get_df_view(for_display=True)
-        count = 0
-        if view_df is not None:
-            count = view_df.shape[1]
-        return count
+        return self.nb_cols
 
     def data(self, index, role=QtCore.Qt.DisplayRole):
+        icol = index.column()
         if index.isValid():
-            view = self.sheet.get_df_view(for_display=True)
-            column = view.columns[index.column()]
-            value = view.iloc[index.row(), index.column()]
-            value_str = str(value) if not pd.isna(value) else ''
-            if role == QtCore.Qt.DisplayRole:
-                return value_str
             if role == QtCore.Qt.TextAlignmentRole:
-                if index.column()==0:
+                if icol == 0:
                     return QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
                 else:
                     return QtCore.Qt.AlignCenter
             else:
+                irow = self.sort_idx[index.row()]
+                value = self.view[icol][irow]
+                if role == QtCore.Qt.DisplayRole:
+                    value_str = str(value) if not pd.isna(value) else ''
+                    return value_str
+
                 if role == QtCore.Qt.BackgroundRole:
-                    validity = (self.sheet.view_validity(for_display=True)
-                                .iloc[index.row(), index.column()])
+                    validity = self.view_validity[icol][irow]
                     if not validity:
                         return QtGui.QColor('#9C0006')
 
-                hint = self.sheet.plugin.hint(column, value)
+                hint = self.sheet.plugin.hint(self.columns[icol], value)
                 if hint is not None:
                     if role == QtCore.Qt.BackgroundRole:
                         return hint.background_qcolor
@@ -8156,31 +8199,36 @@ class DataSheetModel(QtCore.QAbstractTableModel):
     def entry_id(self, index):
         """ ASSUME: not called with "dynamic" sheet """
         if index.isValid():
-            return self.sheet.get_df_view().index[index.row()]
+            return self.view_df.index[self.sort_idx[index.row()],:]
         return None
 
-    def headerData(self, col, orientation, role):
+    def entry_df(self, index):
+        if index.isValid():
+            return self.view_df.iloc[[self.sort_idx[index.row()]],:]
+        return None
+
+    def headerData(self, icol, orientation, role):
         if role==QtCore.Qt.DisplayRole:
-            df_view = self.sheet.get_df_view(for_display=True)
             if orientation == QtCore.Qt.Horizontal:
-                return df_view.columns[col]
+                return self.columns[icol]
         return None
 
     @QtCore.pyqtSlot()
-    def update_after_append(self):
-        self.beginInsertRows(QtCore.QModelIndex(), self.rowCount(),
-                             self.rowCount())
+    def update_after_append(self, entry_df):
+        irow = self.view_df.index.get_loc(entry_df.index[0])
+        tree_view_irow = np.where(self.sort_idx==irow)[0][0]
+        self.beginInsertRows(QtCore.QModelIndex(), tree_view_irow, tree_view_irow)
         # TODO: proper callback to actual data change here
         self.endInsertRows()
         return True
 
     def update_before_delete(self, entry_id):
-        view = self.sheet.get_df_view()
-        irow = view.index.get_loc(entry_id)
+        irow = self.view_df.index.get_loc(entry_df.index[0])
+        tree_view_irow = np.where(self.sort_idx==irow)[0][0]
         logger.debug('before_delete(%s) -> irow = %d',
-                     entry_id, irow)
+                     entry_id, tree_view_irow)
         self.layoutAboutToBeChanged.emit()
-        self.beginRemoveRows(QtCore.QModelIndex(), irow, irow)
+        self.beginRemoveRows(QtCore.QModelIndex(), tree_view_irow, tree_view_irow)
 
     @QtCore.pyqtSlot()
     def update_after_delete(self, entry_df):
@@ -8199,14 +8247,13 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.layoutChanged.emit()
         return True
 
-
     @QtCore.pyqtSlot()
     def update_after_set(self, entry_idx):
-        view = self.sheet.get_df_view()
-        irow = view.index.get_loc(entry_idx)
-        ncols = view.shape[1]
-        self.dataChanged.emit(self.createIndex(irow,0),
-                              self.createIndex(irow,ncols-1))
+        irow = self.view_df.index.get_loc(entry_df.index[0])
+        tree_view_irow = np.where(self.sort_idx==irow)[0][0]
+        ncols = self.view_df.shape[1]
+        self.dataChanged.emit(self.createIndex(tree_view_irow, 0),
+                              self.createIndex(tree_view_irow, ncols-1))
         return True
 
 def dict_lazy_setdefault(d, k, make_value):
@@ -8426,6 +8473,7 @@ class SheetViewChanger:
         view_label = self.combobox.currentText()
         self.sheet_model.beginResetModel()
         self.sheet_model.sheet.set_default_view(view_label)
+        self.sheet_model.refresh_view()
         self.sheet_model.endResetModel()
         self.sheet_model.layoutChanged.emit()
 
@@ -9000,15 +9048,25 @@ class PiccelApp(QtWidgets.QApplication):
             _data_sheet_ui.tableView.setModel(model)
             hHeader = _data_sheet_ui.tableView.horizontalHeader()
             hHeader.setMaximumSectionSize(400) # TODO expose param
-            hHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+            #hHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
 
             vHeader = _data_sheet_ui.tableView.verticalHeader()
-            vHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+            vHeader.setMaximumSectionSize(50)
+            #vHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+
+            def resize_table_view(*args, **kwargs):
+                #_data_sheet_ui.tableView.resizeRowsToContents()
+                _data_sheet_ui.tableView.resizeColumnsToContents()
+
+            for notification in ['appended_entry', 'entry_set', 'pre_delete_entry',
+                                 'deleted_entry', 'clear_data']:
+                sh.notifier.add_watcher(notification, resize_table_view)
+
+            resize_table_view()
 
             def f_cell_action(idx):
-                row_df = sh.get_df_view().iloc[[idx.row()]]
+                row_df = model.entry_df(idx)
                 column = row_df.columns[idx.column()-(row_df.index.name is not None)]
-                # TODO: action_label
                 action_result, action_label = sh.plugin.action(row_df, column)
                 if isinstance(action_result, Form):
                     self.make_form_tab(action_label, model, _data_sheet_ui,

@@ -89,7 +89,7 @@ class LescaDashboard(SheetPlugin):
             empty_df = pd.DataFrame([], index=entry_df.index)
             self.df = self.df.append(empty_df)
             self.sheet.invalidate_cached_views()
-            self.sheet.notifier.notify('appended_entry')
+            self.sheet.notifier.notify('appended_entry', empty_df)
         if entry_df.index[0] in self.df.index:
             self.refresh_entries(entry_df.index)
             self.sheet.invalidate_cached_views()
