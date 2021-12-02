@@ -2111,7 +2111,6 @@ class DataSheet:
                     self._append_df(entry_df)
 
             # TODO: IMPORTANT changed form data is ignored here
-            
             self.filesystem.accept_all_changes()
 
     def set_form_master(self, form):
@@ -2311,7 +2310,7 @@ class DataSheet:
         return op.join('live_forms', protect_fn(self.user))
 
     def export_to_pdf(self, output_pdf_abs_fn, password, view=None,
-                      columns=None):
+                      columns=None, sort_by=None):
         assert(self.filesystem is not None)
         weasyprint = import_module('weasyprint')
         PyPDF2 = import_module('PyPDF2')
@@ -2321,6 +2320,8 @@ class DataSheet:
             return
 
         df = self.get_df_view(view).reset_index(drop=True)
+        if sort_by is not None:
+            df.sort_values(by=sort_by, inplace=True)
         if columns is not None:
             df = df[columns]
 
