@@ -70,6 +70,9 @@ class SheetPlugin:
     def reset_view_index_for_display(self):
         return False
 
+    def show_index_in_ui(self):
+        return False
+
     def views(self, base_views):
         """
         Return a dictionnary that maps a view label to a callable.

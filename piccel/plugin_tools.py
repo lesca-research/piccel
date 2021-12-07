@@ -43,15 +43,19 @@ class LescaDashboard(SheetPlugin):
     def reset_view_index_for_display(self):
         return True
 
+    def show_index_in_ui(self):
+        return True
+
     def refresh_entries(self, pids):
         logger.warning('refresh_entries not implemented in plugin of sheet %s',
                        self.sheet.label)
 
     def get_full_view(self, df, for_display=False):
-        df = self.df.sort_index()
-        return df.reset_index() if for_display else df
+        # df = self.df.sort_index()
+        # return df.reset_index() if for_display else df
+        return self.df
 
-    def views(self, base_views, for_display=False):
+    def views(self, base_views):
         return {'full' : self.get_full_view}
 
     def default_view(self):
@@ -88,6 +92,7 @@ class LescaDashboard(SheetPlugin):
             # New participant
             empty_df = pd.DataFrame([], index=entry_df.index)
             self.df = self.df.append(empty_df)
+            self.df.sort_index(inplace=True)
             self.sheet.invalidate_cached_views()
             self.sheet.notifier.notify('appended_entry', empty_df)
         if entry_df.index[0] in self.df.index:

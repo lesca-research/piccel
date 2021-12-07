@@ -510,7 +510,7 @@ function snakeCaseToCamelCase(s) {
                              supported_languages=supported_languages)
         self.tr.register('title', title)
         self.unique_keys = set()
-        self.unique_items = []
+
         self.datetime_keys = set()
         self.date_keys = set()
         self.int_keys = set()
@@ -548,8 +548,7 @@ function snakeCaseToCamelCase(s) {
 
             for item in section.items:
                 if item.unique:
-                    assert(len(item.keys)==1) # no multiindex yet
-                    self.unique_items.append(item)
+                    assert(len(item.keys)==1) # no multiple unique constraint yet
                 if item.freeze_on_update:
                     self.to_freeze_on_update.add(item)
                 if item.vtype == 'user_name':
@@ -577,7 +576,6 @@ function snakeCaseToCamelCase(s) {
         self.sheet = None
 
         self.sections = sections
-        self.nb_valid_sections = 0
         self.current_section = None
         self.current_section_name = None
         self.section_path = []
@@ -586,6 +584,12 @@ function snakeCaseToCamelCase(s) {
         self.on_cancel = None
         self.set_language(default_language)
         self.to_next_section()
+
+    def set_unique_validator(self, validator):
+        for section in self.sections.values():
+            for item in section.items:
+                if item.unique:
+                    item.set_unique_validator(validator)
 
     def set_language(self, language):
         if language != self.tr.language:
@@ -838,7 +842,6 @@ function snakeCaseToCamelCase(s) {
                 logger.debug('Current section "%s" is invalid, ' \
                              'cannot go to next one.', self.section_path[-1])
                 raise InvalidSection(self.section_path[-1])
-            self.nb_valid_sections += 1
             next_section_name = self.current_section.next()
             if next_section_name is not None:
                 self.section_path.append(next_section_name)
@@ -870,7 +873,6 @@ function snakeCaseToCamelCase(s) {
             self.current_section = self[self.section_path[-1]]
         else:
             logger.debug('No previous section to return to')
-        self.nb_valid_sections -= 1
         self.validate()
 
         self.current_section.set_language(self.tr.language)
@@ -882,27 +884,22 @@ function snakeCaseToCamelCase(s) {
     def on_section_is_valid(self, section_name, section):
         logger.debug2('%s is notified that section %s is valid',
                      self, section_name)
-        self.nb_valid_sections = min(len(self.section_path),
-                                     self.nb_valid_sections+1)
         self.validate()
 
     def on_section_is_invalid(self, section_name, section):
         logger.debug2('%s is notified that section %s is invalid',
                      self, section_name)
-        self.nb_valid_sections = max(0, self.nb_valid_sections-1)
         self.validate()
 
     def validate(self):
         next_section = self.current_section.next()
         current_section_is_final =  next_section == '__submit__'
-        # validity = (self.nb_valid_sections == len(self.section_path)) and \
-        #     current_section_is_final
         validity = current_section_is_final and \
             all(self[s].is_valid() for s in self.section_path)
         logger.debug2('%s: validity is %s (ccurrent_section=%s, is_final=%s, '\
-                     'nb_valid_sections=%s, section_path=%s)', self, validity,
+                     'section_path=%s)', self, validity,
                      self.current_section_name, current_section_is_final,
-                     self.nb_valid_sections, ', '.join(self.section_path))
+                     ', '.join(self.section_path))
         signal = ['not_ready_to_submit', 'ready_to_submit'][validity]
         logger.debug2('%s notifies %s', self, signal)
         self.notifier.notify(signal)
@@ -960,8 +957,8 @@ function snakeCaseToCamelCase(s) {
             self.set_value_for_key(key, value)
 
     def set_value_for_key(self, key, value):
-        for item in self.key_to_items[key]:
-            item.set_value(key, value)
+        for section in self.sections.values():
+            section.set_value_for_key(key, value)
 
     def reset(self):
         # logger.debug('Reset form "%s"', self.tr['title'])
@@ -1200,6 +1197,11 @@ class FormSection:
 
         self.check_validity()
 
+    def set_value_for_key(self, key, value, force=False):
+        for item in self.items:
+            if key in item.keys:
+                item.set_value(key, value, force=force)
+
     def add_item(self, item, position=None, watch_validity=True):
         for key in item.keys:
             assert(key not in self.key_to_items)
@@ -1213,7 +1215,7 @@ class FormSection:
                           item)
 
     def has_key(self, key):
-        return key in self.key_to_items
+        return any(key in item.keys for item in self.items)
 
     def add_translations(self, other_section):
         self.tr.add_translations(other_section.tr)
@@ -2712,15 +2714,12 @@ class DataSheet:
 
         form.set_values_from_entry(entry_dict)
 
-        logger.debug2('Sheet %s: set unique validator for items %s',
-                     self.label, ', '.join(['%s'%i for i in form.unique_items]))
+        logger.debug2('Sheet %s: set unique validator', self.label)
 
-        for item in form.unique_items:
-            item.set_unique_validator(LazyFunc(self.validate_unique,
-                                               update_idx=update_idx,
-                                               entry_id=entry_id,
-                                               conflict_idx=conflict_idx))
-
+        form.set_unique_validator(LazyFunc(self.validate_unique,
+                                           update_idx=update_idx,
+                                           entry_id=entry_id,
+                                           conflict_idx=conflict_idx))
         entry_id_str = str(entry_id)
         update_idx_str = str(update_idx)
         conflict_idx_str = str(conflict_idx)
@@ -6308,8 +6307,9 @@ class FormItem:
     }
 
     def __init__(self, keys, default_language, supported_languages,
-                 vtype='text', title=None, description='', init_values=None,
-                 regexp='[\s\S]*', regexp_invalid_message='',
+                 label=None, vtype='text', title=None, description='',
+                 init_values=None, regexp='[\s\S]*',
+                 regexp_invalid_message='',
                  allow_empty=True, choices=None, other_choice_label=None,
                  unique=False, unique_view=None, generator=None,
                  hidden=None, access_level=UserRole.VIEWER,
@@ -6325,6 +6325,9 @@ class FormItem:
         self.notifier = Notifier(watchers if watchers is not None else {})
 
         self.keys = keys if keys is not None else {}
+
+        self.label = (label if label is not None else
+                      ' | '.join(self.keys.keys()))
 
         self.tr = Translator(default_language=default_language,
                              supported_languages=supported_languages)
@@ -6469,30 +6472,9 @@ class FormItem:
                     return False
         return True
 
-
-    # def attach_sheet(self, sheet):
-
-    #     self.sheet = sheet
-    #     if logger.level >= logging.DEBUG:
-    #         df_view = self.sheet.get_df_view()
-    #         logger.debug('Attach sheet "%s" to %s (sheet default view - '\
-    #                      'index: %s, columns: %s)', sheet.label, self,
-    #                      df_view.index.name, ', '.join(df_view.columns))
-
-    #     raw_df = self.sheet.get_df_view('raw')
-    #     for key in self.keys:
-    #         if key not in raw_df.columns:
-    #             msg = "Form key %s not found in columns of sheet data: %s" % \
-    #                 (key, ", ".join(sheet.df.columns))
-    #             logger.error(msg)
-    #             raise FormDataInconsitency(msg)
-
-    #     if self.unique:
-    #         for key in self.keys:
-    #             self.validate(key)
-
     def to_dict(self):
         return {'keys' : self.keys,
+                'label' : self.label,
                 'default_language' : self.tr.language,
                 'supported_languages' : list(self.tr.supported_languages),
                 'vtype' : self.vtype,
@@ -6582,7 +6564,7 @@ class FormItem:
 
         value_str = self.values_str[key]
         if (self.generator is not None and \
-                self.generator.endswith('submission')) or \
+            self.generator.endswith('submission')) or \
             (len(value_str)==0 and self.allow_None):
             self._set_validity(True, '', key)
             return
@@ -8170,7 +8152,7 @@ class TestEncryption(unittest.TestCase):
 
 
 def df_to_list_of_arrays(df):
-    return [s.to_numpy() for c,s in df.iteritems()]
+    return list(zip(*[(c,s.to_numpy()) for c,s in df.iteritems()]))
 
 class DataSheetModel(QtCore.QAbstractTableModel):
 
@@ -8178,7 +8160,6 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         QtCore.QAbstractTableModel.__init__(self)
         self.sheet = data_sheet
 
-        view_df = self.sheet.get_df_view(for_display=True)
         self.sort_icol = 0
         self.sort_ascending = True
         self.refresh_view()
@@ -8186,7 +8167,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.sheet.notifier.add_watcher('views_refreshed', self.refresh_view)
 
     def refresh_view(self):
-        self.view_df = self.sheet.get_df_view(for_display=True)
+        self.view_df = self.sheet.get_df_view() #for_display=True)
         # assert(self.view_df.index.is_lexsorted())
 
         self.nb_rows = 0
@@ -8196,12 +8177,18 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.view_validity = []
         self.sort_idx = []
         if self.view_df is not None:
-            self.nb_rows = self.view_df.shape[0]
-            self.nb_cols = self.view_df.shape[1]
-            self.view = df_to_list_of_arrays(self.view_df)
-            self.columns = [c for c in self.view_df.columns]
-            view_validity_df = self.sheet.view_validity(for_display=True)
-            self.view_validity = df_to_list_of_arrays(view_validity_df)
+            view_validity_df = self.sheet.view_validity()
+            if self.sheet.plugin.show_index_in_ui():
+                self.columns, self.view = df_to_list_of_arrays(self.view_df
+                                                               .reset_index())
+                _, self.view_validity = df_to_list_of_arrays(view_validity_df
+                                                             .reset_index())
+            else:
+                self.columns, self.view = df_to_list_of_arrays(self.view_df)
+                _, self.view_validity = df_to_list_of_arrays(view_validity_df)
+
+            self.nb_cols = len(self.columns)
+            self.nb_rows = len(self.view[0])
 
             self.sort_idx = np.argsort(self.view[self.sort_icol])
             if not self.sort_ascending:
@@ -9201,7 +9188,7 @@ class PiccelApp(QtWidgets.QApplication):
                                               sh_name,
                                               sh.get_plugin_code(),
                                               'python',
-                                              lambda s : sh.set_plugin(s, self.logic.workbook, overwrite=True)))
+                                              lambda s : sh.set_plugin(s, overwrite=True)))
 
             if self.logic.workbook.user_role < UserRole.ADMIN:
                 _data_sheet_ui.button_edit_plugin.hide()
