@@ -43,8 +43,8 @@ class SheetPlugin:
     def _on_entry_append(self, sheet, entry_df=None):
         self.update(sheet, entry_df)
 
-    def _on_entry_set(self, sheet, entry_id):
-        self.update(sheet, sheet.df.loc[[entry_id]])
+    def _on_entry_set(self, sheet, entry_idx):
+        self.update(sheet, sheet.df.loc[[entry_idx]])
 
     def _on_entry_deletion(self, sheet, entry_df):
         self.update(sheet, entry_df, deletion=True)
@@ -66,9 +66,6 @@ class SheetPlugin:
             # Watch clear
             fc = LazyFunc(self._on_clear, sheet_to_watch)
             sheet_to_watch.notifier.add_watcher('cleared_data', fc)
-
-    def reset_view_index_for_display(self):
-        return False
 
     def show_index_in_ui(self):
         return False

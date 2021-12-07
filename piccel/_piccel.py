@@ -1885,9 +1885,7 @@ class DataSheet:
         self.views = {}
 
         self.cached_views = defaultdict(lambda: None)
-        self.cached_views_for_display = defaultdict(lambda: None)
         self.cached_validity = defaultdict(lambda: None)
-        self.cached_validity_for_display = defaultdict(lambda: None)
 
         self.cached_inconsistent_entries = None
 
@@ -2387,12 +2385,11 @@ class DataSheet:
     def after_workbook_load(self):
         self.plugin.after_workbook_load()
 
-    def view_validity(self, view_label=None, for_display=False):
+    def view_validity(self, view_label=None):
         if view_label is None:
             view_label = self.default_view
 
-        cached_validity = self.cached_validity_for_display if for_display \
-            else self.cached_validity
+        cached_validity = self.cached_validity
 
         validity_df = cached_validity[view_label]
         if validity_df is None:
@@ -2411,8 +2408,6 @@ class DataSheet:
                 inconsistent_ids = (self.inconsistent_entries()
                                     .intersection(validity_df.index))
                 validity_df.loc[inconsistent_ids, :] = False
-            if for_display and self.plugin.reset_view_index_for_display():
-                validity_df = validity_df.reset_index()
             cached_validity[view_label] = validity_df
         return validity_df
 
@@ -2482,7 +2477,10 @@ class DataSheet:
                 logger.debug2('df_to_str: format column %s', col)
                 f = lambda v: (self.form_master.format(col,v) \
                                if not pd.isna(v) else '')
-                df[[col]] = df[[col]].applymap(f)
+                try:
+                    df[[col]] = df[[col]].applymap(f)
+                except AttributeError:
+                    from IPython import embed; embed()
 
         df = df.reset_index()
         df['__entry_id__'] = df['__entry_id__'].apply(lambda x: hex(x))
@@ -2494,18 +2492,15 @@ class DataSheet:
     def invalidate_cached_views(self):
         for view in self.views:
             self.cached_views[view] = None
-            self.cached_views_for_display[view] = None
             self.cached_validity[view] = None
-            self.cached_validity_for_display[view] = None
             self.cached_inconsistent_entries = None
         self.notifier.notify('views_refreshed')
 
-    def get_df_view(self, view_label=None, for_display=False):
+    def get_df_view(self, view_label=None):
 
         if view_label is None:
             view_label = self.default_view
-        cached_views = self.cached_views_for_display if for_display \
-            else self.cached_views
+        cached_views = self.cached_views
 
         view_df = cached_views[view_label]
         if view_df is None:
@@ -2518,8 +2513,6 @@ class DataSheet:
                     view_df = view_df.drop(columns=['__fn__'])
             else:
                 logger.debug('Update cached view "%s": None', view_label)
-            if for_display and self.plugin.reset_view_index_for_display():
-                view_df = view_df.reset_index()
             cached_views[view_label] = view_df
 
         return view_df
@@ -2793,6 +2786,8 @@ class DataSheet:
         if submission_mode == 'append':
             self.append_entry(entry_dict, (entry_id, update_idx, conflict_idx))
         elif submission_mode == 'set':
+            # print('set submission')
+            # from IPython import embed; embed()
             self.set_entry(entry_dict, (entry_id, update_idx, conflict_idx))
         else:
             raise Exception('Unknown submission mode "%s"' % submission_mode)
@@ -8167,7 +8162,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.sheet.notifier.add_watcher('views_refreshed', self.refresh_view)
 
     def refresh_view(self):
-        self.view_df = self.sheet.get_df_view() #for_display=True)
+        self.view_df = self.sheet.get_df_view()
         # assert(self.view_df.index.is_lexsorted())
 
         self.nb_rows = 0
@@ -9045,8 +9040,9 @@ class PiccelApp(QtWidgets.QApplication):
             try:
                 form.submit()
             except Exception as e:
-                msg = 'Error occured while submitting:\n%s', repr(e)
+                msg = 'Error occured while submitting:\n%s' % repr(e)
                 logger.error(msg)
+                from IPython import embed; embed()
                 message_box = QtWidgets.QMessageBox()
                 message_box.setIcon(QtWidgets.QMessageBox.Critical)
                 message_box.setText(msg)

@@ -40,9 +40,6 @@ class LescaDashboard(SheetPlugin):
     def sheets_to_watch(self):
         return ['Participants']
 
-    def reset_view_index_for_display(self):
-        return True
-
     def show_index_in_ui(self):
         return True
 
@@ -50,9 +47,7 @@ class LescaDashboard(SheetPlugin):
         logger.warning('refresh_entries not implemented in plugin of sheet %s',
                        self.sheet.label)
 
-    def get_full_view(self, df, for_display=False):
-        # df = self.df.sort_index()
-        # return df.reset_index() if for_display else df
+    def get_full_view(self, df):
         return self.df
 
     def views(self, base_views):
