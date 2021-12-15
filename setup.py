@@ -26,7 +26,7 @@ def make_resources():
     try:
         for ui_fn in glob(op.join('resources', '*.ui')):
             dest_py_fn = op.join(ui_module_path,
-                                 '%s_ui.py' % op.splitext(op.basename(ui_fn))[0])
+                                 '%s_ui.py' % op.splitext(op.basename(ui_fn))[0 ])
             cmd = ['pyuic5', '-x', ui_fn, '-o', dest_py_fn]
             subprocess.run(cmd)
         dest_py_fn = op.join(ui_module_path, 'resources.py')
@@ -62,6 +62,7 @@ setup(name='piccel', version=version['__version__'],
               'piccel = piccel.commands.piccel:main',
               'piccel_extract_logic = piccel.commands.piccel_extract_logic:main',
               'piccel_import_logic = piccel.commands.piccel_import_logic:main',
+              'piccel_form_edit = piccel.commands.piccel_form_edit_test:main',
               'piccel_decrypt = piccel.commands.piccel_crypt:decrypt_cmd',
               'piccel_encrypt = piccel.commands.piccel_crypt:encrypt_cmd',
               'piccel_dump_access_key = piccel.commands.piccel_dump_access_key:main'

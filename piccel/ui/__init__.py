@@ -14,5 +14,11 @@ from .generated import section_ui
 from .generated import selector_ui
 from .generated import text_editor_ui
 from .generated import workbook_ui
+from .generated import dynamic_vlist_ui
+from .generated import dynamic_vlist_item_ui
+from .generated import form_editor_main_ui
+from .generated import form_edit_ui
+from .generated import section_edit_ui
+from .generated import item_edit_ui
 from . import widgets
 from . import main_qss

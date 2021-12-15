@@ -185,34 +185,4 @@ class FreezeTableWidget(QTableView):
             self.frameWidth()-1, self.columnWidth(0)+2,
             self.viewport().height() + self.horizontalHeader().height())
 
-def main(args):
-    def split_and_strip(s, splitter):
-        return [l.strip() for l in s.split(splitter)]
 
-    app = QApplication(args)
-    model = QStandardItemModel()
-    file = QFile(QFileInfo(__file__).absolutePath() + '/grades.txt')
-    if file.open(QFile.ReadOnly):
-        line = file.readLine(200).decode('utf-8')
-        header = split_and_strip(line, ',')
-        model.setHorizontalHeaderLabels(header)
-        row = 0
-        while file.canReadLine():
-            line = file.readLine(200).decode('utf-8')
-            if not line.startswith('#') and ',' in line:
-                fields = split_and_strip(line, ',')
-                for col, field in enumerate(fields):
-                    newItem = QStandardItem(field)
-                    model.setItem(row, col, newItem)
-                row += 1
-    file.close()
-    tableView = FreezeTableWidget(model)
-    tableView.setWindowTitle("Frozen Column Example")
-    tableView.resize(560, 680)
-    tableView.show()
-    return app.exec_()
-
-
-if __name__ == '__main__':
-    import sys
-    main(sys.argv)
