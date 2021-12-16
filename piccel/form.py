@@ -3196,9 +3196,11 @@ class ItemPropertyEditor(QtWidgets.QWidget, item_edit_ui.Ui_ItemPropertyEditor):
                 self.initialValueLineEdit.editingFinished.disconnect()
             except TypeError:
                 pass
-            self.initialValueLineEdit.setText(item_node.init_value)
+            #TODO: handle format/unformat
+            self.initialValueLineEdit.setText(str(item_node.init_value))
             def store_init_value():
-                item_node.init_value = self.initialValueLineEdit.text
+                # TODO: handle format/unformat
+                item_node.init_value = self.initialValueLineEdit.text()
             self.initialValueLineEdit.editingFinished.connect(store_init_value)
         else:
             self.initialValueLineEdit.hide()

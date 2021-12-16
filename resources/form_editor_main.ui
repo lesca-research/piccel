@@ -51,7 +51,7 @@
        </widget>
       </item>
       <item>
-       <widget class="QPushButton" name="preview_button">
+       <widget class="QPushButton" name="button_preview">
         <property name="text">
          <string>Preview</string>
         </property>

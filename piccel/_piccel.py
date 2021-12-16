@@ -33,7 +33,7 @@ from .plugin_tools import (LescaDashboard, track_interview, interview_action,
                            form_update_or_new, DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
                            track_emailled_poll, emailled_poll_action,
                            track_participant_status, participant_status_action)
-from .form import Form, FormSection, FormItem, NotEditableError
+from .form import Form, FormSection, FormItem, NotEditableError, DateTimeCollector
 
 import unittest
 import tempfile
