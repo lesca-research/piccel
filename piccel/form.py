@@ -20,7 +20,8 @@ from .logging import logger
 from .core import UserRole, Notifier, LazyFunc, nexts
 
 
-from .ui import form_editor_main_ui, form_edit_ui, section_edit_ui, item_edit_ui
+from .ui import (form_editor_main_ui, form_edit_ui, section_edit_ui, item_edit_ui,
+                 choice_edit_ui, variable_edit_ui, section_transition_edit_ui)
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 
@@ -3094,6 +3095,46 @@ def link_line_edit(line_edit, dest_dict, dest_key):
     callback = compose(line_edit.text, partial(dest_dict.__setitem__, dest_key))
     line_edit.editingFinished.connect(callback)
 
+def link_text_edit(text_edit, dest_dict, dest_key):
+    try:
+        text_edit.editingFinished.disconnect()
+    except TypeError:
+        pass
+
+    text_edit.setPlainText(dest_dict[dest_key])
+    callback = compose(text_edit.toPlainText,
+                       partial(dest_dict.__setitem__, dest_key))
+    text_edit.editingFinished.connect(callback)
+
+def link_combo_box(combox_box, dest_dict, dest_key, choices=None):
+    try:
+        combox_box.currentTextChanged.disconnect()
+    except TypeError:
+        pass
+    if choices is not None:
+        combox_box.clear()
+        combox_box.addItems(choices)
+    combox_box.setCurrentText(dest_dict[dest_key])
+    combox_box.currentTextChanged.connect(partial(dest_dict.__setitem__, dest_key))
+
+def link_check_box(check_box, dest_dict, dest_key):
+    try:
+        check_box.stateChanged.disconnect()
+    except TypeError:
+        pass
+    check_box.setChecked(dest_dict[dest_key])
+    def store_state_to_dict(qstate):
+       dest_dict[dest_key] = (qstate == Qt.Checked)
+    check_box.stateChanged.connect(store_state_to_dict)
+
+def link_spin_box(spin_box, dest_dict, dest_key):
+    try:
+        spin_box.valueChanged.disconnect()
+    except TypeError:
+        pass
+    spin_box.setValue(dest_dict[dest_key])
+    spin_box.valueChanged.connect(partial(dest_dict.__setitem__, dest_key))
+
 class FormPropertyEditor(QtWidgets.QWidget,
                          form_edit_ui.Ui_FormPropertyEditor):
     def __init__(self, parent=None):
@@ -3122,26 +3163,94 @@ class ItemPropertyEditor(QtWidgets.QWidget, item_edit_ui.Ui_ItemPropertyEditor):
         self.setupUi(self)
 
     def attach(self, item_node):
-        for field, language in [(self.title_field_french, 'French'),
-                                (self.title_field_english, 'English')]:
-            link_line_edit(field, item_node.item_dict['title'], language)
+        for field, dest_dict, key in [(self.title_field_french,
+                                       item_node.item_dict['title'], 'French'),
+                                      (self.title_field_english,
+                                       item_node.item_dict['title'], 'English'),
+                                      (self.regExprLineEdit, item_node.item_dict,
+                                       'regexp'),
+                                      (self.regExprInvalidHintLineEdit,
+                                       item_node.item_dict,
+                                       'regexp_invalid_message')]:
+            link_line_edit(field, dest_dict, key)
 
-def load_form_from_file():
-    form_fn = QFileDialog.getOpenFileName(None, "Load Form", "",
-                                          "Piccel Form Files (*.form)")
+        for field, dest_dict, key in [(self.description_field_french,
+                                       item_node.item_dict['description'],
+                                       'French'),
+                                      (self.description_field_english,
+                                       item_node.item_dict['description'],
+                                       'English')]:
+            link_text_edit(field, dest_dict, key)
 
-    form = None
-    if form_fn is not None:
-        with open(form_fn) as fin:
-            form = Form.from_json(fin.read())
 
-    return form
+        link_combo_box(self.typeComboBox, item_node.item_dict, 'vtype')
+        link_check_box(self.uniqueCheckBox, item_node.item_dict, 'unique')
+        link_check_box(self.allowEmptyCheckBox, item_node.item_dict, 'allow_empty')
+        link_combo_box(self.accessLevelComboBox, item_node.item_dict, 'access_level')
+        link_spin_box(self.textNbLinesSpinBox, item_node.item_dict, 'nb_lines')
+
+        if item_node.variables_node() is None:
+            self.initialValueLineEdit.show()
+            self.initialValueLabel.show()
+            try:
+                self.initialValueLineEdit.editingFinished.disconnect()
+            except TypeError:
+                pass
+            self.initialValueLineEdit.setText(item_node.init_value)
+            def store_init_value():
+                item_node.init_value = self.initialValueLineEdit.text
+            self.initialValueLineEdit.editingFinished.connect(store_init_value)
+        else:
+            self.initialValueLineEdit.hide()
+            self.initialValueLabel.hide()
+
+class ChoicePropertyEditor(QtWidgets.QWidget, choice_edit_ui.Ui_ChoicePropertyEditor):
+    def __init__(self, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.setupUi(self)
+
+    def attach(self, choice_node):
+        for field, language in [(self.choice_field_french, 'French'),
+                                (self.choice_field_english, 'English')]:
+            link_line_edit(field, choice_node.choice_tr,language)
+
+
+class VariablePropertyEditor(QtWidgets.QWidget,
+                             variable_edit_ui.Ui_VariablePropertyEditor):
+    def __init__(self, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.setupUi(self)
+
+    def attach(self, var_node):
+        for field, dest_dict, key in [(self.variable_field_french,
+                                       var_node.cfg['key_tr'], 'French'),
+                                      (self.variable_field_english,
+                                       var_node.cfg['key_tr'], 'English'),
+                                      (self.initValueLineEdit,
+                                       var_node.cfg, 'init_value')]:
+            link_line_edit(field, dest_dict, key)
+
+class SectionTransitionPropertyEditor(QtWidgets.QWidget,
+                                      section_transition_edit_ui.Ui_SectionTransitionPropertyEditor):
+    def __init__(self, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.setupUi(self)
+
+    def attach(self, transition_node):
+        link_line_edit(self.criterionLineEdit, transition_node.cfg, 'predicate')
+        next_section_choices = ['__submit__'] + \
+                                [s for s in (transition_node.parent().parent()
+                                             .parent().section_labels())
+                                 if s != transition_node.parent().parent().label]
+        link_combo_box(self.nextSectionComboBox, transition_node.cfg, 'next_section',
+                       choices=next_section_choices)
 
 def form_save_file(form_dict, form_fn=None):
     if form_fn is None:
-        form_fn = QFileDialog.getSaveFileName(None, "Save Form", "",
-                                              "Piccel Form Files (*.form)")
-    if form_fn is not None:
+        form_fn, _ = (QtWidgets.QFileDialog
+                      .getSaveFileName(None, "Save Form", "",
+                                       "Piccel Form Files (*.form)"))
+    if form_fn is not None and form_fn != '':
         form_json = Form.form_dict(form_dict).to_json()
         with open(form_fn, 'w') as fout:
             fout.write(form_json)
@@ -3149,21 +3258,58 @@ def form_save_file(form_dict, form_fn=None):
 def form_save_as_file(form_dict):
     FormEditor.form_save_file(form_dict, None)
 
+class FormEditorFileIO:
+    def __init__(self, form_fn=None):
+        self.current_form_fn = form_fn
+
+    def get_form(self):
+        if self.current_form_fn is None:
+            return self.open_form()
+        else:
+            return self._load_form(self.current_form_fn)
+
+    def _load_form(self, form_fn):
+        with open(form_fn, 'r') as fin:
+            return Form.from_json(fin.read())
+
+    def open_form(self, parent_widget=None):
+        open_dir = (op.dirname(self.current_form_fn)
+                    if self.current_form_fn is not None else '')
+        form_fn, _ = (QtWidgets.QFileDialog
+                      .getOpenFileName(parent_widget, "Load Form", open_dir,
+                                       "Piccel Form Files (*.form)"))
+
+        form = None
+        if form_fn is not None and form_fn != '':
+            self.current_form_fn = form_fn
+            form = self._load_form(self.current_form_fn)
+            # TODO: handle error!
+        return form
+
+    def save_form(self, form, ask_as=False, parent_widget=None):
+        if ask_as:
+            form_fn, _ = (QtWidgets.QFileDialog
+                          .getSaveFileName(parent_widget, "Save Form",
+                                           self.current_form_fn,
+                                           "Piccel Form Files (*.form)"))
+        else:
+            form_fn = self.current_form_fn
+
+        if form_fn is not None and form_fn != '':
+            form_json = form.to_json()
+            with open(form_fn, 'w') as fout:
+                fout.write(form_json)
+
 class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
-    def __init__(self, form_dict,
-                 on_open=load_form_from_file,
-                 on_save=form_save_file,
-                 on_save_as=form_save_as_file,
-                 parent=None):
+    def __init__(self, form_io=None, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
 
-        form = Form.from_dict(form_dict)
-        form.set_supported_languages(['French', 'English'])
-        self.model = TreeModel(form.to_dict())
-        self.tree_view.setModel(self.model)
-        self.tree_view.expandAll()
-        self.tree_view.resizeColumnToContents(1)
+        self.pending_changes = False
+        self.form_io = (form_io if form_io is not None else
+                        FormEditorFileIO())
+
+        self.set_form(self.form_io.get_form())
 
         self.tree_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.tree_view.customContextMenuRequested.connect(self.open_menu)
@@ -3177,15 +3323,75 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
         self.section_property_editor = SectionPropertyEditor()
         self.verticalLayout.addWidget(self.section_property_editor)
 
+        self.section_transition_property_editor = SectionTransitionPropertyEditor()
+        self.verticalLayout.addWidget(self.section_transition_property_editor)
+
         self.item_property_editor = ItemPropertyEditor()
         self.verticalLayout.addWidget(self.item_property_editor)
 
+        self.choice_property_editor = ChoicePropertyEditor()
+        self.verticalLayout.addWidget(self.choice_property_editor)
+
+        self.variable_property_editor = VariablePropertyEditor()
+        self.verticalLayout.addWidget(self.variable_property_editor)
+
+        if hasattr(self.form_io, 'open_form'):
+            def on_open():
+                if self.check_pending_changes():
+                    self.set_form(self.form_io.open_form(self))
+            self.button_open.clicked.connect(on_open)
+        else:
+            self.open_button.hide()
+
+        def on_save():
+            form_dict = self.model.root.childItems[0].to_dict()
+            self.form_io.save_form(Form.from_dict(form_dict), parent_widget=self)
+        self.button_save.clicked.connect(on_save)
+
+        def on_preview():
+            pass
+        self.button_preview.clicked.connect(on_preview)
+
         self.hide_property_editors()
+
+    def on_change(self):
+        self.pending_changes = True
+
+    def check_pending_changes(self):
+        if self.pending_changes:
+            message_box = QtWidgets.QMessageBox()
+            message_box.setIcon(QtWidgets.QMessageBox.Question)
+            message_box.setText('There are unsaved modification. Save them?')
+            message_box.addButton(QtWidgets.QMessageBox.Discard)
+            message_box.addButton(QtWidgets.QMessageBox.Cancel)
+            message_box.addButton(QtWidgets.QMessageBox.Save)
+            result = message_box.exec_()
+            if result == QtWidgets.QMessageBox.Discard:
+                return True
+            elif result == QtWidgets.QMessageBox.Cancel:
+                return False
+            elif result == QtWidgets.QMessageBox.Save:
+                form_dict = self.model.root.childItems[0].to_dict()
+                self.form_io.save_form(Form.from_dict(form_dict), ask_as=True,
+                                       parent_widget=self)
+                # TODO: if save fail, do not return True...
+                return True
+        return True
+
+    def set_form(self, form):
+        form.set_supported_languages(['French', 'English'])
+        self.model = TreeModel(form.to_dict())
+        self.tree_view.setModel(self.model)
+        self.tree_view.expandAll()
+        self.tree_view.resizeColumnToContents(1)
 
     def hide_property_editors(self):
         self.form_property_editor.hide()
         self.section_property_editor.hide()
         self.item_property_editor.hide()
+        self.choice_property_editor.hide()
+        self.variable_property_editor.hide()
+        self.section_transition_property_editor.hide()
 
     def on_view_click(self, model_index):
         self.hide_property_editors()
@@ -3197,6 +3403,24 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
             self.show_section_editor(model_item)
         elif isinstance(model_item, ItemNode):
             self.show_item_editor(model_item)
+        elif isinstance(model_item, ChoiceNode):
+            self.show_choice_editor(model_item)
+        elif isinstance(model_item, VarNode):
+            self.show_variable_editor(model_item)
+        elif isinstance(model_item, SectionTransitionNode):
+            self.show_section_transition_editor(model_item)
+
+    def show_variable_editor(self, var_node):
+        self.variable_property_editor.attach(var_node)
+        self.variable_property_editor.show()
+
+    def show_section_transition_editor(self, transition_node):
+        self.section_transition_property_editor.attach(transition_node)
+        self.section_transition_property_editor.show()
+
+    def show_choice_editor(self, choice_node):
+        self.choice_property_editor.attach(choice_node)
+        self.choice_property_editor.show()
 
     def show_form_editor(self, form_node):
         self.form_property_editor.attach(form_node)
@@ -3211,9 +3435,12 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
         self.item_property_editor.show()
 
     def on_view_double_click(self, model_index):
+        self.hide_property_editors()
         model_item = self.model.getItem(model_index)
+        self.on_change()
         if isinstance(model_item, (AddItemNode, AddSectionNode,
-                                   AddChoiceNode, AddVarNode)):
+                                   AddSectionTransitionNode, AddChoiceNode,
+                                   AddVarNode)):
             self.insert_new_before(model_index)
             # insert_position = model_item.childNumber()-1
             #self.model.insertRows(insert_position, 1, model_index.parent())
@@ -3235,7 +3462,7 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
         self.tree_view.expandRecursively(item_model_index)
 
     def closeEvent(self, event):
-        pprint(self.model.root.childItems[0].to_dict())
+        pprint(Form.from_dict(self.model.root.childItems[0].to_dict()).to_dict())
         QtWidgets.QApplication.instance().quit()
 
     def open_menu(self, position):
@@ -3257,7 +3484,7 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
             f = partial(self.add_choices_node_to_item_node, model_index)
             action.triggered.connect(f)
 
-        if not isinstance(model_item,  FormNode):
+        if not isinstance(model_item,  (FormNode, SectionTransitionsNode)):
             act_del = right_click_menu.addAction(self.tr("Delete"))
             act_del.triggered.connect(partial(self.model.removeRow,
                                               model_index.row(),
@@ -3431,6 +3658,14 @@ class FormNode(MotherNode):
                            for section_name, section in sections.items()]
         self.childItems.append(AddSectionNode(self))
 
+    def section_labels(self):
+        return [s.label for s in self.childItems[:-1]]
+
+    def section_after(self, section_node):
+        i_section = section_node.childNumber()
+        return (self.childItems[i_section+1].label if i_section < self.childCount()-1
+                else None)
+
     def insertChildren(self, position, nb_childs):
         if position < 0 or position > len(self.childItems):
             return False
@@ -3456,9 +3691,10 @@ class FormNode(MotherNode):
         return {
             **self.form_dict,
             **{'label' : self.label,
-             'sections' : {s.label : s.to_dict() for s in self.childItems[:-1]}
+               'sections' : {s.label : s.to_dict() for s in self.childItems[:-1]}
             }
         }
+
 
 class SectionNode(MotherNode):
     def __init__(self, section_name, section_dict, parent=None):
@@ -3466,8 +3702,12 @@ class SectionNode(MotherNode):
         self.section_dict = section_dict
         self.section_name = section_name
 
-        self.childItems = [ItemNode(item['label'], item, parent=self) for item in
-                           self.section_dict.pop('items')]
+        transitions_cfg = self.section_dict.pop('next_section_definition')
+        transitions_node = SectionTransitionsNode(transitions_cfg, parent=self)
+        self.childItems.append(transitions_node)
+
+        self.childItems.extend(ItemNode(item['label'], item, parent=self) for item in
+                               self.section_dict.pop('items'))
         self.childItems.append(AddItemNode(self))
 
     def insertChildren(self, position, nb_nodes):
@@ -3481,7 +3721,7 @@ class SectionNode(MotherNode):
     def all_keys(self):
         set_keys = set()
         for item in self.childItems:
-            if not isinstance(item, AddItemNode):
+            if not isinstance(item, (AddItemNode, SectionTransitionsNode)):
                 set_keys.update(item.all_keys())
         return set_keys
 
@@ -3505,8 +3745,63 @@ class SectionNode(MotherNode):
     def to_dict(self):
         return {
             **self.section_dict,
-            **{'items' : [i.to_dict() for i in self.childItems[:-1]]}
+            **self.childItems[0].to_dict(),
+            **{'items' : [i.to_dict() for i in self.childItems[1:-1]]}
         }
+
+
+class SectionTransitionsNode(MotherNode):
+    def __init__(self, transitions_cfg, parent=None):
+        super(SectionTransitionsNode, self).__init__('next section', parent)
+        if isinstance(transitions_cfg, str):
+            self.childItems.append(SectionTransitionNode('transition rule 1',
+                                                         transitions_cfg, parent=self))
+        else:
+            self.childItems = [SectionTransitionNode('transition rule %d' % it,
+                                                     transition_def, parent=self)
+                               for it, transition_def in enumerate(transitions_cfg)]
+
+        self.childItems.append(AddSectionTransitionNode(self))
+
+    def insertChildren(self, position, nb_nodes):
+        if position < 0 or position > len(self.childItems):
+            return False
+
+        self.childItems[position:position] = [self._new_transition()
+                                              for i_item in range(nb_nodes)]
+        return True
+
+    def _new_transition(self):
+        #                        .section .form
+        next_section_label = self.parent().parent().section_after(self.parent())
+        if next_section_label is None:
+            next_section_label = '__submit__'
+        return SectionTransitionNode('transition rule %d' % len(self.childItems),
+                                     ('True', next_section_label), parent=self)
+
+    def to_dict(self):
+        return {
+            'next_section_definition' : [child.transition_rule()
+                                         for child in self.childItems[:-1]]
+        }
+
+class SectionTransitionNode(Node):
+    def __init__(self, label, transition_cfg, parent=None):
+
+        if isinstance(transition_cfg, str):
+            transition_cfg = ('True', transition_cfg)
+
+        # label = ('submit' if transition_cfg[1] == '__submit__'
+        #          else 'to %s' % transition_cfg[1])
+        super(SectionTransitionNode, self).__init__(label, parent)
+
+        self.cfg = {
+            'predicate' : transition_cfg[0],
+            'next_section' : transition_cfg[1]
+        }
+
+    def transition_rule(self):
+        return (self.cfg['predicate'], self.cfg['next_section'])
 
 class ItemNode(MotherNode):
     def __init__(self, label, item_dict, parent=None):
@@ -3523,16 +3818,23 @@ class ItemNode(MotherNode):
 
         if not len(item_dict['keys']) <= 1:
             variables_node = VariablesNode(item_dict['keys'],
-                                                item_dict['init_values'],
-                                                parent=self)
+                                           item_dict['init_values'],
+                                           parent=self)
             self.childItems.append(variables_node)
         else:
             self.key_tr = item_dict['keys'][self.label]
-            init_values = item_dict['init_values']
+            init_values = item_dict.pop('init_values')
             self.init_value = (init_values[self.label]
                                if init_values is not None else None)
-        item_dict.pop('init_values')
         item_dict.pop('keys')
+
+    def add_variables_node(self):
+        if self.variables_node() is None:
+            variables_node = VariablesNode({self.label : self.key_tr},
+                                           self.init_value, parent=self)
+            self.childItems.append(variables_node)
+            return True
+        return False
 
     def variables_node(self):
         for child in self.childItems:
@@ -3589,15 +3891,6 @@ class ItemNode(MotherNode):
 
         return label_pat % label_idx
 
-    def add_variables_node(self):
-        if self.variables_node() is None:
-            variables_node = VariablesNode({self.new_var_name() :
-                                            {'French': 'Nom de variable',
-                                             'English' : 'Variable name'}},
-                                           None, parent=self)
-            self.childItems.append(variables_node)
-            return True
-        return False
 
 class ChoicesNode(MotherNode):
     def __init__(self, choices, parent=None):
@@ -3646,13 +3939,13 @@ class VariablesNode(MotherNode):
                 if not isinstance(child, AddVarNode)}
 
     def to_dict(self):
-        init_values = {child.label : child.init_value
+        init_values = {child.label : child.cfg['init_value']
                        for child in self.childItems[:-1]}
         if all(value is None for value in init_values):
             init_values = None
         return {
             'keys' : {
-                child.label : child.key_tr for child in self.childItems[:-1]
+                child.label : child.cfg['key_tr'] for child in self.childItems[:-1]
             },
             'init_values' : init_values
         }
@@ -3680,8 +3973,11 @@ class VariablesNode(MotherNode):
 class VarNode(Node):
     def __init__(self, label, key_tr, init_value, parent=None):
         super(VarNode, self).__init__(label, parent)
-        self.key_tr = key_tr
-        self.init_value = init_value
+        key_tr = {'French' : '', 'English' : ''}  if key_tr is None else key_tr
+        self.cfg = {
+            'key_tr' : key_tr,
+            'init_value' : init_value
+        }
 
 class ChoiceNode(Node):
     def __init__(self, label, choice_tr, parent=None):
@@ -3699,6 +3995,10 @@ class AddItemNode(Node):
 class AddVarNode(Node):
     def __init__(self, parent=None):
         super(AddVarNode, self).__init__('+', parent)
+
+class AddSectionTransitionNode(Node):
+    def __init__(self, parent=None):
+        super(AddSectionTransitionNode, self).__init__('+', parent)
 
 class AddChoiceNode(Node):
     def __init__(self, parent=None):
@@ -3724,7 +4024,8 @@ class TreeModel(QAbstractItemModel):
 
         item = self.getItem(index)
 
-        if role == Qt.FontRole and isinstance(item, (VariablesNode, ChoicesNode)):
+        if role == Qt.FontRole and isinstance(item, (VariablesNode, ChoicesNode,
+                                                     SectionTransitionsNode)):
             font = QtGui.QFont()
             font.setItalic(True)
             return font
@@ -3736,7 +4037,10 @@ class TreeModel(QAbstractItemModel):
             return 0
 
         item = self.getItem(index)
-        if isinstance(item, (AddItemNode, AddSectionNode, AddChoiceNode, AddVarNode)):
+        if isinstance(item, (AddItemNode, AddSectionNode, AddChoiceNode,
+                             AddVarNode, AddSectionTransitionNode,
+                             ChoicesNode, VariablesNode, SectionTransitionsNode,
+                             SectionTransitionNode)):
             return super(TreeModel, self).flags(index)
         else:
             return Qt.ItemIsEditable | super(TreeModel, self).flags(index)

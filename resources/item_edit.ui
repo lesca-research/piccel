@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>797</width>
-    <height>584</height>
+    <height>567</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -42,13 +42,13 @@
        <number>4</number>
       </property>
       <property name="topMargin">
-       <number>0</number>
+       <number>4</number>
       </property>
       <property name="rightMargin">
        <number>9</number>
       </property>
       <property name="bottomMargin">
-       <number>0</number>
+       <number>4</number>
       </property>
       <item row="1" column="0">
        <widget class="QLabel" name="label">
@@ -239,14 +239,14 @@
         </property>
        </widget>
       </item>
-      <item row="1" column="0">
+      <item row="3" column="0">
        <widget class="QLabel" name="typeLabel">
         <property name="text">
          <string>Type</string>
         </property>
        </widget>
       </item>
-      <item row="1" column="1">
+      <item row="3" column="1">
        <widget class="QComboBox" name="typeComboBox">
         <item>
          <property name="text">
@@ -285,26 +285,6 @@
         </item>
        </widget>
       </item>
-      <item row="2" column="0">
-       <widget class="QLabel" name="regExprLabel">
-        <property name="text">
-         <string>Reg. Expr.</string>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="1">
-       <widget class="QLineEdit" name="regExprLineEdit"/>
-      </item>
-      <item row="3" column="0">
-       <widget class="QLabel" name="uniqueLabel">
-        <property name="text">
-         <string>Unique</string>
-        </property>
-       </widget>
-      </item>
-      <item row="3" column="1">
-       <widget class="QCheckBox" name="uniqueCheckBox"/>
-      </item>
       <item row="4" column="0">
        <widget class="QLabel" name="allowEmptyLabel">
         <property name="text">
@@ -319,14 +299,44 @@
         </property>
        </widget>
       </item>
+      <item row="5" column="0">
+       <widget class="QLabel" name="uniqueLabel">
+        <property name="text">
+         <string>Unique</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="1">
+       <widget class="QCheckBox" name="uniqueCheckBox"/>
+      </item>
       <item row="6" column="0">
+       <widget class="QLabel" name="initialValueLabel">
+        <property name="text">
+         <string>Initial Value</string>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="1">
+       <widget class="QLineEdit" name="initialValueLineEdit"/>
+      </item>
+      <item row="10" column="0">
+       <widget class="QLabel" name="regExprInvalidHintLabel">
+        <property name="text">
+         <string>Reg. Expr. Invalid Hint</string>
+        </property>
+       </widget>
+      </item>
+      <item row="10" column="1">
+       <widget class="QLineEdit" name="regExprInvalidHintLineEdit"/>
+      </item>
+      <item row="14" column="0">
        <widget class="QLabel" name="accessLevelLabel">
         <property name="text">
          <string>Access Level</string>
         </property>
        </widget>
       </item>
-      <item row="6" column="1">
+      <item row="14" column="1">
        <widget class="QComboBox" name="accessLevelComboBox">
         <item>
          <property name="text">
@@ -350,29 +360,29 @@
         </item>
        </widget>
       </item>
-      <item row="7" column="0">
+      <item row="15" column="0">
        <widget class="QLabel" name="textNbLinesLabel">
         <property name="text">
          <string>Text Nb. Lines</string>
         </property>
        </widget>
       </item>
-      <item row="7" column="1">
+      <item row="15" column="1">
        <widget class="QSpinBox" name="textNbLinesSpinBox">
         <property name="minimum">
          <number>1</number>
         </property>
        </widget>
       </item>
-      <item row="5" column="0">
-       <widget class="QLabel" name="initialValueLabel">
+      <item row="9" column="1">
+       <widget class="QLineEdit" name="regExprLineEdit"/>
+      </item>
+      <item row="9" column="0">
+       <widget class="QLabel" name="regExprLabel">
         <property name="text">
-         <string>Initial Value</string>
+         <string>Reg. Expr.</string>
         </property>
        </widget>
-      </item>
-      <item row="5" column="1">
-       <widget class="QLineEdit" name="initialValueLineEdit"/>
       </item>
      </layout>
     </widget>

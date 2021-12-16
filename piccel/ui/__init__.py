@@ -20,5 +20,8 @@ from .generated import form_editor_main_ui
 from .generated import form_edit_ui
 from .generated import section_edit_ui
 from .generated import item_edit_ui
+from .generated import choice_edit_ui
+from .generated import variable_edit_ui
+from .generated import section_transition_edit_ui
 from . import widgets
 from . import main_qss

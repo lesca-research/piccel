@@ -5876,12 +5876,13 @@ class PiccelApp(QtWidgets.QApplication):
             # End of def set_section_ui
 
         set_section_ui(form.current_section_name, form.current_section)
+        _form_ui.title_label.setText(form.tr['title'])
+
         tab_idx = tab_widget.insertTab(tab_idx, form_widget, tab_name)
         tab_icon = QtGui.QIcon(':/icons/form_input_icon')
         tab_widget.setTabIcon(tab_idx, tab_icon)
         tab_widget.setCurrentIndex(tab_idx)
 
-        _form_ui.title_label.setText(form.tr['title'])
 
         radio_language_group = QtWidgets.QButtonGroup(form_widget)
         frame = _form_ui.frame_language_select
