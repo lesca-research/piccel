@@ -305,6 +305,32 @@ function snakeCaseToCamelCase(s) {
         self.set_language(default_language)
         self.to_next_section()
 
+    def add_item(self, section_name, item):
+        self[section_name].add_item(item)
+        self._register_item(item)
+
+    def _register_item(self, item):
+        if item.keys is not None:
+            for key in item.keys.keys():
+                self.key_to_items[key].append(item)
+            if item.vtype == 'date':
+                self.date_keys.add(key)
+            elif item.vtype == 'datetime':
+                self.datetime_keys.add(key)
+
+    def remove_item(self, section_name, item):
+        self[section_name].remove_item(item)
+        self._unregister_item(item)
+
+    def _unregister_item(self, item):
+        if item.keys is not None:
+            for key in item.keys.keys():
+                self.key_to_items[key].remove(item)
+            if item.vtype == 'date':
+                self.date_keys.remove(key)
+            elif item.vtype == 'datetime':
+                self.datetime_keys.remove(key)
+
     def set_supported_languages(self, languages):
         self.tr.set_supported_languages(languages)
         for section in self.sections.values():
@@ -323,7 +349,12 @@ function snakeCaseToCamelCase(s) {
                 section.set_language(language)
 
     def get_dtypes(self):
-        return {k:its[0].dtype_pd for k,its in self.key_to_items.items()}
+        return {k:its[0].dtype_pd for k,its in self.key_to_items.items()
+                if len(its)>0}
+
+    def get_vtypes(self):
+        return {k:its[0].vtype for k,its in self.key_to_items.items()
+                if len(its)>0}
 
     def has_key(self, key):
         return key in self.key_to_items
@@ -395,11 +426,7 @@ function snakeCaseToCamelCase(s) {
                         access_level=access_level, editable=editable,
                         init_values={key:value})
         section0.add_item(item, position=0, watch_validity=False)
-        self.key_to_items[key].append(item)
-        if vtype == 'date':
-            self.date_keys.add(key)
-        elif vtype == 'datetime':
-            self.datetime_keys.add(key)
+        self._register_item(item)
 
     @staticmethod
     def from_dict(d, watchers=None):
@@ -557,6 +584,9 @@ function snakeCaseToCamelCase(s) {
                 item.set_input_callback(item_callback)
 
     def to_next_section(self):
+        if len(self.sections) == 0:
+            return
+
         if self.current_section == None:
             self.current_section_name, self.current_section = \
                 next(iter(self.sections.items())) # TODO: handle no sections
@@ -938,6 +968,12 @@ class FormSection:
                                         [LazyFunc(self.on_item_invalid)]})
         self.items.insert(position if position is not None else len(self.items),
                           item)
+
+    def remove_item(self, item):
+        if item.keys is not None:
+            for key in item.keys.keys():
+                self.key_to_items.pop(key)
+        self.items.remove(item)
 
     def has_key(self, key):
         return any(key in item.keys for item in self.items)
@@ -3106,7 +3142,7 @@ def link_text_edit(text_edit, dest_dict, dest_key):
                        partial(dest_dict.__setitem__, dest_key))
     text_edit.editingFinished.connect(callback)
 
-def link_combo_box(combox_box, dest_dict, dest_key, choices=None):
+def link_combo_box(combox_box, dest_dict, dest_key, choices=None, editable=True):
     try:
         combox_box.currentTextChanged.disconnect()
     except TypeError:
@@ -3115,7 +3151,12 @@ def link_combo_box(combox_box, dest_dict, dest_key, choices=None):
         combox_box.clear()
         combox_box.addItems(choices)
     combox_box.setCurrentText(dest_dict[dest_key])
-    combox_box.currentTextChanged.connect(partial(dest_dict.__setitem__, dest_key))
+    if editable:
+        combox_box.setEnabled(True)
+        (combox_box.currentTextChanged
+         .connect(partial(dest_dict.__setitem__, dest_key)))
+    else:
+        combox_box.setEnabled(False)
 
 def link_check_box(check_box, dest_dict, dest_key):
     try:
@@ -3183,13 +3224,14 @@ class ItemPropertyEditor(QtWidgets.QWidget, item_edit_ui.Ui_ItemPropertyEditor):
             link_text_edit(field, dest_dict, key)
 
 
-        link_combo_box(self.typeComboBox, item_node.item_dict, 'vtype')
+        link_combo_box(self.typeComboBox, item_node.item_dict, 'vtype',
+                       editable=(not item_node.type_locked))
         link_check_box(self.uniqueCheckBox, item_node.item_dict, 'unique')
         link_check_box(self.allowEmptyCheckBox, item_node.item_dict, 'allow_empty')
         link_combo_box(self.accessLevelComboBox, item_node.item_dict, 'access_level')
         link_spin_box(self.textNbLinesSpinBox, item_node.item_dict, 'nb_lines')
 
-        if item_node.variables_node() is None:
+        if item_node.variables_node() is None and not item_node.text_only:
             self.initialValueLineEdit.show()
             self.initialValueLabel.show()
             try:
@@ -3302,6 +3344,9 @@ class FormEditorFileIO:
             with open(form_fn, 'w') as fout:
                 fout.write(form_json)
 
+    def locked_variable_types(self):
+        return {}
+
 class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
     def __init__(self, form_io=None, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
@@ -3310,8 +3355,6 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
         self.pending_changes = False
         self.form_io = (form_io if form_io is not None else
                         FormEditorFileIO())
-
-        self.set_form(self.form_io.get_form())
 
         self.tree_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.tree_view.customContextMenuRequested.connect(self.open_menu)
@@ -3337,10 +3380,13 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
         self.variable_property_editor = VariablePropertyEditor()
         self.verticalLayout.addWidget(self.variable_property_editor)
 
+        self.set_form(self.form_io.get_form(),
+                      self.form_io.locked_variable_types())
         if hasattr(self.form_io, 'open_form'):
             def on_open():
                 if self.check_pending_changes():
-                    self.set_form(self.form_io.open_form(self))
+                    self.set_form(self.form_io.open_form(self),
+                                  self.form_io.locked_variable_types())
             self.button_open.clicked.connect(on_open)
         else:
             self.open_button.hide()
@@ -3380,9 +3426,9 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
                 return True
         return True
 
-    def set_form(self, form):
+    def set_form(self, form, lock_variable_types):
         form.set_supported_languages(['French', 'English'])
-        self.model = TreeModel(form.to_dict())
+        self.model = TreeModel(form.to_dict(), lock_variable_types)
         self.tree_view.setModel(self.model)
         self.tree_view.expandAll()
         self.tree_view.resizeColumnToContents(1)
@@ -3649,14 +3695,15 @@ class MotherNode(Node):
         return True
 
 class FormNode(MotherNode):
-    def __init__(self, form_dict, parent=None):
+    def __init__(self, form_dict, lock_variable_types, parent=None):
         super(FormNode, self).__init__(form_dict.pop('label'), parent)
         self.form_dict = form_dict.copy()
 
         sections = self.form_dict.pop('sections')
 
         # children are sections
-        self.childItems = [SectionNode(section_name, section, parent=self)
+        self.childItems = [SectionNode(section_name, section, lock_variable_types,
+                                       parent=self)
                            for section_name, section in sections.items()]
         self.childItems.append(AddSectionNode(self))
 
@@ -3699,16 +3746,18 @@ class FormNode(MotherNode):
 
 
 class SectionNode(MotherNode):
-    def __init__(self, section_name, section_dict, parent=None):
+    def __init__(self, section_name, section_dict, lock_variable_types, parent=None):
         super(SectionNode, self).__init__(section_name, parent)
         self.section_dict = section_dict
         self.section_name = section_name
+        self.lock_variable_types = lock_variable_types
 
         transitions_cfg = self.section_dict.pop('next_section_definition')
         transitions_node = SectionTransitionsNode(transitions_cfg, parent=self)
         self.childItems.append(transitions_node)
 
-        self.childItems.extend(ItemNode(item['label'], item, parent=self) for item in
+        self.childItems.extend(ItemNode(item['label'], item, lock_variable_types,
+                                        parent=self) for item in
                                self.section_dict.pop('items'))
         self.childItems.append(AddItemNode(self))
 
@@ -3742,7 +3791,8 @@ class SectionNode(MotherNode):
                                  self.section_dict['supported_languages'],
                                  label=item_label).to_dict()
 
-        return ItemNode(new_item_dict.pop('label'), new_item_dict, parent=self)
+        return ItemNode(new_item_dict.pop('label'), new_item_dict,
+                        self.lock_variable_types, parent=self)
 
     def to_dict(self):
         return {
@@ -3806,29 +3856,57 @@ class SectionTransitionNode(Node):
         return (self.cfg['predicate'], self.cfg['next_section'])
 
 class ItemNode(MotherNode):
-    def __init__(self, label, item_dict, parent=None):
+    def __init__(self, label, item_dict, locked_variable_types=None, parent=None):
+        self.locked_variable_types = (locked_variable_types
+                                      if locked_variable_types is not None
+                                      else {})
         if len(item_dict['keys']) == 1:
             label = next(iter(item_dict['keys']))
         elif label == '':
-            label = 'Variable Group'
+            if len(item_dict['keys']) == 0:
+                label = 'text only'
+            else: # len(len(item_dict['keys']) > 1:
+                label = 'Variable Group'
         super(ItemNode, self).__init__(label, parent)
         self.item_dict = item_dict
 
-        if item_dict['choices'] is not None:
-            choices_node = ChoicesNode(item_dict.pop('choices'), parent=self)
-            self.childItems.append(choices_node)
-
-        if not len(item_dict['keys']) <= 1:
-            variables_node = VariablesNode(item_dict['keys'],
-                                           item_dict['init_values'],
-                                           parent=self)
-            self.childItems.append(variables_node)
+        if len(item_dict['keys']) > 0:
+            self.text_only = False
+            if item_dict['choices'] is not None:
+                choices_node = ChoicesNode(item_dict.pop('choices'), parent=self)
+                self.childItems.append(choices_node)
+            if not len(item_dict['keys']) <= 1:
+                variables_node = VariablesNode(item_dict['keys'],
+                                               item_dict['init_values'],
+                                               parent=self)
+                self.childItems.append(variables_node)
+            else:
+                self.key_tr = item_dict['keys'][self.label]
+                init_values = item_dict.pop('init_values')
+                self.init_value = (init_values[self.label]
+                                   if init_values is not None else None)
         else:
-            self.key_tr = item_dict['keys'][self.label]
-            init_values = item_dict.pop('init_values')
-            self.init_value = (init_values[self.label]
-                               if init_values is not None else None)
+            self.text_only = True
         item_dict.pop('keys')
+
+        self.check_locked_var_types()
+
+    def check_locked_var_types(self):
+        self.type_locked = False
+        for var_name in self.all_keys():
+            if var_name in self.locked_variable_types:
+                self.type_locked = True
+                self.item_dict['vtype'] = self.locked_variable_types[var_name]
+                break
+
+    def setData(self, column, value):
+        if value not in self.parent().all_keys():
+            success = super(ItemNode, self).setData(column, value)
+            if self.variables_node() is None:
+                self.check_locked_var_types()
+            return success
+        else:
+            return False
 
     def add_variables_node(self):
         if self.variables_node() is None:
@@ -3854,9 +3932,13 @@ class ItemNode(MotherNode):
         var_dict = {'keys' : {}, 'init_values' : None}
         variables_node = self.variables_node()
         if variables_node is None:
-            var_dict['keys'][self.label] = self.key_tr
-            if self.init_value is not None:
-                var_dict['init_values'] = {self.label : self.init_value}
+            if not self.text_only:
+                var_dict['keys'][self.label] = self.key_tr
+                if self.init_value is not None:
+                    var_dict['init_values'] = {self.label : self.init_value}
+            else:
+                var_dict['keys'] = None
+                var_dict['init_values'] = None
         else:
             var_dict = variables_node.to_dict()
 
@@ -3959,6 +4041,7 @@ class VariablesNode(MotherNode):
         self.childItems[position:position] = [self._new_var_node()
                                               for i in range(nb_childs)]
 
+        self.parent().check_locked_var_types()
         return True
 
     def _new_var_node(self):
@@ -3980,6 +4063,10 @@ class VarNode(Node):
             'key_tr' : key_tr,
             'init_value' : init_value
         }
+
+    def setData(self, column, value):
+        super(VariablesNode, self).setData(column, value)
+        self.parent().parent().check_locked_var_types()
 
 class ChoiceNode(Node):
     def __init__(self, label, choice_tr, parent=None):
@@ -4007,11 +4094,18 @@ class AddChoiceNode(Node):
         super(AddChoiceNode, self).__init__('+', parent)
 
 class TreeModel(QAbstractItemModel):
-    def __init__(self, form_dict, parent=None):
+    def __init__(self, form_dict, locked_variable_types=None, parent=None):
         super(TreeModel, self).__init__(parent)
 
         self.root = MotherNode('')
-        self.root.childItems.append(FormNode(form_dict, parent=self.root))
+        self.root.childItems.append(FormNode(form_dict, locked_variable_types,
+                                             parent=self.root))
+
+        self.variable_icon = QtGui.QIcon(':/icons/form_variable_icon')
+        self.section_icon = QtGui.QIcon(':/icons/form_section_icon')
+        self.new_section_icon = QtGui.QIcon(':/icons/form_new_section_icon')
+        self.next_section_icon = QtGui.QIcon(':/icons/form_next_section_icon')
+        self.choices_icon = QtGui.QIcon(':/icons/form_choices_icon')
 
     def columnCount(self, parent=QModelIndex()):
         return 1
@@ -4020,19 +4114,31 @@ class TreeModel(QAbstractItemModel):
         if not index.isValid():
             return None
 
-        if role != Qt.DisplayRole and role != Qt.EditRole and role != Qt.FontRole:
+        if role != Qt.DisplayRole and role != Qt.EditRole and role != Qt.FontRole\
+           and role != QtCore.Qt.DecorationRole:
             return None
 
-
         item = self.getItem(index)
+
+        if role == Qt.DisplayRole:
+            return item.data(0)
 
         if role == Qt.FontRole and isinstance(item, (VariablesNode, ChoicesNode,
                                                      SectionTransitionsNode)):
             font = QtGui.QFont()
             font.setItalic(True)
             return font
-        else:
-            return item.data(0)
+        elif role == QtCore.Qt.DecorationRole and \
+             ( (isinstance(item, ItemNode) and item.variables_node() is None) or \
+               isinstance(item, VarNode) ):
+            return self.variable_icon
+        elif role == QtCore.Qt.DecorationRole and isinstance(item, SectionNode):
+            return self.section_icon
+        elif role == QtCore.Qt.DecorationRole and isinstance(item, ChoicesNode):
+            return self.choices_icon
+        elif role == QtCore.Qt.DecorationRole and \
+             isinstance(item, SectionTransitionsNode):
+            return self.next_section_icon
 
     def flags(self, index):
         if not index.isValid():

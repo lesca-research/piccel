@@ -1,10 +1,11 @@
 import pandas as pd
 import numpy as np
 
-from piccel.core import LazyFunc
+from piccel.core import LazyFunc, SheetNotFound
 
 import logging
 logger = logging.getLogger('piccel')
+
 
 class SheetPlugin:
 
@@ -36,9 +37,18 @@ class SheetPlugin:
                      if workbook is not None else 'None')
         self.workbook = workbook
 
+    def check(self):
+        pass
+
     def after_workbook_load(self):
-        self._watch_sheets([self.workbook[l] \
-                            for l in self.sheets_to_watch()])
+        watched_sheets = []
+        for sheet_label in self.sheets_to_watch():
+            sheet = self.workbook[sheet_label]
+            if sheet is None:
+                raise SheetNotFound('Sheet %s not found in workbook %s',
+                                    sheet_label, self.workbook.label)
+            watched_sheets.append(sheet)
+        self._watch_sheets(watched_sheets)
 
     def _on_entry_append(self, sheet, entry_df=None):
         self.update(sheet, entry_df)

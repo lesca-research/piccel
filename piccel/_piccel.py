@@ -29,7 +29,7 @@ import csv
 from . import sheet_plugin_template
 from . import workbook_plugin_template
 from .plugin_tools import map_set, And, Or #, Less, LessEqual, Greater, GreaterEqual
-from .plugin_tools import (LescaDashboard, track_interview, interview_action,
+from .plugin_tools import (LescaDashboard, InterviewTracker,
                            form_update_or_new, DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
                            track_emailled_poll, emailled_poll_action,
                            track_participant_status, participant_status_action)
@@ -642,7 +642,11 @@ class TestLocalFileSystem(unittest.TestCase):
 
 class NonUniqueIndexFromValues(Exception) : pass
 
-
+class FormEditionBlockedByPendingLiveForm(Exception): pass
+class FormEditionLocked(Exception): pass
+class FormEditionNotOpen(Exception): pass
+class FormEditionLockedType(Exception): pass
+class FormEditionOrphanError(Exception): pass
 
 class DataSheet:
     """
@@ -921,10 +925,59 @@ class DataSheet:
             # TODO: IMPORTANT changed form data is ignored here
             self.filesystem.accept_all_changes()
 
+    def get_form_for_edition(self):
+        # Insure that there is no pending live forms
+        users_with_live_forms = self.users_with_pending_live_forms()
+        if len(users_with_live_forms) > 0:
+            raise FormEditionBlockedByPendingLiveForm(users_with_live_forms)
+        # Insure that there is no edition lock
+
+        if self.filesystem.exists('master.form.lock'):
+            lock_user = self.filesystem.load('master.form.lock')
+            raise FormEditionLocked(lock_user)
+
+        self.lock_form_master_edition()
+        return self.form_master.new()
+
+    def lock_form_master_edition(self):
+        self.filesystem.save('master.form.lock', self.user)
+
+    def unlock_form_master_edition(self):
+        self.filesystem.remove('master.form.lock')
+
+    def close_form_edition(self):
+        self.unlock_form_master_edition()
+
+    def save_edited_form(self, edited_form):
+        if not self.filesystem.exists('master.form.lock'):
+            raise FormEditionNotOpen()
+
+        # Check that existing variables keep the same vtype in the edited form
+        current_vtypes = self.form_master.get_vtypes()
+        edited_vtypes = edited_form.get_vtypes()
+        invalid_vars = []
+        for key, vtype in edited_vtypes.items():
+            if (key in current_vtypes) and (current_vtypes[key] != vtype):
+                invalid_vars.append((key,vtype,current_vtypes[key]))
+        if len(invalid_vars) > 0:
+            msg = '\n'.join('%s has type %s but must be %s' % iv
+                            for iv in invalid_vars)
+            raise FormEditionLockedType(msg)
+
+        # Check that the edited form does not have orphan variables
+        # (that are in df but not in current form master)
+        orphan_variables = set(self.df.columns).difference(current_vtypes.keys())
+        if len(orphan_variables.intersection(edited_vtypes.keys())) > 0:
+            raise FormEditionOrphanError(list(sorted(orphan_variables)))
+
+        self.set_form_master(edited_form)
+        self.save_form_master(overwrite=True)
+
     def set_form_master(self, form):
         # TODO: utest and check consistency with pending live forms
         self.form_master = form
 
+    ## End of methods used for FormEditor IO
     def _remove_from_value_to_index(self, entry_df):
         # TODO utest that value indexes are properly maintained
         # after entry deletion
@@ -1116,6 +1169,14 @@ class DataSheet:
 
     def get_live_forms_folder(self):
         return op.join('live_forms', protect_fn(self.user))
+
+    def users_with_pending_live_forms(self):
+        users = []
+        if self.filesystem.exists('live_forms'):
+            for user_name in self.filesystem.listdir('live_forms'):
+                if len(self.filesystem.listdir(op.join('live_forms', user_name))) > 0:
+                    users.append(user_name)
+        return users
 
     def export_to_pdf(self, output_pdf_abs_fn, password, view=None,
                       columns=None, sort_by=None):
@@ -2293,6 +2354,56 @@ class TestDataSheet(unittest.TestCase):
         form.set_values_from_entry(entry)
         self.assertFalse(form.is_valid())
 
+    def test_form_edition_no_pending_live_forms(self):
+        form = self.sheet_ts.form_new_entry()
+        self.assertRaises(FormEditionBlockedByPendingLiveForm,
+                          self.sheet_ts.get_form_for_edition)
+        form.submit()
+        self.sheet_ts.get_form_for_edition()
+
+    def test_form_edition_lock(self):
+        form_master = self.sheet_ts.get_form_for_edition()
+        self.assertRaises(FormEditionLocked, self.sheet_ts.get_form_for_edition)
+        self.sheet_ts.close_form_edition()
+
+    def test_form_edition_save(self):
+        form_master = self.sheet_ts.get_form_for_edition()
+        new_label = 'new_form_label'
+        form_master.label = new_label
+        self.sheet_ts.save_edited_form(form_master)
+
+        reloaded_sheet = DataSheet.from_files(self.user,
+                                              self.sheet_ts.filesystem.clone())
+        self.assertEqual(reloaded_sheet.form_master.label, new_label)
+
+    def test_form_edition_save_lock(self):
+        self.assertRaises(FormEditionNotOpen,
+                          self.sheet_ts.save_edited_form, Form({}, 'fr', {'fr'}))
+        form_master = self.sheet_ts.get_form_for_edition()
+        form_master.label = 'new_label'
+        self.sheet_ts.save_edited_form(form_master)
+        self.sheet_ts.close_form_edition()
+        self.assertRaises(FormEditionNotOpen,
+                          self.sheet_ts.save_edited_form, Form({}, 'fr', {'fr'}))
+
+    def test_form_edition_locked_types(self):
+        form_master = self.sheet_ts.get_form_for_edition()
+        form_master['section1'].items[1].vtype = 'text'
+        self.assertRaises(FormEditionLockedType, self.sheet_ts.save_edited_form,
+                          form_master)
+
+    def test_form_edition_orphan_variables(self):
+        form_master = self.sheet_ts.get_form_for_edition()
+        age_item = form_master['section1'].items[1]
+        save_age_item = FormItem(**age_item.to_dict())
+        form_master.remove_item('section1', age_item)
+        self.sheet_ts.save_edited_form(form_master)
+        self.sheet_ts.close_form_edition()
+
+        form_master = self.sheet_ts.get_form_for_edition()
+        form_master.add_item('section1', age_item)
+        self.assertRaises(FormEditionOrphanError, self.sheet_ts.save_edited_form,
+                          form_master)
 
     def test_to_pdf(self):
         pdf_fn = op.join(self.tmp_dir, 'sheet.pdf')
@@ -3077,11 +3188,9 @@ class SheetDataOverwriteError(Exception): pass
 class UnauthorizedRole(Exception): pass
 class InconsistentRoles(Exception): pass
 class PasswordChangeError(Exception): pass
-class WorkBookDataNotFound(Exception): pass
 class NoAccessPasswordError(Exception): pass
 class NoRolePasswordError(Exception): pass
 class EncryptionError(Exception): pass
-
 
 class check_role(object):
     def __init__(self, role):
@@ -3479,6 +3588,9 @@ class WorkBook:
     def after_workbook_load(self):
         logger.debug('Workbook %s: call after_workbook_load on all sheets',
                      self.label)
+        # for sheet in self.sheets.values():
+        #     sheet.plugin.check()
+
         for sheet in self.sheets.values():
             sheet.after_workbook_load()
 
@@ -3590,7 +3702,7 @@ class WorkBook:
             self.filesystem.makedirs(sheet_folder)
         sheet.set_filesystem(self.filesystem.change_dir(sheet_folder))
         sheet.save()
-        
+
         sheet.set_workbook(self)
         self.sheets[sheet.label] = sheet
 
@@ -4280,15 +4392,15 @@ class TestWorkBook(unittest.TestCase):
 
         # Create new workbook from scratch
         wb_id = 'Participant_info'
-        user = 'me'
+        self.user = 'me'
         data_folder = 'pinfo_files'
         wb = WorkBook(wb_id, data_folder, fs)
         wb.set_access_password(self.access_pwd)
         wb.set_password(UserRole.ADMIN, self.admin_pwd)
         wb.set_password(UserRole.EDITOR, self.editor_pwd)
         wb.decrypt(self.access_pwd)
-        wb.set_user(user, UserRole.ADMIN)
-        wb.user_login(user, self.admin_pwd)
+        wb.set_user(self.user, UserRole.ADMIN)
+        wb.user_login(self.user, self.admin_pwd)
 
         # Create data sheet participant info (no form)
         sheet_id = 'Participants'
@@ -4304,7 +4416,7 @@ class TestWorkBook(unittest.TestCase):
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
                     title={'French':'Participant Information'})
-        sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
+        sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=self.user)
 
         # Create Interview plan sheet
         sheet_id = DEFAULT_INTERVIEW_PLAN_SHEET_LABEL
@@ -4392,7 +4504,7 @@ class TestWorkBook(unittest.TestCase):
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
                     title={'French':'Plannification'})
-        sh_plan = DataSheet(sheet_id, form, user=user)
+        sh_plan = DataSheet(sheet_id, form, user=self.user)
 
         # Create evaluation sheet
         sheet_id = 'Eval'
@@ -4402,7 +4514,8 @@ class TestWorkBook(unittest.TestCase):
                           default_language='French',
                           freeze_on_update=True,
                           supported_languages={'French'}),
-                 FormItem({'Staff' : None},
+                 FormItem({'User' : None},
+                          vtype='user_name',
                           default_language='French',
                           supported_languages={'French'},
                           allow_empty=False),
@@ -4428,7 +4541,7 @@ class TestWorkBook(unittest.TestCase):
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
                     title={'French':'Evaluation'})
-        sh_eval = DataSheet(sheet_id, form, user=user)
+        sh_eval = DataSheet(sheet_id, form, user=self.user)
 
         wb.add_sheet(sh_plan)
         wb.add_sheet(sh_eval)
@@ -4441,6 +4554,10 @@ class TestWorkBook(unittest.TestCase):
                 super(Dashboard, self).__init__(*args, **kwargs)
                 self.date_now = None
 
+            def after_workbook_load(self):
+                self.eval_tracker = InterviewTracker('Eval', self.workbook)
+                super(Dashboard, self).after_workbook_load()
+
             def sheets_to_watch(self):
                 return super(Dashboard, self).sheets_to_watch() + \
                     [DEFAULT_INTERVIEW_PLAN_SHEET_LABEL, 'Eval']
@@ -4451,11 +4568,10 @@ class TestWorkBook(unittest.TestCase):
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
-                track_interview(self.df, 'Eval', self.workbook, pids,
-                                date_now=self.date_now)
+                self.eval_tracker.track(self.df, pids, date_now=self.date_now)
 
             def action(self, entry_df, selected_column):
-                return interview_action(entry_df, selected_column, self.workbook)
+                return self.eval_tracker.action(entry_df, selected_column)
 
         sh_dashboard = DataSheet('Dashboard')
         sh_dashboard.set_plugin(Dashboard(sh_dashboard))
@@ -4635,14 +4751,14 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.startswith('Eval'))
 
         form.set_values_from_entry({'Session_Action' : 'do_session',
-                                    'Staff' : 'Thomas Vincent',
+                                    'User' : 'Thomas Vincent',
                                     'Session_Status' : 'done',
                                     'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_done')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
-                         'Thomas Vincent')
+        # Overriding User field does not work:
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          ts.strftime(DATE_FMT))
 
@@ -4672,13 +4788,12 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Eval'))
         form.set_values_from_entry({'Session_Action' : 'cancel_session',
-                                    'Staff' : 'Thomas Vincent',
+                                    'User' : 'Thomas Vincent',
                                     'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_cancelled')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
-                         'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'eval_plan')
 
         logger.debug('--- Pid %s: Plan interview date again, with email ----',

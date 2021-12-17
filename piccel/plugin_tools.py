@@ -18,11 +18,11 @@ class LescaDashboard(SheetPlugin):
         self.df = pd.DataFrame()
 
         for sheet_label in self.sheets_to_watch():
+            logger.debug('Check Participant_ID in sheet %s', sheet_label)
             if not (self.workbook[sheet_label].form_master
                     .has_key('Participant_ID')):
                 raise DataDefinitionError('Participant_ID not found in '\
                                           'keys of sheet %s' % sheet_label)
-
         self.reset_data()
 
     def reset_data(self):
@@ -437,8 +437,8 @@ def track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
             msg = 'Column %s not found in dashboard df' % e.message
             raise DestColumnNotFound(msg) from e
 
-def interview_action(entry_df, interview_column, workbook,
-                     plan_sheet_label=DEFAULT_INTERVIEW_PLAN_SHEET_LABEL):
+def interview_action_old(entry_df, interview_column, workbook,
+                         plan_sheet_label=DEFAULT_INTERVIEW_PLAN_SHEET_LABEL):
 
     value = entry_df[interview_column].iat[0]
     if value=='' or pd.isna(value) or value is None:
@@ -519,9 +519,352 @@ def df_keep_higher(df1, df2, compare_column='Timestamp_Submission'):
     index2 = index2_more_recent.union(df2.index.difference(common_index))
     return df1.loc[index1], df2.loc[index2]
 
-def track_interview(dashboard_df, interview_label, workbook, pids,
-                    plan_sheet_label=DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
-                    date_now=None, show_staff_column=True):
+class DataConsistencyError(Exception): pass
+
+class InterviewTracker:
+    def __init__(self, interview_label, workbook,
+                 plan_sheet_label=DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
+                 show_staff_column=True):
+        self.interview_label = interview_label
+        self.workbook = workbook
+        self.plan_sheet_label = plan_sheet_label
+        self.show_staff_column = show_staff_column
+
+        errors = self.check()
+        if len(errors) > 0:
+            for error in errors:
+                logger.error(error)
+            raise DataConsistencyError(errors)
+
+    def check(self):
+
+        errors = []
+        interview_df = latest_sheet_data(self.workbook, self.interview_label)
+        expected_columns=['Participant_ID', 'User', 'Session_Action',
+                          'Session_Status', 'Timestamp_Submission']
+        missing_columns = ', '.join(sorted(set(expected_columns)
+                                           .difference(interview_df.columns)))
+        if len(missing_columns) > 0:
+            errors.append('Missing columns in sheet %s: %s' % \
+                          (self.interview_label, missing_columns))
+
+        form_master = self.workbook[self.interview_label].form_master
+        form_fields = form_master.get_vtypes()
+        missing_fields = ', '.join(sorted(set(expected_columns)
+                                          .difference(form_fields.keys())))
+        if len(missing_fields) > 0:
+            errors.append('Missing fields in form of sheet %s: %s' % \
+                          (self.interview_label, missing_fields))
+        if form_fields['User'] != 'user_name':
+            errors.append('Type of field User in form of sheet %s is %s '\
+                          'but must be user_name' % \
+                          (self.interview_label, form_fields['User']))
+
+        plan_df = latest_sheet_data(self.workbook, self.plan_sheet_label,
+                                    filter_dict={'Interview_Type' :
+                                                 self.interview_label})
+        expected_columns = ['Participant_ID', 'Staff', 'Plan_Action',
+                            'Interview_Type', 'Interview_Date', 'Availability',
+                            'Date_Is_Set', 'Send_Email', 'Email_Schedule',
+                            'Email_Template', 'Email_Status', 'Callback_Days',
+                            'Timestamp_Submission']
+        missing_columns = ', '.join(sorted(set(expected_columns)
+                                           .difference(plan_df.columns)))
+        if len(missing_columns) > 0:
+            errors.append('Missing columns in sheet %s: %s' % \
+                          (self.plan_sheet_label, missing_columns))
+
+        # TODO: check that Email_Template and 'Interview_Type' fields
+        #       in plan_sheet allows interview_label
+        return errors
+
+    def action(self, entry_df, interview_column):
+
+        value = entry_df[interview_column].iat[0]
+        if value=='' or pd.isna(value) or value is None:
+            return None, ''
+
+        participant_id = entry_df.index[0]
+        form = None
+        action_label = ''
+        plan_sheet = self.workbook[self.plan_sheet_label]
+
+        if interview_column.endswith('_Plan'):
+            interview_label = interview_column[:-len('_Plan')]
+            return form_update_or_new(self.plan_sheet_label, self.workbook,
+                                      {'Participant_ID' : participant_id,
+                                       'Interview_Type' : interview_label},
+                                      {'Plan_Action' : 'plan',
+                                       'Send_Email' : True,
+                                       'Email_Schedule' : 'days_before_2',
+                                       'Email_Template' : interview_label})
+            # if value.endswith('_not_done') or value.endswith('_cancelled'):
+            # elif value.endswith('_scheduled') or value.endswith('_email_pending') or \
+            #  value.endswith('_email_sent') or value.endswith('_email_error') or \
+            #  value.endswith('_ok') or value.endswith('_redo'): 
+        elif interview_column.endswith('_Staff'):
+            interview_label = interview_column[:-len('_Staff')]
+            return form_update_or_new(self.plan_sheet_label, self.workbook,
+                                      {'Participant_ID' : participant_id,
+                                       'Interview_Type' : interview_label},
+                                      {'Plan_Action' : 'assign_staff',
+                                       'Send_Email' : False})
+        else:
+            interview_label = interview_column
+            interview_sheet = self.workbook[interview_label]
+            interview_df = interview_sheet.get_df_view('latest')
+            selection = (interview_df[interview_df.Participant_ID == participant_id] \
+                         if interview_df is not None else pd.DataFrame([]))
+            if selection.shape[0] == 0:
+                form = interview_sheet.form_new_entry()
+                form.set_values_from_entry({'Participant_ID' : participant_id})
+                action_label = '%s | New' % interview_sheet.label
+            else:
+                assert(selection.shape[0] == 1)
+                form = interview_sheet.form_update_entry(selection.index[0])
+                action_label = '%s | Update' % interview_sheet.label
+            form.set_values_from_entry({
+                'Session_Action' : 'do_session',
+            })
+        return form, action_label
+
+    def track(self, dashboard_df, pids, date_now=None):
+        interview_tag = self.interview_label.lower()
+
+        logger.debug('Update interview tracking of %s for pids: %s',
+                     interview_tag, pids)
+
+        # Keep only entries seen in the dashboard:
+        pids = set(pids).intersection(dashboard_df.index)
+        logger.debug('pids kept (that are in Dashboard)  : %s', pids)
+
+        default_status = ('%s_not_done' % interview_tag)
+        column_status = self.interview_label
+
+        if column_status not in dashboard_df.columns:
+            dashboard_df[column_status] = pd.NA
+
+        column_staff = '%s_Staff' % self.interview_label
+        default_staff = ('%s_set_staff' % interview_tag)
+        if self.show_staff_column and column_staff not in dashboard_df.columns:
+            dashboard_df[column_staff] = pd.NA
+
+        column_date = '%s_Plan' % self.interview_label
+        default_date = ('%s_plan' % interview_tag)
+        if column_date not in dashboard_df.columns:
+            dashboard_df[column_date] = pd.NaT
+
+        if self.workbook is None:
+            return
+
+        date_now = date_now if date_now is not None else datetime.now()
+
+        interview_df = latest_sheet_data(self.workbook, self.interview_label,
+                                         index_column='Participant_ID',
+                                         indexes=pids)
+
+        plan_df = latest_sheet_data(self.workbook, self.plan_sheet_label,
+                                    filter_dict={'Interview_Type' :
+                                                 self.interview_label},
+                                    index_column='Participant_ID',
+                                    indexes=pids)
+        if 1:
+            print('dashboard_df beginning of track_interview')
+            print(dashboard_df)
+
+            print('plan_df beginning of track_interview')
+            print(plan_df)
+
+            print('interview_df beginning of track_interview')
+            print(interview_df)
+
+        def set_date_from_plan(plan_sel_df):
+            availability = plan_sel_df[((plan_sel_df['Plan_Action']=='plan') & \
+                                        (~plan_sel_df['Date_Is_Set']))]
+            dashboard_df.loc[availability.index, column_date] = \
+                availability.loc[availability.index, 'Availability']
+
+            planned = plan_sel_df[((plan_sel_df['Plan_Action']=='plan') & \
+                                   (plan_sel_df['Date_Is_Set']))]
+
+            dates = (planned.loc[planned.index, 'Interview_Date']
+                     .apply(lambda x: x.strftime(DATE_FMT)))
+            dashboard_df.loc[planned.index, column_date] = dates
+
+        def set_date_from_interview(int_sel_df):
+            done = int_sel_df[((int_sel_df['Session_Action']!='cancel_session') & \
+                               ((int_sel_df['Session_Status']=='done') | \
+                                (int_sel_df['Session_Status']=='redo')))]
+            dates = (done.loc[done.index, 'Timestamp_Submission']
+                     .apply(lambda x: x.strftime(DATE_FMT)))
+            dashboard_df.loc[done.index, column_date] = dates
+
+            cancelled = int_sel_df[((int_sel_df['Session_Action']=='cancel_session') | \
+                                    (int_sel_df['Session_Status']=='cancel_session'))]
+            dashboard_df.loc[cancelled.index, column_date] = '%s_plan' % interview_tag
+
+        common_pids = plan_df.index.intersection(interview_df.index)
+        if 1:
+            print('Get most recent entry btwn plan and interview')
+
+            print('plan_df:')
+            print(plan_df)
+
+            print('interview_df:')
+            print(interview_df)
+
+            print('common_pids')
+            print(common_pids)
+
+        dashboard_df.loc[pids, column_date] = default_date
+        plan_df_fresher, interview_df_fresher = df_keep_higher(plan_df, interview_df)
+
+        # More readable API to replace map_set:
+        # match_set(dashboard_df, column_date,
+        #           setters=[SetWhere(where=And((plan_df, 'Plan_Action', ['plan']),
+        #                                       (plan_df, 'Availability', IsNotNa())),
+        #                             value=FetchDf(plan_df, 'Availability')),
+        #                    SetWhere(where=And((plan_df, 'Plan_Action', ['plan']),
+        #                                       (plan_df, 'Interview_Date', IsNotNa())),
+        #                             value=FetchDf(plan_df, 'Interview_Date',
+        #                                           apply=fmt_date)),
+        #                    SetWhere(where=And((itv_df, 'Session_Action',
+        #                                        NotIn('cancel_session')),
+        #                                       (itv_df, 'Session_Status',
+        #                                        ['done', 'redo'])),
+        #                             value=FetchDf(itv_df, 'Timestamp_Submission', apply=fmt_date)),
+        #                    SetWhere(where=Or((itv_df, 'Session_Action',
+        #                                       ['cancel_session']),
+        #                                      (itv_df, 'Session_Status',
+        #                                       ['cancel_session'])),
+        #                             value='%s_plan' % interview_tag)])
+
+        set_date_from_plan(plan_df_fresher)
+        set_date_from_interview(interview_df_fresher)
+
+        # Staff
+        if 1:
+            print('Set Staff...')
+            print('dashboard_df:')
+            print(dashboard_df)
+
+            print('plan_df:')
+            print(plan_df)
+
+        if self.show_staff_column:
+            dashboard_df.loc[pids, column_staff] = default_staff
+            dashboard_df.loc[plan_df_fresher.index, column_staff] = \
+                plan_df_fresher.loc[:, 'Staff']
+            dashboard_df.loc[interview_df_fresher.index, column_staff] = \
+                interview_df_fresher.loc[:, 'User']
+
+        # Status
+        dashboard_df.loc[pids, column_status] = default_status
+
+        if 1:
+            print('dashboard_df before map_set')
+            print(dashboard_df)
+
+        logger.debug('Set interview status from %s (selected pids=%s)',
+                     self.plan_sheet_label, interview_df_fresher.index)
+        if plan_df_fresher.shape[0] > 0:
+            try:
+
+                def cb_ts(plan_df, plan_col):
+                    f_ts = lambda x: (date_now - timedelta(days=x)
+                                      if not pd.isna(x)
+                                      else pd.NA)
+                    return plan_df['Callback_Days'].apply(f_ts)
+
+                map_set(dashboard_df, column_status,
+                        conditions={'%s_scheduled' % interview_tag:
+                         And((plan_df_fresher, 'Plan_Action', ['plan']),
+                             (plan_df_fresher, 'Send_Email', [False]),
+                             (plan_df_fresher, 'Date_Is_Set', [True]),
+                             (plan_df_fresher, 'Interview_Date', IsNotNA())),
+                         '%s_callback_tbd' % interview_tag:
+                         And((plan_df_fresher, 'Plan_Action', ['plan']),
+                             (plan_df_fresher, 'Date_Is_Set', [False]),
+                             (plan_df_fresher, 'Callback_Days', IsNotNA()),
+                             (plan_df_fresher, 'Timestamp_Submission',
+                              Greater(cb_ts))),
+                        '%s_callback_now' % interview_tag:
+                         And((plan_df_fresher, 'Plan_Action', ['plan']),
+                             (plan_df_fresher, 'Date_Is_Set', [False]),
+                             (plan_df_fresher, 'Callback_Days', IsNotNA()),
+                             (plan_df_fresher, 'Timestamp_Submission', Lower(cb_ts))),
+                         '%s_email_pending' % interview_tag:
+                         And((plan_df_fresher, 'Plan_Action', ['plan']),
+                             (plan_df_fresher, 'Interview_Date', IsNotNA()),
+                             (plan_df_fresher, 'Date_Is_Set', [True]),
+                             (plan_df_fresher, 'Send_Email', [True]),
+                             (plan_df_fresher, 'Email_Status', ['to_send'])),
+                         '%s_email_sent' % interview_tag:
+                         And((plan_df_fresher, 'Plan_Action', ['plan']),
+                             (plan_df_fresher, 'Interview_Date', IsNotNA()),
+                             (plan_df_fresher, 'Date_Is_Set', [True]),
+                             (plan_df_fresher, 'Send_Email', [True]),
+                             (plan_df_fresher, 'Email_Status', ['sent'])),
+                         '%s_email_error' % interview_tag:
+                         And((plan_df_fresher, 'Plan_Action', ['plan']),
+                             (plan_df_fresher, 'Interview_Date', IsNotNA()),
+                             (plan_df_fresher, 'Date_Is_Set', [True]),
+                             (plan_df_fresher, 'Send_Email', [True]),
+                             (plan_df_fresher, 'Email_Status', ['error'])),
+                        })
+            except SrcColumnNotFound as e:
+                msg = 'Column %s not found in df of sheet %s' % \
+                    (e.message, plan_sheet_label)
+                raise SrcColumnNotFound(msg) from e
+            except DestColumnNotFound as e:
+                msg = 'Column %s not found in dashboard df' % e.message
+                raise DestColumnNotFound(msg) from e
+
+            mask_callback_tbd = (dashboard_df
+                                 .loc[plan_df_fresher.index, column_status] \
+                                 == '%s_callback_tbd' % interview_tag)
+            pids_callback_tbd = mask_callback_tbd[mask_callback_tbd].index
+            if len(pids_callback_tbd) > 0:
+                plan_df_for_cb_tbd = plan_df_fresher.loc[pids_callback_tbd]
+                cb_days = (plan_df_for_cb_tbd['Timestamp_Submission'] \
+                           + pd.to_timedelta(plan_df_for_cb_tbd['Callback_Days'],
+                                             unit='d') \
+                           - date_now).dt.days
+                dashboard_df.loc[pids_callback_tbd, column_status] = \
+                    cb_days.apply(lambda d : '%s_callback_%dD' % (interview_tag,d))
+        if 1:
+            print('dashboard_df after map_set from plan_df')
+            print(dashboard_df)
+
+        logger.debug('Set interview status from %s', self.interview_label)
+        if interview_df_fresher.shape[0] > 0:
+            try:
+                map_set(dashboard_df, column_status,
+                        {'%s_done' % interview_tag:
+                         And((interview_df_fresher, 'Session_Action', ['do_session']),
+                             (interview_df_fresher, 'Session_Status', ['done'])),
+                         '%s_redo' % interview_tag:
+                         And((interview_df_fresher, 'Session_Action', ['do_session']),
+                             (interview_df_fresher, 'Session_Status', ['redo'])),
+                         '%s_cancelled' % interview_tag:
+                         (interview_df_fresher, 'Session_Action', ['cancel_session'])
+                        })
+            except SrcColumnNotFound as e:
+                msg = 'Column %s not found in df of sheet %s' % \
+                    (e.message, interview_sheet_label)
+                raise SrcColumnNotFound(msg) from e
+            except DestColumnNotFound as e:
+                msg = 'Column %s not found in dashboard df' % e.message
+                raise DestColumnNotFound(msg) from e
+
+        if 1:
+            print('dashboard_df after map_set from interview_df')
+            print(dashboard_df)
+
+
+def track_interview_old(dashboard_df, interview_label, workbook, pids,
+                        plan_sheet_label=DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
+                        date_now=None, show_staff_column=True):
     """
 
     Date

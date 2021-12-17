@@ -5,7 +5,7 @@ from piccel.plugin_tools import conditional_set
 from piccel.sheet_plugin import SheetPlugin
 
 class CustomSheetPlugin(SheetPlugin):
-
+    
     def __init__(self, data_sheet, workbook=None):
         """
         workbook (WorkBook | None): workbook in which the sheet has been loaded.
@@ -70,7 +70,3 @@ class CustomSheetPlugin(SheetPlugin):
 
     # def request_new_entry(self, column, row_df)
     #  Action = None | (sheet_label, {key:values}) # Important! form item key must be valid identifier!
-
-
-class DynamicSheetPlugin:
-    pass

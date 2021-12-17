@@ -71,3 +71,5 @@ class UserRole(IntEnum):
     MANAGER = 2
     EDITOR = 1
     VIEWER = 0
+
+class SheetNotFound(Exception): pass
