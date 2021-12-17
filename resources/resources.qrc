@@ -7,6 +7,11 @@
         <file alias="refresh_icon">refresh.svg</file>
         <file alias="form_input_icon">edit.svg</file>
         <file alias="editor_icon">edit-alt.svg</file>
+        <file alias="form_variable_icon">database.svg</file>
+        <file alias="form_choices_icon">list.svg</file>
+        <file alias="form_section_icon">section.svg</file>
+        <file alias="form_new_section_icon">new-section.svg</file>
+        <file alias="form_next_section_icon">arrows-split.svg</file>
     </qresource>
 </RCC>
 

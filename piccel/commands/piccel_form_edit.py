@@ -1,7 +1,6 @@
 import sys
 import logging
 from optparse import OptionParser
-import piccel
 
 from PyQt5.QtWidgets import QApplication
 
