@@ -3,6 +3,7 @@
 from datetime import date, datetime, timedelta, time
 import logging
 import tempfile
+import os
 import os.path as op
 import shutil
 import unittest
@@ -11,6 +12,7 @@ import re
 from pprint import pformat, pprint
 from uuid import uuid1, uuid4
 from time import sleep
+from copy import copy
 
 import json
 import numpy as np
@@ -18,10 +20,15 @@ import pandas as pd
 
 from .logging import logger
 from .core import UserRole, Notifier, LazyFunc, nexts
+from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
+                   FormEditionNotOpen, FormEditionLockedType,
+                   FormEditionOrphanError, FormEditionNotAvailable)
 
 
 from .ui import (form_editor_main_ui, form_edit_ui, section_edit_ui, item_edit_ui,
                  choice_edit_ui, variable_edit_ui, section_transition_edit_ui)
+from .ui.widgets import ListSelectDialog
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 
@@ -1052,11 +1059,11 @@ class FormSection:
         self.notifier.notify(signal)
 
     def to_dict(self):
-        return {'title': self.tr.trs['title'],
+        return {'title': copy(self.tr.trs['title']),
                 'items' : [i.to_dict() for i in self.items],
                 'default_language' : self.tr.language,
                 'supported_languages' : list(self.tr.supported_languages),
-                'next_section_definition' : self.next_section_definition}
+                'next_section_definition' : copy(self.next_section_definition)}
 
     def set_language(self, language):
         logger.debug2('Set %s as section language', language)
@@ -1499,26 +1506,27 @@ class FormItem:
         return True
 
     def to_dict(self):
-        return {'keys' : self.keys,
+        return {'keys' : copy(self.keys),
                 'label' : self.label,
                 'default_language' : self.tr.language,
                 'supported_languages' : list(self.tr.supported_languages),
                 'vtype' : self.vtype,
-                'title' : self.tr.trs.get('title', None),
-                'description' : self.tr.trs.get('description', None),
+                'title' : copy(self.tr.trs.get('title', None)),
+                'description' : copy(self.tr.trs.get('description', None)),
                 'regexp' : self.regexp.pattern,
                 'regexp_invalid_message' : self.regexp_invalid_message,
                 'allow_empty' : self.allow_None,
-                'choices' : self.choices,
-                'other_choice_label' : self.tr.trs.get('other_choice', None),
-                'init_values' : self.init_values,
+                'choices' : ({k:copy(v) for k,v in self.choices.items()}
+                             if self.choices is not None else None),
+                'other_choice_label' : copy(self.tr.trs.get('other_choice', None)),
+                'init_values' : copy(self.init_values),
                 'unique' : self.unique,
                 'generator' : self.generator,
                 'access_level' : self.access_level.name,
                 'editable' : self.editable,
                 'freeze_on_update' : self.freeze_on_update,
                 # TODO: resolve from number_interval:
-                'number_interval' : self.number_interval_param,
+                'number_interval' : copy(self.number_interval_param),
                 'nb_lines' : self.nb_lines}
 
     def set_editable(self, flag):
@@ -3289,45 +3297,139 @@ class SectionTransitionPropertyEditor(QtWidgets.QWidget,
         link_combo_box(self.nextSectionComboBox, transition_node.cfg, 'next_section',
                        choices=next_section_choices)
 
-def form_save_file(form_dict, form_fn=None):
-    if form_fn is None:
-        form_fn, _ = (QtWidgets.QFileDialog
-                      .getSaveFileName(None, "Save Form", "",
-                                       "Piccel Form Files (*.form)"))
-    if form_fn is not None and form_fn != '':
-        form_json = Form.form_dict(form_dict).to_json()
-        with open(form_fn, 'w') as fout:
-            fout.write(form_json)
+import traceback, sys
 
-def form_save_as_file(form_dict):
-    FormEditor.form_save_file(form_dict, None)
+class FormEditorSheetIO:
+    def __init__(self, sheet, close_callback=None):
+        self.sheet = sheet
+        self.current_tmp_form_fn = None
+        self.close_callback = (close_callback if close_callback is not None
+                               else lambda: None)
 
+        self.preloaded_form = None
+        error_message = None
+        try:
+            self.current_tmp_form_fn = self.sheet.get_alternate_form_fn()
+            self.preloaded_form = self.sheet.get_form_for_edition()
+        except FormEditionBlockedByPendingLiveForm as e:
+            error_message = ('Cannot modify form because of unsubmitted live '\
+                             'forms of user(s): %s' % e)
+            self.sheet.close_form_edition()
+        except FormEditionLocked as e:
+            error_message = 'Form is being edited by %s' % e
+        except Exception as e:
+            error_message = 'Error while requesting form edition: %s' % e
+            logger.error(traceback.format_exception(*sys.exc_info()))
+            self.sheet.close_form_edition()
+
+        if error_message is not None:
+
+            message_box = QtWidgets.QMessageBox()
+            message_box.setIcon(QtWidgets.QMessageBox.Critical)
+            message_box.setText(error_message)
+            message_box.exec_()
+
+            raise FormEditionNotAvailable(error_message)
+
+    def get_save_as_button_label(self):
+        return 'Export'
+
+    def get_preloaded_form(self, parent_widget=None):
+        return self.preloaded_form
+
+    def locked_variable_types(self):
+        locked_vars = self.sheet.form_master.get_vtypes().copy()
+        for var in self.sheet.get_orphan_variables():
+            locked_vars[var] = None
+        return locked_vars
+
+    def open_form(self, parent_widget=None):
+        form_master_alternates = self.sheet.get_alternate_master_forms()
+        if len(form_master_alternates) > 0:
+            selector = ListSelectDialog(reversed(sorted(form_master_alternates)),
+                                        'Select form')
+            if selector.exec_():
+                selected_form_fn = selector.get_choice()
+                if selected_form_fn is not None:
+                    full_fn = op.join('master_form_alternates', selected_form_fn)
+                    self.current_tmp_form = self.sheet.get_alternate_form_fn()
+                    content = self.sheet.filesystem.load(full_fn)
+                    return Form.from_json(content)
+        else:
+            message_box = QtWidgets.QMessageBox()
+            message_box.setIcon(QtWidgets.QMessageBox.Information)
+            message_box.setText('No alternate form master available')
+            message_box.exec_()
+
+        return None
+
+    def save_form(self, form, ask_as=False, parent_widget=None):
+        if not ask_as:
+            self.sheet.set_form_master(form, save=True, overwrite=True)
+            # Directly save to form master
+        else:
+            form_fn, _ = (QtWidgets.QFileDialog
+                          .getSaveFileName(parent_widget, "Save Form", '',
+                                           "Piccel Form Files (*.form)"))
+            if form_fn is not None and form_fn != '':
+                form_json = form.to_json()
+                with open(form_fn, 'w', encoding='utf8') as fout:
+                    fout.write(form_json)
+                return True
+            else:
+                return False
+        return True
+
+    def save_temporary_form(self, form):
+        if self.current_tmp_form_fn is not None:
+            self.sheet.save_alternate_master_form(self.current_tmp_form_fn, form)
+
+    def close_form_edition(self):
+        self.sheet.close_form_edition()
+        self.close_callback()
+
+import os
 class FormEditorFileIO:
     def __init__(self, form_fn=None):
         self.current_form_fn = form_fn
+        self.current_tmp_form_fn = None
 
-    def get_form(self):
-        if self.current_form_fn is None:
-            return self.open_form()
-        else:
-            return self._load_form(self.current_form_fn)
+    def get_preloaded_form(self, parent_widget=None):
+        return self.open_form(self.current_form_fn, parent_widget=parent_widget)
+
+    def _start_tmp_form_session(self):
+        ftmp, tmp_fn = tempfile.mkstemp(prefix='%s.bak.' % \
+                                        op.basename(self.current_form_fn),
+                                        dir=op.dirname(self.current_form_fn))
+        os.close(ftmp)
+        self.current_tmp_form_fn = tmp_fn
+
+    def _end_tmp_form_session(self):
+        if self.current_tmp_form_fn is not None:
+            os.remove(self.current_tmp_form_fn)
+            self.current_tmp_form_fn = None
 
     def _load_form(self, form_fn):
-        with open(form_fn, 'r') as fin:
+        with open(form_fn, 'r', encoding='utf8') as fin:
             return Form.from_json(fin.read())
 
-    def open_form(self, parent_widget=None):
-        open_dir = (op.dirname(self.current_form_fn)
-                    if self.current_form_fn is not None else '')
-        form_fn, _ = (QtWidgets.QFileDialog
-                      .getOpenFileName(parent_widget, "Load Form", open_dir,
-                                       "Piccel Form Files (*.form)"))
+    def can_save_as():
+        return True
 
+    def open_form(self, form_fn=None, parent_widget=None):
+        if form_fn is None or not op.exists(form_fn):
+            open_dir = (op.dirname(self.current_form_fn)
+                        if self.current_form_fn is not None else '')
+            form_fn, _ = (QtWidgets.QFileDialog
+                          .getOpenFileName(parent_widget, "Load Form", open_dir,
+                                           "Piccel Form Files (*.form)"))
         form = None
         if form_fn is not None and form_fn != '':
+            self._end_tmp_form_session()
             self.current_form_fn = form_fn
             form = self._load_form(self.current_form_fn)
             # TODO: handle error!
+            self._start_tmp_form_session()
         return form
 
     def save_form(self, form, ask_as=False, parent_widget=None):
@@ -3340,12 +3442,27 @@ class FormEditorFileIO:
             form_fn = self.current_form_fn
 
         if form_fn is not None and form_fn != '':
-            form_json = form.to_json()
-            with open(form_fn, 'w') as fout:
-                fout.write(form_json)
+            self._save_form(form, form_fn)
+            return True
+        else:
+            return False
+
+    def _save_form(self, form, form_fn):
+        print('form_fn:', form_fn)
+        form_json = form.to_json()
+        with open(form_fn, 'w') as fout:
+            fout.write(form_json)
+
+    def close_form_edition(self):
+        self._end_tmp_form_session()
+
+    def save_temporary_form(self, form):
+        # TODO show some message in status bar!
+        self._save_form(form, self.current_tmp_form_fn)
 
     def locked_variable_types(self):
         return {}
+
 
 class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
     def __init__(self, form_io=None, parent=None):
@@ -3380,12 +3497,15 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
         self.variable_property_editor = VariablePropertyEditor()
         self.verticalLayout.addWidget(self.variable_property_editor)
 
-        self.set_form(self.form_io.get_form(),
-                      self.form_io.locked_variable_types())
+        form = self.form_io.get_preloaded_form()
+        if form is not None:
+            self.set_form(form, self.form_io.locked_variable_types())
+
         if hasattr(self.form_io, 'open_form'):
             def on_open():
+                self.hide_property_editors()
                 if self.check_pending_changes():
-                    self.set_form(self.form_io.open_form(self),
+                    self.set_form(self.form_io.open_form(parent_widget=self),
                                   self.form_io.locked_variable_types())
             self.button_open.clicked.connect(on_open)
         else:
@@ -3393,8 +3513,27 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
 
         def on_save():
             form_dict = self.model.root.childItems[0].to_dict()
-            self.form_io.save_form(Form.from_dict(form_dict), parent_widget=self)
+            if self.form_io.save_form(Form.from_dict(form_dict), parent_widget=self):
+                self.button_save.setIcon(QtGui.QIcon());
+                self.pending_changes = False
         self.button_save.clicked.connect(on_save)
+
+        if hasattr(self.form_io, 'get_save_as_button_label'):
+            self.button_save_as.setText(self.form_io.get_save_as_button_label())
+
+        def on_save_as():
+            # TODO: reset unsaved hint...
+            # depends on how form_IO behaves ...
+            # TODO: fully delegate save state in IO, do not handle buttons here
+            form_dict = self.model.root.childItems[0].to_dict()
+            self.form_io.save_form(Form.from_dict(form_dict), ask_as=True,
+                                   parent_widget=self)
+        self.button_save_as.clicked.connect(on_save_as)
+
+        def on_close():
+            if self.check_pending_changes():
+                self.form_io.close_form_edition()
+        self.button_close.clicked.connect(on_close)
 
         def on_preview():
             pass
@@ -3404,6 +3543,9 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
 
     def on_change(self):
         self.pending_changes = True
+        self.form_io.save_temporary_form(self.get_current_form())
+        self.button_save.setIcon(self.model.unsaved_icon);
+        # self.button_save.button.setIconSize(QtGui.QPixmap("Save").rect().size());
 
     def check_pending_changes(self):
         if self.pending_changes:
@@ -3420,18 +3562,19 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
                 return False
             elif result == QtWidgets.QMessageBox.Save:
                 form_dict = self.model.root.childItems[0].to_dict()
-                self.form_io.save_form(Form.from_dict(form_dict), ask_as=True,
-                                       parent_widget=self)
-                # TODO: if save fail, do not return True...
-                return True
+                return self.form_io.save_form(Form.from_dict(form_dict),
+                                              parent_widget=self)
         return True
 
     def set_form(self, form, lock_variable_types):
-        form.set_supported_languages(['French', 'English'])
-        self.model = TreeModel(form.to_dict(), lock_variable_types)
-        self.tree_view.setModel(self.model)
-        self.tree_view.expandAll()
-        self.tree_view.resizeColumnToContents(1)
+        if form is not None:
+            form.set_supported_languages(['French', 'English'])
+            print('set_form, lock_variable_types:')
+            print(lock_variable_types)
+            self.model = TreeModel(form.to_dict(), lock_variable_types)
+            self.tree_view.setModel(self.model)
+            self.tree_view.expandAll()
+            self.tree_view.resizeColumnToContents(1)
 
     def hide_property_editors(self):
         self.form_property_editor.hide()
@@ -3492,7 +3635,7 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
             self.insert_new_before(model_index)
             # insert_position = model_item.childNumber()-1
             #self.model.insertRows(insert_position, 1, model_index.parent())
-            self.tree_view.expand(model_index.parent()) # TODO only expand locally
+            self.tree_view.expand(model_index.parent())
 
     def insert_new_before(self, model_index):
         current_item = self.model.getItem(model_index)
@@ -3509,9 +3652,17 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
         self.model.add_choices_node_to_item_node(item_model_index)
         self.tree_view.expandRecursively(item_model_index)
 
+    def get_current_form(self):
+        return Form.from_dict(self.model.root.childItems[0].to_dict())
+
     def closeEvent(self, event):
-        pprint(Form.from_dict(self.model.root.childItems[0].to_dict()).to_dict())
-        QtWidgets.QApplication.instance().quit()
+        if self.check_pending_changes():
+            self.form_io.close_form_edition()
+            event.accept()
+            return True
+        else:
+            event.ignore()
+            return False
 
     def open_menu(self, position):
         # indexes = self.sender().selectedIndexes()
@@ -3751,6 +3902,7 @@ class SectionNode(MotherNode):
         self.section_dict = section_dict
         self.section_name = section_name
         self.lock_variable_types = lock_variable_types
+        self.state = 'base'
 
         transitions_cfg = self.section_dict.pop('next_section_definition')
         transitions_node = SectionTransitionsNode(transitions_cfg, parent=self)
@@ -3870,6 +4022,8 @@ class ItemNode(MotherNode):
         super(ItemNode, self).__init__(label, parent)
         self.item_dict = item_dict
 
+        self.state = 'base'
+
         if len(item_dict['keys']) > 0:
             self.text_only = False
             if item_dict['choices'] is not None:
@@ -3908,10 +4062,35 @@ class ItemNode(MotherNode):
         else:
             return False
 
+    def removeChildren(self, position=0, count=None):
+        count = count if count is not None else len(self.childItems) - position
+
+        if position < 0 or position + count > len(self.childItems):
+            return False
+        saved_key_tr, saved_init_value = None, None
+        for row in reversed(range(count)):
+            child = self.childItems[position + row]
+            if isinstance(child, VariablesNode):
+                nb_sub_children = child.childCount()
+                if nb_sub_children == 2:
+                    saved_key_tr = child.childItems[0].cfg['key_tr'].copy()
+                    saved_init_value = child.childItems[0].cfg['init_value']
+                elif nb_sub_children > 2:
+                    logger.warning('Cannot retrieve key translation and init value '\
+                                   'from several deleted variables')
+                break
+        success = super(ItemNode, self).removeChildren(position, count)
+        if success and saved_key_tr is not None:
+            self.key_tr = saved_key_tr
+            self.init_value = saved_init_value
+
+        return success
+
     def add_variables_node(self):
         if self.variables_node() is None:
             variables_node = VariablesNode({self.label : self.key_tr},
-                                           self.init_value, parent=self)
+                                           {self.label : self.init_value},
+                                           parent=self)
             self.childItems.append(variables_node)
             return True
         return False
@@ -4064,9 +4243,12 @@ class VarNode(Node):
             'init_value' : init_value
         }
 
+        self.state = 'base'
+
     def setData(self, column, value):
-        super(VariablesNode, self).setData(column, value)
+        success = super(VariablesNode, self).setData(column, value)
         self.parent().parent().check_locked_var_types()
+        return success
 
 class ChoiceNode(Node):
     def __init__(self, label, choice_tr, parent=None):
@@ -4101,11 +4283,19 @@ class TreeModel(QAbstractItemModel):
         self.root.childItems.append(FormNode(form_dict, locked_variable_types,
                                              parent=self.root))
 
-        self.variable_icon = QtGui.QIcon(':/icons/form_variable_icon')
-        self.section_icon = QtGui.QIcon(':/icons/form_section_icon')
+        self.multi_variable_icon = {
+            'base' : QtGui.QIcon(':/icons/form_multi_variable_icon')
+        }
+        self.variable_icon = {
+            'base' : QtGui.QIcon(':/icons/form_variable_icon')
+        }
+        self.section_icon = {
+            'base' : QtGui.QIcon(':/icons/form_section_icon')
+        }
         self.new_section_icon = QtGui.QIcon(':/icons/form_new_section_icon')
         self.next_section_icon = QtGui.QIcon(':/icons/form_next_section_icon')
         self.choices_icon = QtGui.QIcon(':/icons/form_choices_icon')
+        self.unsaved_icon = QtGui.QIcon(':/icons/form_unsaved_icon')
 
     def columnCount(self, parent=QModelIndex()):
         return 1
@@ -4120,7 +4310,7 @@ class TreeModel(QAbstractItemModel):
 
         item = self.getItem(index)
 
-        if role == Qt.DisplayRole:
+        if role == Qt.DisplayRole or role == Qt.EditRole:
             return item.data(0)
 
         if role == Qt.FontRole and isinstance(item, (VariablesNode, ChoicesNode,
@@ -4131,9 +4321,12 @@ class TreeModel(QAbstractItemModel):
         elif role == QtCore.Qt.DecorationRole and \
              ( (isinstance(item, ItemNode) and item.variables_node() is None) or \
                isinstance(item, VarNode) ):
-            return self.variable_icon
+            return self.variable_icon[item.state]
+        elif role == QtCore.Qt.DecorationRole and \
+             isinstance(item, ItemNode) and item.variables_node() is not None:
+            return self.multi_variable_icon[item.state]
         elif role == QtCore.Qt.DecorationRole and isinstance(item, SectionNode):
-            return self.section_icon
+            return self.section_icon[item.state]
         elif role == QtCore.Qt.DecorationRole and isinstance(item, ChoicesNode):
             return self.choices_icon
         elif role == QtCore.Qt.DecorationRole and \

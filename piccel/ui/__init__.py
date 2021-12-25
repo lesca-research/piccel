@@ -14,6 +14,7 @@ from .generated import section_ui
 from .generated import selector_ui
 from .generated import text_editor_ui
 from .generated import workbook_ui
+from .generated import workbook_creation_ui
 # from .generated import dynamic_vlist_ui
 # from .generated import dynamic_vlist_item_ui
 from .generated import form_editor_main_ui

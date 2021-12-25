@@ -33,10 +33,12 @@ from .plugin_tools import (LescaDashboard, InterviewTracker,
                            form_update_or_new, DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
                            track_emailled_poll, emailled_poll_action,
                            track_participant_status, participant_status_action)
-from .form import Form, FormSection, FormItem, NotEditableError, DateTimeCollector
+from .form import (Form, FormSection, FormItem, FormEditor, FormEditorSheetIO,
+                   NotEditableError, DateTimeCollector, LanguageError)
 
 import unittest
 import tempfile
+from functools import partial
 
 import numpy as np
 
@@ -106,6 +108,9 @@ HTML_BOTTOM = '''
 </body>
 </html>
 '''
+
+def protect_fn(fn):
+    return ''.join(c if c.isalnum() else "_" for c in fn)
 
 
 def derive_key_pbkdf2(password_str, salt_bytes):
@@ -478,9 +483,6 @@ class Unformatter:
     def __call__(self, v):
         return self.form.unformat(self.key, v) if v!='' else self.na_value 
 
-def protect_fn(fn):
-    return ''.join(c if c.isalnum() else "_" for c in fn)
-
 class Hint:
 
     def __init__(self, icon_style=None, message=None, is_link=False,
@@ -642,11 +644,9 @@ class TestLocalFileSystem(unittest.TestCase):
 
 class NonUniqueIndexFromValues(Exception) : pass
 
-class FormEditionBlockedByPendingLiveForm(Exception): pass
-class FormEditionLocked(Exception): pass
-class FormEditionNotOpen(Exception): pass
-class FormEditionLockedType(Exception): pass
-class FormEditionOrphanError(Exception): pass
+from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
+                   FormEditionNotOpen, FormEditionLockedType,
+                   FormEditionOrphanError, FormEditionNotAvailable)
 
 class DataSheet:
     """
@@ -682,6 +682,8 @@ class DataSheet:
         if self.filesystem is not None and self.user is None:
             raise Exception('User required when file saving is used')
         if self.filesystem is not None:
+            if not self.filesystem.exists('master_form_alternates'):
+                self.filesystem.makedirs('master_form_alternates')
             self.filesystem.enable_track_changes()
             fs_label = DataSheet.get_sheet_label_from_filesystem(self.filesystem)
             if fs_label != self.label:
@@ -847,15 +849,14 @@ class DataSheet:
                              overwrite=overwrite)
 
     @staticmethod
-    def load_form_master(filesystem):
-        form_fn = 'master.form'
+    def load_form_master(filesystem, form_fn='master.form'):
         form = None
         if filesystem.exists(form_fn):
             content = filesystem.load(form_fn)
             form = Form.from_json(content)
         else:
-            logger.debug('No form master to load from %s',
-                         filesystem.root_folder)
+            logger.debug('No form master to load (%s does not exist in %s)',
+                         form_fn, filesystem.root_folder)
         return form
 
     def reload_all_data(self):
@@ -929,21 +930,44 @@ class DataSheet:
         # Insure that there is no pending live forms
         users_with_live_forms = self.users_with_pending_live_forms()
         if len(users_with_live_forms) > 0:
-            raise FormEditionBlockedByPendingLiveForm(users_with_live_forms)
-        # Insure that there is no edition lock
+            locking_users = ', '.join(users_with_live_forms)
+            logger.error('Form master of sheet %s is locked for edition by %s',
+                         self.label, locking_users)
+            raise FormEditionBlockedByPendingLiveForm(locking_users)
 
+        # Insure that there is no edition lock
         if self.filesystem.exists('master.form.lock'):
             lock_user = self.filesystem.load('master.form.lock')
             raise FormEditionLocked(lock_user)
 
         self.lock_form_master_edition()
-        return self.form_master.new()
+        try:
+            return self.form_master.new()
+        except LanguageError:
+            from IPython import embed; embed()
+
+    def get_alternate_master_forms(self):
+        return self.filesystem.listdir('master_form_alternates')
+
+    def open_alternate_master_form(self, form_bfn):
+        return Form(self.filesystem.load(op.join('master_form_alternates', form_bfn)))
+
+    def save_alternate_master_form(self, form_bfn, form):
+        logger.info('Save alternate version of form %s as %s (sheet: %s)',
+                    form.label, form_bfn, self.label)
+        self.filesystem.save(op.join('master_form_alternates', form_bfn),
+                             form.to_json(), overwrite=True)
+
+    def get_alternate_form_fn(self):
+        date_fmt = '%Y_%m_%d_%Hh%Mm%Ss'
+        return '%s_%s' % (datetime.now().strftime(date_fmt), protect_fn(self.user))
 
     def lock_form_master_edition(self):
         self.filesystem.save('master.form.lock', self.user)
 
     def unlock_form_master_edition(self):
-        self.filesystem.remove('master.form.lock')
+        if self.filesystem.exists('master.form.lock'):
+            self.filesystem.remove('master.form.lock')
 
     def close_form_edition(self):
         self.unlock_form_master_edition()
@@ -966,16 +990,30 @@ class DataSheet:
 
         # Check that the edited form does not have orphan variables
         # (that are in df but not in current form master)
-        orphan_variables = set(self.df.columns).difference(current_vtypes.keys())
+        orphan_variables = self.get_orphan_variables(current_vtypes=current_vtypes)
         if len(orphan_variables.intersection(edited_vtypes.keys())) > 0:
             raise FormEditionOrphanError(list(sorted(orphan_variables)))
 
-        self.set_form_master(edited_form)
-        self.save_form_master(overwrite=True)
+        self.set_form_master(edited_form, save=True, overwrite=True)
 
-    def set_form_master(self, form):
+    def get_orphan_variables(self, current_vtypes=None):
+        if self.df is None:
+            return set()
+        current_vtypes = (current_vtypes if current_vtypes is not None
+                          else self.form_master.get_vtypes())
+        return set(self.df.columns).difference(current_vtypes.keys())
+
+    def set_form_master(self, form, save=False, overwrite=False):
         # TODO: utest and check consistency with pending live forms
+        if not save:
+            logger.info('Set form master of sheet %s set (form label: %s)',
+                        self.label, form.label)
         self.form_master = form
+        if save:
+            self.save_form_master(overwrite=overwrite)
+            logger.info('Set and save form master of sheet %s set (form label: %s)',
+                        self.label, form.label)
+
 
     ## End of methods used for FormEditor IO
     def _remove_from_value_to_index(self, entry_df):
@@ -5567,8 +5605,7 @@ def language_abbrev(language):
 #!/usr/bin/python3
 import sys
 from PyQt5 import QtCore, QtGui, QtWidgets
- 
- 
+
 CSS = \
 {
     'QWidget':
@@ -5612,6 +5649,169 @@ def dictToCSS(dictionnary):
         stylesheet += "}\n"
     return stylesheet
 
+class EditorTabCloser:
+    def __init__(self, tab_widget, check_on_close):
+        self.tab_widget = tab_widget
+        self.check_on_close = check_on_close
+        self.editor_widget = None
+
+    def set_editor_tab(self, editor_widget):
+        self.editor_widget = editor_widget
+        self.check_on_close.append(editor_widget)
+
+    def __call__(self):
+        if self.editor_widget is not None:
+            self.check_on_close.remove(self.editor_widget)
+            self.tab_widget.removeTab(self.tab_widget.indexOf(self.editor_widget))
+
+class WorkBookCreateDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super(QtWidgets.QDialog, self).__init__(parent)
+
+        self.setWindowTitle("Create workbook")
+
+        QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
+        self.buttonBox.accepted.connect(self.accept)
+        self.buttonBox.rejected.connect(self.reject)
+
+        self.form_widget = QtWidgets.QWidget(self)
+        self.form_ui = ui.workbook_creation_ui.Ui_Form()
+        self.form_ui.setupUi(self.form_widget)
+
+        self.form_ui.open_button.clicked.connect(self.on_select_root_dir)
+
+        self.required_fields = {
+            'Access password' : self.form_ui.access_pwd_field,
+            'Editor password' : self.form_ui.editor_pwd_field,
+            'Manager password' : self.form_ui.manager_pwd_field,
+            'Admin password' : self.form_ui.admin_pwd_field,
+            'Admin name' : self.form_ui.adminNameLineEdit
+        }
+
+        self.layout = QtWidgets.QVBoxLayout()
+        self.layout.addWidget(self.form_widget)
+        self.layout.addWidget(self.buttonBox)
+        self.setLayout(self.layout)
+
+    def on_select_root_dir(self):
+        root_folder = (QtWidgets.QFileDialog
+                       .getExistingDirectory(self, 'Select root directory', '',
+                                             QtWidgets.QFileDialog.ShowDirsOnly))
+        if root_folder is not None:
+            self.form_ui.root_folder_lineEdit.setText(root_folder)
+
+    @staticmethod
+    def create(self, parent=None):
+        dialog = WorkBookCreateDialog(parent=parent)
+        result = dialog.exec_()
+        if result == QtWidgets.QDialog.Accepted:
+            return (dialog.workbook_cfg_fn, dialog.access_pwd, dialog.admin_name,
+                    dialog.admin_pwd)
+        else:
+            return None, None, None, None
+
+    def accept(self):
+        if self.check():
+            self._make_workbook()
+            super().accept()
+
+    def check(self, show_errors=True):
+        error_messages = []
+
+        wb_label = self.form_ui.workbook_label_lineEdit.text()
+        if len(wb_label) == 0:
+            error_messages.append('Workbook label must not be empty')
+
+        root_dir = self.form_ui.root_folder_lineEdit.text()
+        if not op.exists(root_dir):
+            error_messages.append('Root folder does not exist (%s)' % root_dir)
+
+        if len(wb_label) > 0 and op.exists(root_dir) and \
+            (op.exists(op.join(root_dir, protect_fn(wb_label) + '_files')) or \
+             op.exists(op.join(root_dir, protect_fn(wb_label) + '.psh'))):
+            error_messages.append('Root folder already contain workbook files')
+
+        for field_name, field in self.required_fields.items():
+            if len(field.text()) == 0:
+                error_messages.append('%s is required' % field_name)
+
+        if len(error_messages) > 0:
+            message_box = QtWidgets.QMessageBox()
+            message_box.setIcon(QtWidgets.QMessageBox.Critical)
+            message_box.setText('Errors:\n%s' %
+                                '\n'.join(' - %s' % e for e in error_messages))
+            message_box.exec_()
+
+            return False
+
+        return True
+
+    def _make_workbook(self):
+        # ASSUME: all fields are valid
+        wb_label = self.form_ui.workbook_label_lineEdit.text()
+        root_dir = self.form_ui.root_folder_lineEdit.text()
+        protected_wb_label = protect_fn(wb_label)
+        fs = LocalFileSystem(root_dir)
+        wb_cfg_rfn = protected_wb_label + '.psh'
+        data_rpath = protected_wb_label + '_files'
+        wb = WorkBook(wb_label, data_rpath, fs)
+        wb.save_configuration_file(wb_cfg_rfn)
+        self.access_pwd = self.form_ui.access_pwd_field.text()
+        wb.set_access_password(self.access_pwd)
+        wb.decrypt(self.access_pwd)
+        editor_pwd = self.form_ui.editor_pwd_field.text()
+        wb.set_password(UserRole.EDITOR, editor_pwd)
+        manager_pwd = self.form_ui.manager_pwd_field.text()
+        wb.set_password(UserRole.MANAGER, manager_pwd)
+        self.admin_pwd = self.form_ui.admin_pwd_field.text()
+        wb.set_password(UserRole.ADMIN, self.admin_pwd)
+        self.admin_name = self.form_ui.adminNameLineEdit.text()
+        wb.set_users({self.admin_name : UserRole.ADMIN})
+
+        self.workbook_cfg_fn = fs.full_path(wb_cfg_rfn)
+
+class WorkBookWidget(QtWidgets.QWidget, ui.workbook_ui.Ui_Form):
+    def __init__(self, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.setupUi(self)
+
+class WorkBookWindow(QtWidgets.QMainWindow):
+
+    def __init__(self):
+        super(WorkBookWindow, self).__init__()
+        self.workbook_ui = WorkBookWidget(self)
+        self.setCentralWidget(self.workbook_ui)
+        self.check_on_close = []
+        self.resize(1260, 1020)
+
+    def closeEvent(self, event):
+        for widget in self.check_on_close:
+            if not widget.closeEvent(event):
+                break
+
+
+
+class UsersEditor(QtWidgets.QWidget)
+    def __init__(self, users, user_role, parent=None):
+        super(UsersEditor, self).__init__(parent)
+
+        self.table = QtGui.QTableWidget()
+        self.table.setColumnCount(3) # User / Role / -
+
+        for irow, (user, role) in enumerate(users.items()):
+            item1 = QtGui.QTableWidgetItem(user)
+            self.table.setItem(irow, 0, item1)
+            item2 = QtGui.QTableWidgetItem()
+            role_select = QtGui.QComboBox()
+            for role in userRole:
+                role_select.addItem(role.name)
+            self.table.setCellWidget(irow, 1, role_select)
+            item_minus = QtGui.QTableWidgetItem('-')
+            self.table.setItem(irow, 0, item_minus)
+
+        self.table.setItem(irow+1, 0, QtGui.QTableWidgetItem('+'))
+
 class PiccelApp(QtWidgets.QApplication):
 
     USER_FILE = 'piccel.json'
@@ -5634,10 +5834,15 @@ class PiccelApp(QtWidgets.QApplication):
         self.selector_screen = QtWidgets.QWidget()
         _selector_ui = ui.selector_ui.Ui_Form()
         _selector_ui.setupUi(self.selector_screen)
-        icon_style = QtWidgets.QStyle.SP_DialogOpenButton
-        button_icon = self.style().standardIcon(icon_style)
+
+        button_icon = QtGui.QIcon(':/icons/top_selection_open_icon')
         _selector_ui.button_open_file.setIcon(button_icon)
         _selector_ui.button_open_file.clicked.connect(self.select_file)
+
+        button_icon = QtGui.QIcon(':/icons/top_selection_create_icon')
+        _selector_ui.button_create.setIcon(button_icon)
+        _selector_ui.button_create.clicked.connect(self.create)
+
         if cfg_fns is None:
             self.recent_files = self.logic.get_recent_files()
         else:
@@ -5691,9 +5896,11 @@ class PiccelApp(QtWidgets.QApplication):
                                               self.login_screen)
         login_cancel_shortcut.activated.connect(self.login_cancel)
 
-        self.workbook_screen = QtWidgets.QWidget()
-        self._workbook_ui = ui.workbook_ui.Ui_Form()
-        self._workbook_ui.setupUi(self.workbook_screen)
+        #self.workbook_screen = QtWidgets.QWidget()
+        self.workbook_screen = WorkBookWindow()
+        self._workbook_ui = self.workbook_screen.workbook_ui
+        # self._workbook_ui = ui.workbook_ui.Ui_Form()
+        # self._workbook_ui.setupUi(self.workbook_screen)
 
         self.current_widget = self.selector_screen
 
@@ -5707,7 +5914,6 @@ class PiccelApp(QtWidgets.QApplication):
         self.default_user = user
         self.role_pwd = role_pwd
         self.access_pwd = access_pwd
-
         self.tab_indexes = {}
 
         if cfg_fn is not None:
@@ -5716,6 +5922,17 @@ class PiccelApp(QtWidgets.QApplication):
                 self.access_process()
                 if self.default_user is not None and self.role_pwd is not None:
                     self.login_process()
+
+    def create(self):
+        cfg_fn, self.access_pwd, self.default_user, self.role_pwd = \
+            WorkBookCreateDialog.create(self)
+        if cfg_fn is not None:
+            self.open_configuration_file(cfg_fn)
+            if self.logic.workbook is not None:
+                self.access_process()
+                self.login_process()
+            else:
+                logger.error('Workbook not properly loaded')
 
     def select_file(self):
         cfg_fn = QtWidgets.QFileDialog.getOpenFileName(self.selector_screen,
@@ -6106,7 +6323,7 @@ class PiccelApp(QtWidgets.QApplication):
             _data_sheet_ui = ui.data_sheet_ui.Ui_Form()
             _data_sheet_ui.setupUi(sheet_widget)
             _data_sheet_ui.cell_value_frame.hide()
-            if self.logic.workbook.user_role != UserRole.ADMIN:
+            if self.logic.workbook.user_role < UserRole.MANAGER:
                 _data_sheet_ui.button_edit_entry.hide()
 
             button_icon = QtGui.QIcon(':/icons/close_icon')
@@ -6213,13 +6430,25 @@ class PiccelApp(QtWidgets.QApplication):
             self.tab_indexes[sh_name] = (self._workbook_ui.tabWidget
                                          .addTab(sheet_widget, sh_name))
 
-            _data_sheet_ui.button_edit_form.clicked.connect(
-                lambda: self.make_text_editor(self._workbook_ui.tabWidget,
-                                              sh_name,
-                                              json.dumps(sh.form_master.to_dict(),
-                                                         indent=4),
-                                              'json',
-                                              lambda s: sh.set_form_master(Form.from_json(s))))
+            def make_form_editor(tab_widget, sheet, check_on_close):
+                tab_closer = EditorTabCloser(tab_widget, check_on_close)
+                try:
+                    sheet_io = FormEditorSheetIO(sheet, close_callback=tab_closer)
+                except FormEditionNotAvailable:
+                    return
+                editor_widget = FormEditor(sheet_io, parent=tab_widget)
+                tab_label = '%s | Form edit' % sh_name
+                tab_idx = tab_widget.addTab(editor_widget, tab_label)
+                tab_closer.set_editor_tab(editor_widget)
+                icon_style = QtWidgets.QStyle.SP_FileDialogListView
+                tab_icon = QtGui.QIcon(':/icons/editor_icon')
+                tab_widget.setTabIcon(tab_idx, tab_icon)
+                tab_widget.setCurrentIndex(tab_idx)
+
+            f_form_editor = partial(make_form_editor, self._workbook_ui.tabWidget,
+                                    sh, self.workbook_screen.check_on_close)
+            _data_sheet_ui.button_edit_form.clicked.connect(f_form_editor)
+
             _data_sheet_ui.button_edit_plugin.clicked.connect(
                 lambda: self.make_text_editor(self._workbook_ui.tabWidget,
                                               sh_name,
@@ -6251,8 +6480,11 @@ class PiccelApp(QtWidgets.QApplication):
                     make_tab_sheet(sheet_name, sheet)
                 else:
                     logger.info('Sheet %s not loaded in UI because user role %s < %s',
-                                sheet_name, self.logic.workbook.user_role, sheet.access_level)
+                                sheet_name, self.logic.workbook.user_role,
+                                sheet.access_level)
+        self.workbook_screen.setWindowTitle(self.logic.workbook.label)
         self.workbook_screen.show()
+
         return self.workbook_screen
 
     def show(self):

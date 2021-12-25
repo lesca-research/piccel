@@ -2,16 +2,20 @@
 <RCC version="1.0">
     <qresource prefix="icons">
         <file alias="main_icon">piccel_icon.svg</file>
-        <file alias="close_icon">close.svg</file>
+        <file alias="close_icon">cross.svg</file>
         <file alias="view_icon">eye.svg</file>
         <file alias="refresh_icon">refresh.svg</file>
         <file alias="form_input_icon">edit.svg</file>
         <file alias="editor_icon">edit-alt.svg</file>
         <file alias="form_variable_icon">database.svg</file>
+        <file alias="form_multi_variable_icon">multi_variables.svg</file>
         <file alias="form_choices_icon">list.svg</file>
         <file alias="form_section_icon">section.svg</file>
         <file alias="form_new_section_icon">new-section.svg</file>
         <file alias="form_next_section_icon">arrows-split.svg</file>
+        <file alias="form_unsaved_icon">alert-circle-red.svg</file>
+        <file alias="top_selection_open_icon">file-download.svg</file>
+        <file alias="top_selection_create_icon">file-plus.svg</file>
     </qresource>
 </RCC>
 

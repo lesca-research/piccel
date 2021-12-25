@@ -1,5 +1,32 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+class ListSelectDialog(QtWidgets.QDialog):
+    def __init__(self, choices, title=None, parent=None):
+        super(QtWidgets.QDialog, self).__init__(parent)
+
+        self.setWindowTitle(title if title is not None else "Select")
+
+        QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
+        self.buttonBox.accepted.connect(self.accept)
+        self.buttonBox.rejected.connect(self.reject)
+
+        self.listWidget = QtWidgets.QListWidget()
+        for choice in choices:
+            self.listWidget.addItem(QtWidgets.QListWidgetItem(choice))
+
+        self.layout = QtWidgets.QVBoxLayout()
+        self.layout.addWidget(self.listWidget)
+        self.layout.addWidget(self.buttonBox)
+        self.setLayout(self.layout)
+
+    def get_choice(self):
+        selection = self.listWidget.selectedItems()
+        if len(selection) > 0:
+            return selection[0].text()
+        else:
+            return None
+
 class FocusTextEdit(QtWidgets.QPlainTextEdit):
     """
     A TextEdit editor that sends editingFinished events

@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>946</width>
-    <height>482</height>
+    <height>461</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -53,7 +53,14 @@
       <item>
        <widget class="QPushButton" name="button_preview">
         <property name="text">
-         <string>Preview</string>
+         <string>Preview mode</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="pushButton">
+        <property name="text">
+         <string>Test</string>
         </property>
        </widget>
       </item>
@@ -69,6 +76,13 @@
          </size>
         </property>
        </spacer>
+      </item>
+      <item>
+       <widget class="QPushButton" name="button_close">
+        <property name="text">
+         <string>Close</string>
+        </property>
+       </widget>
       </item>
      </layout>
     </widget>

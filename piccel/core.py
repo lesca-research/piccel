@@ -73,3 +73,10 @@ class UserRole(IntEnum):
     VIEWER = 0
 
 class SheetNotFound(Exception): pass
+
+class FormEditionBlockedByPendingLiveForm(Exception): pass
+class FormEditionLocked(Exception): pass
+class FormEditionNotOpen(Exception): pass
+class FormEditionLockedType(Exception): pass
+class FormEditionOrphanError(Exception): pass
+class FormEditionNotAvailable(Exception): pass

@@ -10,10 +10,10 @@ logger = logging.getLogger('piccel')
 
 def main():
 
-    min_args = 1
+    min_args = 0
     max_args = 1
 
-    usage = 'usage: %prog [options] FORM_FILE'
+    usage = 'usage: %prog [options] [FORM_FILE]'
     description = 'Run piccel form editor.'
 
     parser = OptionParser(usage=usage, description=description)
@@ -37,7 +37,8 @@ def main():
         parser.print_help()
         return 1
 
+    form_fn = args[0] if len(args) == 1 else None
     app = QApplication(sys.argv)
-    form_editor = FormEditor(FormEditorFileIO(args[0]))
+    form_editor = FormEditor(FormEditorFileIO(form_fn))
     form_editor.show()
     sys.exit(app.exec_())
