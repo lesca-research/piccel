@@ -253,7 +253,6 @@ class PasswordVault:
 
 from .core import UserRole, nexts
 
-
 class IndexedPattern:
     def __init__(self, pattern, index_start=0):
         self.pattern = pattern
@@ -303,10 +302,12 @@ class LocalFileSystem:
         self.track_changes = state
         self.current_stats = self.file_stats()
 
-    def file_stats(self):
+    def file_stats(self, subfolder=''):
+        """ reset file stats (remove change tracking) """
         stats = {}
         if self.track_changes:
-            for wroot, dirs, files in os.walk(self.root_folder):
+            root = op.join(self.root_folder, subfolder)
+            for wroot, dirs, files in os.walk(root):
                 for bfn in files:
                     rdir = op.relpath(wroot, self.root_folder)
                     fn = op.normpath(op.join(rdir, bfn))
@@ -338,8 +339,10 @@ class LocalFileSystem:
             for fn in deletions:
                 self.current_stats.pop(fn)
 
-    def accept_all_changes(self):
-        self.current_stats = self.file_stats()
+    def accept_all_changes(self, subfolder=''):
+        if subfolder == '':
+            self.current_stats = {}
+        self.current_stats.update(self.file_stats(subfolder=subfolder))
 
     def change_dir(self, folder, track_changes=False):
         """ Note: change tracking will be reset """
@@ -415,6 +418,7 @@ class LocalFileSystem:
                 fn = op.normpath(op.join(rdir, bfn))
                 self.current_stats.pop(fn)
 
+        
         logger.debug2('Remove folder %s', full_folder)
         shutil.rmtree(full_folder)
 
@@ -469,6 +473,7 @@ class LocalFileSystem:
             content_str = self.encrypter.decrypt_to_str(content_str)
         return content_str
 
+class SheetUnsetUserError(Exception): pass
 class InvalidSheetPlugin(Exception): pass
 class InvalidSheetLabel(Exception): pass
 class NoFormMasterError(Exception): pass
@@ -661,11 +666,19 @@ class DataSheet:
 
     def __init__(self, label, form_master=None, df=None, user=None,
                  filesystem=None, live_forms=None, watchers=None,
-                 workbook=None, properties=None):
+                 workbook=None, properties=None, plugin_code_str=None):
         """
         filesystem.root is the sheet-specific folder where to save all data
-        and pending forms
+        and pending forms.
+        ASSUME: all given objects are consistent with files in filesystem.
+        Nothing is loaded or saved here.
+        To initialise a DataSheet from files see method from_files
+        To save logic to files see see method save_logic
+        To save live data to files see see method save_live_data
+
+        Tracking of file changes is reset here.
         """
+
         self.label = self.validate_sheet_label(label)
         self.properties = {}
         self.access_level = UserRole.VIEWER
@@ -678,13 +691,11 @@ class DataSheet:
         self.live_forms = live_forms if live_forms is not None else {}
         self.user = user
 
-        self.filesystem = filesystem
-        if self.filesystem is not None and self.user is None:
-            raise Exception('User required when file saving is used')
-        if self.filesystem is not None:
+        self.filesystem = None
+        if filesystem is not None:
+            self.filesystem = filesystem
             if not self.filesystem.exists('master_form_alternates'):
                 self.filesystem.makedirs('master_form_alternates')
-            self.filesystem.enable_track_changes()
             fs_label = DataSheet.get_sheet_label_from_filesystem(self.filesystem)
             if fs_label != self.label:
                 raise InvalidSheetLabel('Sheet label (%s) is not the same as '\
@@ -693,9 +704,7 @@ class DataSheet:
         self.has_write_access = (self.filesystem.test_write_access() \
                                  if self.filesystem is not None else False)
 
-        # TODO: use Dummy file system to avoid checking all the time?
-
-        self.default_view = 'raw'
+        self.default_view = 'full'
         self.views = {}
 
         self.cached_views = defaultdict(lambda: None)
@@ -706,7 +715,6 @@ class DataSheet:
         self.notifier = Notifier(watchers if watchers is not None else {})
 
         self.df = self.empty_df_from_master()
-
         if df is not None:
             self.import_df(df)
 
@@ -715,12 +723,14 @@ class DataSheet:
         if self.filesystem is not None and not self.filesystem.exists('data'):
             self.filesystem.makedirs('data')
 
-        if self.filesystem is not None:
-            self.reload_all_data()
-            self.load_live_forms()
+        # if self.filesystem is not None:
+        #     self.reload_all_data()
+        #     self.load_live_forms()
 
         self.workbook = workbook
-        self.set_plugin(SheetPlugin(self))
+        plugin_code_str = (plugin_code_str if plugin_code_str is not None
+                           else inspect.getsource(sheet_plugin_template))
+        self.set_plugin_from_code(plugin_code_str)
 
     def empty_df_from_master(self):
         df = None
@@ -741,31 +751,40 @@ class DataSheet:
                           '__conflict_idx__'],  inplace=True)
         return df
 
-    def set_filesystem(self, fs):
-        # TODO: check if really needed? Should be set only once at __init__
+    def change_filesystem(self, fs, save_logic=False, save_live_data=False):
         self.filesystem = fs
         self.filesystem.enable_track_changes()
         self.has_write_access = self.filesystem.test_write_access()
+        if save_logic:
+            self.save_logic()
+        if save_live_data:
+            self.save_live_data()
 
     def set_workbook(self, workbook):
         self.plugin.set_workbook(workbook)
 
     @staticmethod
     def from_files(user, filesystem, watchers=None, workbook=None):
+        filesystem = filesystem.clone()
+        filesystem.enable_track_changes()
+
         label = DataSheet.get_sheet_label_from_filesystem(filesystem)
         logger.debug('Load form master for sheet %s', label)
         form_master = DataSheet.load_form_master(filesystem)
         logger.debug('Create sheet %s, using filesystem(root=%s)',
                      label, filesystem.full_path(filesystem.root_folder))
         sheet_properties = DataSheet.load_properties_from_file(filesystem)
+        plugin_code = DataSheet.load_plugin_code_from_file(filesystem)
         sheet = DataSheet(label, form_master=form_master, df=None, user=user,
                           filesystem=filesystem, watchers=watchers,
-                          workbook=workbook, properties=sheet_properties)
-        sheet.load_plugin()
+                          workbook=workbook, properties=sheet_properties,
+                          plugin_code_str=plugin_code)
+        sheet.reload_all_data()
+        sheet.load_live_forms()
         return sheet
 
     def base_views(self):
-        return {'raw' : lambda ddf: ddf,
+        return {'full' : lambda ddf: ddf,
                 'latest' : self.latest_update_df}
 
     def latest_update_df(self, df=None):
@@ -779,7 +798,7 @@ class DataSheet:
         return latest
 
     #@check_role(UserRole.ADMIN)
-    def dump_plugin_code(self, plugin_code=None, overwrite=False):
+    def ___dump_plugin_code(self, plugin_code=None, overwrite=False):
         if self.filesystem is None:
             raise IOError('Cannot save plugin for sheet %s (no associated '\
                           'filesystem)')
@@ -791,29 +810,52 @@ class DataSheet:
         self.filesystem.save(plugin_fn, plugin_code, overwrite=overwrite)
         return plugin_fn
 
-    def get_plugin_code(self):
-        plugin_module = 'plugin_%s' % self.label
-        plugin_fn = '%s.py' % plugin_module
+    def ___get_plugin_code(self):
+        plugin_fn = 'plugin.py'
         if self.filesystem.exists(plugin_fn):
             return self.filesystem.load(plugin_fn)
         else:
             return ''
 
-    def load_plugin(self):
-        plugin_module = 'plugin_%s' % self.label
-        plugin_fn = '%s.py' % plugin_module
-        if self.filesystem.exists(plugin_fn):
-            logger.info('Load plugin of sheet %s from %s',
-                        self.label, self.filesystem.full_path(plugin_fn))
-            tmp_folder = op.dirname(self.filesystem.copy_to_tmp(plugin_fn,
-                                                                 decrypt=True))
-            sys.path.insert(0, tmp_folder)
-            plugin_module = import_module(plugin_module)
-            reload_module(plugin_module)
-            sys.path.pop(0)
-            self.set_plugin(plugin_module.CustomSheetPlugin(self))
+    @staticmethod
+    def load_plugin_code_from_file(filesystem):
+        plugin_fn = 'plugin.py'
+        plugin_code_str = None
+        if filesystem.exists(plugin_fn):
+            logger.info('Load plugin from %s', filesystem.full_path(plugin_fn))
+            plugin_code_str = filesystem.load(plugin_fn)
         else:
-            logger.info('No plugin to load for sheet %s', self.label)
+            logger.info('No plugin to load because %s does not exists',
+                        filesystem.full_path(plugin_fn))
+        return plugin_code_str
+
+    def ___load_plugin_old():
+        tmp_folder = op.dirname(self.filesystem.copy_to_tmp(plugin_fn,
+                                                            decrypt=True))
+        sys.path.insert(0, tmp_folder)
+        plugin_module = import_module(plugin_module)
+        reload_module(plugin_module)
+        sys.path.pop(0)
+        self.set_plugin(plugin_module.CustomSheetPlugin(self))
+
+    def set_plugin_from_code(self, code_str):
+        """ Code is not saved. See save_plugin_code """
+        self.plugin_code_str = code_str
+        if code_str is None:
+            self.plugin = SheetPlugin(self)
+        else:
+            self.plugin = (module_from_code_str(code_str)
+                           .CustomSheetPlugin(self))
+        # cached views invalidated there:
+        views = self.plugin.views(self.base_views())
+        logger.debug2('Sheet %s, load plugin views: %s',
+                      self.label, ','.join(views))
+        self.set_views(views)
+        default_view = self.plugin.default_view()
+        if default_view is not None:
+            self.set_default_view(default_view)
+
+        self.plugin.set_workbook(self.workbook)
 
     @staticmethod
     def load_properties_from_file(filesystem):
@@ -860,6 +902,7 @@ class DataSheet:
         return form
 
     def reload_all_data(self):
+        """ Data is cleared before loading """
         logger.debug('Reload all data for sheet %s', self.label)
         data_folder = 'data'
         if self.filesystem.exists(data_folder):
@@ -883,11 +926,11 @@ class DataSheet:
                     if not data_fn.endswith('main.csv'):
                         entry_df['__fn__'] = data_fn
                     self._append_df(entry_df)
-                    self.fix_conflicting_entries()
-                    self.invalidate_cached_views()
+                self.fix_conflicting_entries()
+                self.invalidate_cached_views()
             else:
                 logger.debug('No sheet data to load in %s', data_folder)
-            self.filesystem.accept_all_changes()
+            self.filesystem.accept_all_changes(data_folder)
         else:
             self.filesystem.makedirs(data_folder)
             logger.debug('Data folder %s is empty', data_folder)
@@ -924,7 +967,7 @@ class DataSheet:
                     self._append_df(entry_df)
 
             # TODO: IMPORTANT changed form data is ignored here
-            self.filesystem.accept_all_changes()
+            self.filesystem.accept_all_changes('data')
 
     def get_form_for_edition(self):
         # Insure that there is no pending live forms
@@ -941,16 +984,14 @@ class DataSheet:
             raise FormEditionLocked(lock_user)
 
         self.lock_form_master_edition()
-        try:
-            return self.form_master.new()
-        except LanguageError:
-            from IPython import embed; embed()
+        return self.form_master.new()
 
     def get_alternate_master_forms(self):
         return self.filesystem.listdir('master_form_alternates')
 
     def open_alternate_master_form(self, form_bfn):
-        return Form(self.filesystem.load(op.join('master_form_alternates', form_bfn)))
+        return Form(self.filesystem.load(op.join('master_form_alternates',
+                                                 form_bfn)))
 
     def save_alternate_master_form(self, form_bfn, form):
         logger.info('Save alternate version of form %s as %s (sheet: %s)',
@@ -960,7 +1001,8 @@ class DataSheet:
 
     def get_alternate_form_fn(self):
         date_fmt = '%Y_%m_%d_%Hh%Mm%Ss'
-        return '%s_%s' % (datetime.now().strftime(date_fmt), protect_fn(self.user))
+        return '%s_%s' % (datetime.now().strftime(date_fmt),
+                          protect_fn(self.user))
 
     def lock_form_master_edition(self):
         self.filesystem.save('master.form.lock', self.user)
@@ -1025,9 +1067,6 @@ class DataSheet:
                 for col_values, df_index in entry_df[list(cols)].groupby():
                     pass
 
-    def _add_to_value_to_index(self):
-        pass
-
     def __df_index_from_value_wip(self, value_dict, view=None,
                                   full_mask_search=True):
         # Trying to use a maintained mapping of values to index to speed up
@@ -1084,7 +1123,33 @@ class DataSheet:
                      self.label, view, value_dict, matched_index)
         return matched_index
 
-    def save(self, overwrite=False):
+    def save_logic(self, overwrite=False):
+        if self.filesystem is None:
+            raise IOError('Cannot save logic of sheet %s (no associated '\
+                          'filesystem)')
+
+        self.save_form_master(overwrite=overwrite)
+        self.save_properties(overwrite=overwrite)
+        self.save_plugin_code(overwrite=overwrite)
+
+    def save_plugin_code(self, overwrite=False):
+        if self.plugin_code_str is not None:
+            self.filesystem.save('plugin.py', self.plugin_code_str,
+                                 overwrite=overwrite)
+
+    def save_live_data(self, overwrite=False):
+        if self.filesystem is None:
+            raise IOError('Cannot save live data of sheet %s (no associated '\
+                          'filesystem)')
+
+        self.save_all_data(overwrite=overwrite)
+        for form_id, form in self.live_forms.items():
+            for section_name, section in form.sections.items():
+                for item in section.items:
+                    for key, value_str in item.values_str:
+                        self.save_live_form_input(form_id, section_name,
+                                                  key, value_str)
+    def __save(self, overwrite=False):
         if self.filesystem is None:
             raise IOError('Cannot save data of sheet %s (no associated '\
                           'filesystem)')
@@ -1094,7 +1159,7 @@ class DataSheet:
 
         self.save_form_master(overwrite=overwrite)
         self.save_properties(overwrite=overwrite)
-        self.save_all_data()
+        self.save_all_data(overwrite=overwrite)
         for form_id, form in self.live_forms.items():
             for section_name, section in form.sections.items():
                 for item in section.items:
@@ -1102,23 +1167,25 @@ class DataSheet:
                         self.save_live_form_input(form_id, section_name,
                                                   key, value_str)
 
-    def save_all_data(self, entry_df=None):
+    def save_all_data(self, entry_df=None, overwrite=False):
         # TODO: admin role + lock !
+        if not self.filesystem.exists('data'):
+            logger.info('Sheet %s: Create data folder', self.label)
+            self.filesystem.makedirs('data')
+
         if self.df is not None and self.df.shape[0] > 0:
             main_data_fn = 'main.csv'
-            if not self.filesystem.exists('data'):
-                logger.info('Sheet %s: Create data folder', self.label)
-                self.filesystem.makedirs('data')
             logger.info('Sheet %s: Save all data', self.label)
             self.filesystem.save(op.join('data', main_data_fn),
                                  self.df_to_str(self.df.drop(columns='__fn__')),
-                                 overwrite=True)
+                                 overwrite=overwrite)
 
             logger.info('Remove all single data entries of sheet %s',
                         self.label)
             for entry_idx, data_fn in self.df['__fn__'].iteritems():
                 if not pd.isna(data_fn):
-                    logger.info('Delete file of entry %s: %s', data_fn, entry_idx)
+                    logger.info('Delete file of entry %s: %s',
+                                data_fn, entry_idx)
                     self.filesystem.remove(data_fn)
                 else:
                     logger.info('No file to delete for entry %s', entry_idx)
@@ -1126,6 +1193,8 @@ class DataSheet:
             self.df['__fn__'] = pd.NA
 
     def load_live_forms(self):
+        if self.user is None:
+            return
         # TODO: handle consistency with form master, + ustests
         logger.debug('Load live forms for sheet %s', self.label)
         top_folder = self.get_live_forms_folder()
@@ -1141,6 +1210,8 @@ class DataSheet:
                     try:
                         self.filesystem.rmtree(live_form_folder)
                     except Exception as e:
+                        print('rmtree fs error')
+                        pprint(self.filesystem.current_stats)
                         logger.error('Error while deleting live form '\
                                      'folder %s: %s', live_form_folder,
                                      repr(e))
@@ -1161,7 +1232,8 @@ class DataSheet:
                     entry_id = np.int64(entry_id_str)
                     update_idx_str = (saved_entries[first_section]
                                       .pop('__update_idx__'))
-
+                    conflict_idx_str = (saved_entries[first_section]
+                                        .pop('__conflict_idx__'))
                     submission = (saved_entries[first_section]
                                   .pop('__submission__'))
 
@@ -1180,7 +1252,21 @@ class DataSheet:
                             live_form[section][key].set_input_str(value_str,
                                                                   use_callback=False,
                                                                   force=True)
+
                     first_section = live_form[live_form.first_section()]
+                    (first_section['__entry_id__']
+                     .set_input_str(entry_id_str, use_callback=False,
+                                    force=True))
+                    (first_section['__update_idx__']
+                     .set_input_str(update_idx_str, use_callback=False,
+                                    force=True))
+                    (first_section['__conflict_idx__']
+                     .set_input_str(conflict_idx_str, use_callback=False,
+                                    force=True))
+                    (first_section['__submission__']
+                     .set_input_str(submission, use_callback=False,
+                                    force=True))
+
                     logger.debug2('IDs after live form input: __entry_id__=%d, '\
                                  '__update_idx__=%d',
                                  first_section['__entry_id__'].get_value(),
@@ -1266,10 +1352,11 @@ class DataSheet:
 
     def validate_sheet_label(self, label):
         if DataSheet.SHEET_LABEL_RE.match(label) is None:
-            raise InvalidSheetLabel("Sheet label %s has invalid format")
+            raise InvalidSheetLabel("Sheet label %s has invalid format" % \
+                                    label)
         return label
 
-    def set_plugin(self, plugin, overwrite=None):
+    def ___set_plugin(self, plugin, overwrite=None):
         plugin_str = None
         if isinstance(plugin, str):
             plugin_str = plugin
@@ -1576,6 +1663,9 @@ class DataSheet:
     def _new_form(self, submission, entry_dict=None, entry_id=None,
                   form_id=None, update_idx=np.int64(0),
                   conflict_idx=np.int64(0)):
+        if self.user is None:
+            raise SheetUnsetUserError()
+
         if self.form_master is None:
             raise NoFormMasterError()
 
@@ -1608,7 +1698,8 @@ class DataSheet:
 
             # f = lambda sec, k, s: self.save_live_form_input(form_id, sec, k, s)
             form.set_input_callback(LazyFunc(self.save_live_form_input,
-                                             form_id=form_id))
+                                             form_id=form_id,
+                                             overwrite=True))
 
         entry_id = entry_id if entry_id is not None else self.new_entry_id()
 
@@ -1633,14 +1724,18 @@ class DataSheet:
 
         if self.filesystem is not None:
             first_section = form.first_section()
-            self.save_live_form_input(form_id, first_section,
-                                      '__entry_id__', entry_id_str)
-            self.save_live_form_input(form_id, first_section,
-                                      '__update_idx__', update_idx_str)
-            self.save_live_form_input(form_id, first_section,
-                                      '__conflict_idx__', conflict_idx_str)
-            self.save_live_form_input(form_id, first_section,
-                                      '__submission__', submission)
+            try:
+                self.save_live_form_input(form_id, first_section,
+                                          '__entry_id__', entry_id_str)
+                self.save_live_form_input(form_id, first_section,
+                                          '__update_idx__', update_idx_str)
+                self.save_live_form_input(form_id, first_section,
+                                          '__conflict_idx__', conflict_idx_str)
+                self.save_live_form_input(form_id, first_section,
+                                          '__submission__', submission)
+            except FileExistsError:
+                # Happens when live form is reloaded
+                pass
 
         logger.debug2('Sheet %s: call form.set_on_submission', self.label)
         form.set_on_submission(LazyFunc(self.on_submitted_entry, form_id=form_id))
@@ -1651,13 +1746,14 @@ class DataSheet:
         return form
 
     # @check_role(UserRole.EDITOR) # TODO
-    def save_live_form_input(self, form_id, form_section, item_key, input_str):
+    def save_live_form_input(self, form_id, form_section, item_key, input_str,
+                             overwrite=False):
         fn = self.get_live_form_entry_fn(form_id, form_section,
                                          item_key, input_str)
         logger.debug2('Save input of form %d, section "%s" and key "%s" to '\
                      'file %s', form_id, form_section, item_key, fn)
         entry = (form_section, item_key, input_str)
-        self.filesystem.save(fn, json.dumps(entry), overwrite=True)
+        self.filesystem.save(fn, json.dumps(entry), overwrite=overwrite)
 
     def get_live_form_entry_fn(self, form_id, form_section, item_key, input_str):
         bfn = '{section}_{item}.json'.format(section=form_section,
@@ -1806,7 +1902,7 @@ class DataSheet:
             if not pd.isna(entry_fn):
                 self.filesystem.remove(entry_fn)
             else:
-                self.save_all_data()
+                self.save_all_data(overwrite=True)
 
         # TODO: update conflit idx!
         self.resolve_conflicting_entries(entry_idx)
@@ -1816,7 +1912,7 @@ class DataSheet:
     def set_entry(self, entry_dict, entry_idx):
         """ WARNING: this is an admin feature, not conflict-free! """
         self.add_entry(entry_dict, entry_idx, self.set_entry_df,
-                       save_func=self.save_all_data)
+                       save_func=partial(self.save_all_data, overwrite=True))
 
     def _append_df(self, entry_df):
         # TODO: use merge instead of append
@@ -1951,7 +2047,7 @@ def df_weak_equal(df1, df2):
 
     diff_hash = set(hash1).symmetric_difference(hash2)
     if len(diff_hash) > 0:
-        
+
         mask_extra = hash1.isin(diff_hash).to_numpy()
         logger.debug('Entries in df1 and not in df2:\n%s',
                      df1[mask_extra])
@@ -1960,6 +2056,29 @@ def df_weak_equal(df1, df2):
                      df2[mask_extra])
         return False
     return True
+
+plugin_source_header = \
+"""
+import pandas as pd
+import numpy as np
+from piccel.sheet_plugin import SheetPlugin
+from piccel.plugin_tools import map_set, And, Or
+from piccel.plugin_tools import (LescaDashboard, InterviewTracker,
+                                 form_update_or_new,
+                                 DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
+                                 track_emailled_poll, emailled_poll_action,
+                                 track_participant_status,
+                                 participant_status_action)
+from piccel.logging import logger
+"""
+
+def strip_indent(code):
+    indent_size = 0
+    while code[indent_size] == ' ':
+        indent_size += 1
+    if indent_size == 0:
+        return code
+    return '\n'.join(line[indent_size:] for line in code.split('\n'))
 
 class TestDataSheet(unittest.TestCase):
 
@@ -2036,7 +2155,8 @@ class TestDataSheet(unittest.TestCase):
         self.user = 'me'
         self.sheet_folder = op.join(self.tmp_dir, self.sheet_id)
         os.makedirs(self.sheet_folder)
-        self.filesystem = LocalFileSystem(self.sheet_folder)
+        self.filesystem = LocalFileSystem(self.sheet_folder,
+                                          track_changes=True)
         self.sheet = DataSheet(self.sheet_id, form, None,
                                self.user, self.filesystem)
 
@@ -2045,7 +2165,8 @@ class TestDataSheet(unittest.TestCase):
                                   self.data_df_ts_data,
                                   self.user, self.filesystem,
                                   properties={'access_level':UserRole.MANAGER})
-        self.sheet_ts.save()
+        self.sheet_ts.save_logic()
+        self.sheet_ts.save_live_data()
         logger.debug('--------------------')
         logger.debug('utest setUp finished')
 
@@ -2134,6 +2255,16 @@ class TestDataSheet(unittest.TestCase):
         ]))
         self.assertFalse(df_weak_equal(df1, df2))
 
+    def test_module_from_code(self):
+        code = \
+"""
+import numpy as np
+def foo():
+    return np.array([1])
+"""
+        module = module_from_code_str(code)
+        self.assertEqual(module.foo()[0], 1)
+
     def test_properties(self):
         self.assertEqual(self.sheet_ts.access_level, UserRole.MANAGER)
         self.assertEqual(self.sheet.access_level, UserRole.VIEWER)
@@ -2144,6 +2275,7 @@ class TestDataSheet(unittest.TestCase):
         sheet_ts2 = DataSheet.from_files(self.user, self.sheet_ts.filesystem.clone())
         self.assertEqual(sheet_ts2.access_level, UserRole.MANAGER)
         self.assertTrue(sheet_ts2.get_property('lesca_participant_sheet'))
+
 
     def test_form_user(self):
         form_def = {
@@ -2493,7 +2625,7 @@ class TestDataSheet(unittest.TestCase):
     def test_plugin_views(self):
         # TODO: test against all versions of plugin API (may change overtime)
 
-        class Plugin(SheetPlugin):
+        class TestViewSheetPlugin(SheetPlugin):
             def views(self, base_views):
                 base_views.update({'young' : lambda df: df[df.Age<50]})
                 return base_views
@@ -2503,7 +2635,12 @@ class TestDataSheet(unittest.TestCase):
                 return pd.DataFrame(index=df.index, columns=df.columns,
                                     data=np.ones(df.shape, dtype=bool))
 
-        self.sheet_ts.set_plugin(Plugin(self.sheet_ts))
+        code = (plugin_source_header + \
+                strip_indent(inspect.getsource(TestViewSheetPlugin)
+                             .replace('TestViewSheetPlugin',
+                                      'CustomSheetPlugin')))
+        self.sheet_ts.set_plugin_from_code(code)
+
         df_young = self.sheet_ts.get_df_view('young')
         mask = df_young.Participant_ID=='CE0004'
         self.assertEqual(df_young.loc[mask, 'Age'].values[0], 22)
@@ -2512,7 +2649,7 @@ class TestDataSheet(unittest.TestCase):
         self.assertTrue((validity.dtypes == bool).all())
 
     def test_validity(self):
-        class Plugin(SheetPlugin):
+        class ValiditySheetPlugin(SheetPlugin):
 
             def views(self, base_views):
                 return base_views
@@ -2528,7 +2665,12 @@ class TestDataSheet(unittest.TestCase):
                     validity[col] = ~df[col].duplicated(keep=False).to_numpy()
                 return validity
 
-        self.sheet_ts.set_plugin(Plugin(self.sheet_ts))
+        code = (plugin_source_header + \
+                strip_indent(inspect.getsource(ValiditySheetPlugin)
+                             .replace('ValiditySheetPlugin',
+                                      'CustomSheetPlugin')))
+        self.sheet_ts.set_plugin_from_code(code)
+
         # Check view validity
         view = self.sheet_ts.get_df_view('latest')
         validity = self.sheet_ts.view_validity('latest')
@@ -2737,6 +2879,7 @@ class TestDataSheet(unittest.TestCase):
         form.submit()
 
         sheet_ts2.refresh_data()
+
         self.sheet_ts.refresh_data()
 
         self.assertEqual(set(sheet_ts2.concurrent_updated_entries()),
@@ -2874,22 +3017,21 @@ class TestDataSheet(unittest.TestCase):
         for k,v in entry.items():
             form['section1'][k].set_input_str(str(v))
         form.submit()
+
         sh1.restore_form_folders()
 
         logger.debug('-------------------------------------------')
         logger.debug('utest: create new sheet, expect live form '\
                      'folder to be deleted')
-        sh2 = DataSheet(self.sheet_id,
-                        Form.from_dict(self.form_def_ts_data),
-                        self.data_df_ts_data,
-                        self.user, self.filesystem)
+        sh2 = DataSheetFormHook.from_files(self.user, self.filesystem)
+
         self.assertFalse(sh2.filesystem.exists(sh2.get_live_form_folder(form_id)))
 
     def test_refresh_sheet(self):
         sheet_ts2 = DataSheet(self.sheet_id,
                               Form.from_dict(self.form_def_ts_data),
                               self.data_df_ts_data,
-                              self.user, self.filesystem.change_dir('.'))
+                              self.user, self.filesystem.clone())
         form = self.sheet_ts.form_new_entry()
         entry = {'Participant_ID' : 'CE0000', 'Age' : 43,
                  'Phone_Number' : '555'}
@@ -3079,8 +3221,8 @@ class PiccelLogic:
         return self.workbook.access_password_is_valid(password_str)
 
     def check_role_password(self, user, password_str):
-        role = self.workbook.user_roles[user]
-        return self.workbook.role_password_is_valid(role, password_str)
+        user_role = self.workbook.get_user_role(user)
+        return self.workbook.role_password_is_valid(user_role, password_str)
 
     def cancel_access(self):
         self.cancel_login()
@@ -3119,25 +3261,25 @@ class TestPiccelLogic(unittest.TestCase):
         self.udata = UserData('sheeter_utest.json')
         self.tmp_dir = tempfile.mkdtemp()
         filesystem = LocalFileSystem(self.tmp_dir)
-        workbook = WorkBook('Test WB', 'wb_data', filesystem)
-        self.cfg_fn = 'wb.psh'
-        workbook.save_configuration_file(self.cfg_fn)
         self.access_pwd = '1234'
         self.editor_pwd = 'FVEZ'
         self.admin_pwd = '5425'
         self.manager_pwd = 'a542fezf5'
+        self.admin_user = 'thomas'
+        wb_label = 'Test WB'
+        wb = WorkBook.create(wb_label, filesystem,
+                             access_password=self.access_pwd,
+                             admin_password=self.admin_pwd,
+                             manager_password=self.manager_pwd,
+                             editor_password=self.editor_pwd,
+                             admin_user=self.admin_user)
+        self.cfg_bfn = protect_fn(wb_label) + '.psh'
 
-        workbook.set_access_password(self.access_pwd)
-        workbook.decrypt(self.access_pwd)
-        workbook.set_password(UserRole.EDITOR, self.editor_pwd)
-        workbook.set_password(UserRole.ADMIN, self.admin_pwd)
-        workbook.set_password(UserRole.MANAGER, self.manager_pwd)
-        workbook.set_users({
-            'thomas' : UserRole.ADMIN,
-            'simon' : UserRole.EDITOR,
-            'catherine' : UserRole.MANAGER,
-            'guest' : UserRole.VIEWER,
-        })
+        sh_users = wb['__users__']
+        for user, role in [('simon' , UserRole.EDITOR),
+                           ('catherine' , UserRole.MANAGER),
+                           ('guest' , UserRole.VIEWER)]:
+            sh_users.add_new_entry({'User_Name' : user, 'Role' : role.name})
 
     def tearDown(self):
         self.udata.clear()
@@ -3148,14 +3290,14 @@ class TestPiccelLogic(unittest.TestCase):
         self.assertEqual(sheeter.state, sheeter.STATE_SELECTOR)
         self.assertEqual(sheeter.get_recent_files(), [])
         filesystem = LocalFileSystem(self.tmp_dir)
-        msg = sheeter.load_configuration(filesystem, self.cfg_fn)
+        msg = sheeter.load_configuration(filesystem, self.cfg_bfn)
         self.assertEqual(msg, 'ok')
         self.assertEqual(sheeter.state, sheeter.STATE_ACCESS)
 
     def test_decrypt(self):
         logic = PiccelLogic(self.udata)
         filesystem = LocalFileSystem(self.tmp_dir)
-        logic.load_configuration(filesystem, self.cfg_fn)
+        logic.load_configuration(filesystem, self.cfg_bfn)
         msg = logic.decrypt(self.access_pwd)
         self.assertEqual(msg, 'ok')
         self.assertEqual(logic.state, logic.STATE_LOGIN)
@@ -3163,14 +3305,14 @@ class TestPiccelLogic(unittest.TestCase):
     def test_login_unknown_user(self):
         logic = PiccelLogic(self.udata)
         filesystem = LocalFileSystem(self.tmp_dir)
-        logic.load_configuration(filesystem, self.cfg_fn)
+        logic.load_configuration(filesystem, self.cfg_bfn)
         logic.decrypt(self.access_pwd)
         self.assertRaises(UnknownUser, logic.login, 'chouchou', 'bobie')
 
     def test_login_invalid_password(self):
         logic = PiccelLogic(self.udata)
         filesystem = LocalFileSystem(self.tmp_dir)
-        logic.load_configuration(filesystem, self.cfg_fn)
+        logic.load_configuration(filesystem, self.cfg_bfn)
         logic.decrypt(self.access_pwd)
         self.assertRaises(InvalidPassword, logic.login, 'thomas', 'nope')
         self.assertRaises(InvalidPassword, logic.login, 'thomas',
@@ -3179,7 +3321,7 @@ class TestPiccelLogic(unittest.TestCase):
     def test_check_passwords(self):
         logic = PiccelLogic(self.udata)
         filesystem = LocalFileSystem(self.tmp_dir)
-        logic.load_configuration(filesystem, self.cfg_fn)
+        logic.load_configuration(filesystem, self.cfg_bfn)
         self.assertTrue(logic.check_access_password(self.access_pwd))
         logic.decrypt(self.access_pwd)
         self.assertTrue(logic.check_role_password('thomas', self.admin_pwd))
@@ -3195,20 +3337,20 @@ class TestPiccelLogic(unittest.TestCase):
     def test_last_user_first(self):
         logic = PiccelLogic(self.udata)
         filesystem = LocalFileSystem(self.tmp_dir)
-        logic.load_configuration(filesystem, self.cfg_fn)
+        logic.load_configuration(filesystem, self.cfg_bfn)
         logic.decrypt(self.access_pwd)
         logic.login('simon', self.editor_pwd)
 
         filesystem.unset_encrypter()
         logic2 = PiccelLogic(self.udata)
-        logic2.load_configuration(filesystem, self.cfg_fn)
+        logic2.load_configuration(filesystem, self.cfg_bfn)
         logic2.decrypt(self.access_pwd)
         self.assertEqual(logic2.get_user_names()[0], 'simon')
 
     def test_correct_login(self):
         logic = PiccelLogic(self.udata)
         filesystem = LocalFileSystem(self.tmp_dir)
-        logic.load_configuration(filesystem, self.cfg_fn)
+        logic.load_configuration(filesystem, self.cfg_bfn)
         logic.decrypt(self.access_pwd)
         logic.login('thomas', self.admin_pwd)
         logic.login('simon', self.editor_pwd)
@@ -3258,6 +3400,9 @@ class AnyMatch:
 def combine_regexps(regexp_strs):
     return '|'.join('(?:%s)' % r for r in regexp_strs)
 
+class WorkBookExistsError(Exception): pass
+class WorkBookLoginError(Exception): pass
+
 class WorkBook:
     """
     Workflow:
@@ -3273,7 +3418,7 @@ class WorkBook:
                  linked_book_fns=None):
         """
         Create workbook from basic configuration: where is the main data folder
-        and password checksums for every role.
+        and passwords for every role.
         The list of users will be loaded when the woorkbook is decrypted using
         the access password. Data will be loaded when user logs in.
 
@@ -3285,10 +3430,9 @@ class WorkBook:
         # Set access password (saved to data_path/encryption.json):
         wb.set_access_password('access_pwd')
 
-        # Add user with role:
-        wb.set_users({'me': UserRole.ADMIN,
-                      'guest': UserRole.VIEWER,
-                      'friend', UserRole.EDITOR})
+        # Change user status:
+        wb.user_update('me', status='inactive')
+
         # Set password for given role (saved to data_path/encryption.json):
         wb.set_password(UserRole.ADMIN, 'admin_pwd')
         wb.save_configuration_file('../my_wb.psh')
@@ -3297,7 +3441,7 @@ class WorkBook:
         self.filesystem = filesystem
         if self.filesystem.encrypter is not None:
             logger.warning('Init of workbook %s: Encrypter already associated '\
-                           'with filesystem but will be redefined after login',
+                           'with filesystem but will be reset after login',
                            label)
         if not filesystem.exists(data_folder):
             logger.info('WorkBook %s: Data folder %s not found, create it',
@@ -3345,6 +3489,95 @@ class WorkBook:
         self.decrypted = False
         self.logged_in = False
 
+    @staticmethod
+    def create(label, filesystem, access_password, admin_password,
+               manager_password, editor_password, admin_user,
+               data_folder=None):
+        data_folder = (data_folder if data_folder is not None
+                       else protect_fn(label) + '_files')
+        cfg_bfn = protect_fn(label) + '.psh'
+        if filesystem.exists(data_folder) or filesystem.exists(cfg_bfn):
+            raise WorkBookExistsError()
+        wb = WorkBook(label, data_folder, filesystem)
+        wb.set_access_password(access_password)
+        assert(admin_password is not None)
+        wb.set_password(UserRole.ADMIN, admin_password)
+        if editor_password is not None:
+            wb.set_password(UserRole.EDITOR, editor_password)
+        if manager_password is not None:
+            wb.set_password(UserRole.MANAGER, manager_password)
+        wb.decrypt(access_password)
+        wb.user = admin_user
+        wb.user_role = UserRole.ADMIN
+        wb.logged_in = True
+
+        sheet_id = '__users__'
+        roles_tr = {r.name : {language : (r.name[0].upper()+r.name[1:].lower())
+                              for language in ['French', 'English']}
+                    for r in UserRole}
+        items = [FormItem({'User_Name' :
+                           {'French' : "Nom d'utilisateur",
+                            'English' : "User name"}},
+                          allow_empty=False,
+                          unique=True,
+                          default_language='French',
+                          supported_languages={'French', 'English'}),
+                 FormItem(keys={'Role':None},
+                          choices=roles_tr,
+                          allow_empty=False,
+                          supported_languages={'French', 'English'},
+                          default_language='French'),
+                 FormItem(keys={'Status':None},
+                          choices={'active' : {'French' : 'Actif.ve',
+                                               'English' : 'Active'},
+                                   'non_active' : {'French' : 'Non actif.ve',
+                                                   'English' : 'Not active'}},
+                          allow_empty=False,
+                          init_values={'Status' : 'active'},
+                          supported_languages={'French', 'English'},
+                          default_language='French'),
+                 FormItem(keys={'User' : None},
+                          vtype='user_name',
+                          access_level=UserRole.ADMIN,
+                          allow_empty=False,
+                          supported_languages={'French', 'English'},
+                          default_language='French'),
+                 FormItem(keys={'Timestamp_Submission':None},
+                          vtype='datetime', generator='timestamp_creation',
+                          supported_languages={'French', 'English'},
+                          default_language='French')]
+        sections = {'section1' : \
+                    FormSection(items, default_language='French',
+                                supported_languages={'French', 'English'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French', 'English'},
+                    title={'French': 'Utilisateur du classeur',
+                           'English': 'Workbook user'})
+        sh1 = DataSheet(sheet_id, form, user=admin_user)
+        class UserSheetPlugin(SheetPlugin):
+            def active_view(self, df):
+                latest = self.sheet.latest_update_df(df)
+                return latest[latest['Status'] == 'active']
+
+            def default_view(self):
+                return 'latest'
+
+            def views(self, base_views):
+                base_views.update({'active' : self.active_view})
+                return base_views
+        code = (plugin_source_header + \
+                strip_indent(inspect.getsource(UserSheetPlugin)
+                             .replace('UserSheetPlugin',
+                                      'CustomSheetPlugin')))
+        sh1.set_plugin_from_code(code)
+
+        wb.add_sheet(sh1) # TODO insure that logic is properly saved
+        sh1.add_new_entry({'User_Name' : admin_user,
+                           'Role' : UserRole.ADMIN.name})
+
+        wb.save_configuration_file(cfg_bfn)
+        return wb
+
     def add_linked_workbook(self, cfg_fn, sheet_filters):
         self.linked_book_fns[cfg_fn] = sheet_filters
         self.preload_linked_workbook(cfg_fn)
@@ -3358,7 +3591,8 @@ class WorkBook:
         self.linked_books.append((linked_wb, combine_regexps(sheet_filters)))
 
     def __getitem__(self, sheet_label):
-        assert(self.logged_in)
+        if not self.logged_in:
+            raise WorkBookLoginError()
         if sheet_label not in self.sheets:
             logger.error('WorkBook %s: cannot find sheet %s in %s',
                          self.label, sheet_label, ', '.join(self.sheets))
@@ -3449,27 +3683,29 @@ class WorkBook:
         self.filesystem.set_encrypter(encrypter)
         self.decrypted = True
 
-        users_fn = op.join(self.data_folder, 'users.json')
-        if not self.filesystem.exists(users_fn):
-            self.filesystem.save(users_fn, json.dumps({}))
+        # users_fn = op.join(self.data_folder, 'users.json')
+        # if not self.filesystem.exists(users_fn):
+        #     self.filesystem.save(users_fn, json.dumps({}))
 
-        self.user_roles = self._load_user_roles()
-        logger.info('WorkBook %s: Loaded users:\n %s', self.label,
-                     pformat(self.user_roles))
+        # self.user_roles = self._load_user_roles()
+        # logger.info('WorkBook %s: Loaded users:\n %s', self.label,
+        #              pformat(self.user_roles))
 
-        for linked_wb, sheet_filter in self.linked_books:
-            linked_wb.decrypt(access_pwd)
-            linked_user_roles = linked_wb._load_user_roles()
-            for user, role in self.user_roles.copy().items():
-                if user in linked_user_roles:
-                    if linked_user_roles[user] > role:
-                        logger.info('Use higher role %s from linked workbook %s'\
-                                    'instead of role %s for user %s',
-                                    linked_user_roles[user],
-                                    linked_wb.label, role, user)
-                        self.user_roles[user] = linked_user_roles[user]
-                else:
-                    raise UnknownUser('%s in %s', linked_wb.label)
+        # TODO: fix handling roles in linked workbooks
+        # for linked_wb, sheet_filter in self.linked_books:
+        #     linked_wb.decrypt(access_pwd)
+        #     linked_user_roles = linked_wb._load_user_roles()
+        #     for user, role in self.user_roles.copy().items():
+        #         if user in linked_user_roles:
+        #             if linked_user_roles[user] > role:
+        #                 logger.info('Use higher role %s from linked workbook %s'\
+        #                             'instead of role %s for user %s',
+        #                             linked_user_roles[user],
+        #                             linked_wb.label, role, user)
+        #                 self.user_roles[user] = linked_user_roles[user]
+        #         else:
+        #             raise UnknownUser('%s in %s', linked_wb.label)
+
         return True
 
 
@@ -3478,7 +3714,7 @@ class WorkBook:
         with open(key_afn, 'w') as fout:
             fout.write(self.filesystem.encrypter.get_key())
 
-    def _load_user_roles(self):
+    def ___load_user_roles(self):
         assert(self.decrypted)
         users_fn = op.join(self.data_folder, 'users.json')
         logger.info('WorkBook %s: Load users from %s',
@@ -3494,23 +3730,41 @@ class WorkBook:
         for sheet in self.sheets.values():
             sheet.refresh_data()
 
-    def set_user(self, user, role):
+    def ____set_user(self, user, role):
         if not self.decrypted:
             raise EncryptionError()
         assert(isinstance(role, UserRole))
         if not self.password_vault.has_password_key(role.name):
             raise NoRolePasswordError(role)
 
-        self.user_roles[user] = role
-        self.save_user_roles()
+        form_update_or_new('__users__', self, {'User' : user},
+                           {'Role' : role})[0].submit()
 
     def get_users(self):
         assert(self.decrypted)
-        return self.user_roles.keys()
+        users_sheet = self.request_read_only_sheet('__users__')
+        active_users = users_sheet.get_df_view('active')
+        return {row['User_Name'] : UserRole[row['Role']]
+                for _, row in active_users.iterrows()}
 
-    def get_user_role(self, user):
+    def get_user_role(self, user=None):
         assert(self.decrypted)
-        return self.user_roles[user]
+        if user is None:
+            if self.user is None:
+                raise WorkBookLoginError()
+            else:
+                user = self.user
+        users_sheet = self.request_read_only_sheet('__users__')
+        try:
+            users_info = (users_sheet.get_df_view('active')
+                          .set_index('User_Name'))
+            user_role = UserRole[users_info.loc[user, 'Role']]
+        except KeyError:
+            logger.error('Unknown user %s while getting role in %s',
+                         user, self.label)
+            raise UnknownUser(user)
+
+        return user_role
 
     def set_users(self, user_roles):
         for u,r in user_roles.items():
@@ -3537,6 +3791,16 @@ class WorkBook:
         assert(role in UserRole)
         return self.password_vault.password_is_valid(role.name, pwd)
 
+    def request_read_only_sheet(self, sheet_label):
+        if not self.logged_in:
+            sheet_folder = op.join(self.data_folder, WorkBook.SHEET_FOLDER)
+            sh_fs = self.filesystem.change_dir(op.join(sheet_folder,
+                                                       sheet_label))
+            sheet = DataSheet.from_files(None, sh_fs, workbook=self)
+        else:
+            sheet = self[sheet_label]
+
+        return sheet
     def user_login(self, user, pwd, progress_callback=None, load_sheets=True):
         """
         Note: The role password only protects access to certain methods of the
@@ -3550,16 +3814,16 @@ class WorkBook:
         # TODO: check role according to self.user_roles
         assert(self.decrypted)
         self.user = user
-        try:
-            self.user_role = self.user_roles[user]
-        except KeyError:
-            logger.error('Unknown user %s while login in %s', user, self.label)
-            raise UnknownUser(user)
-        logger.info('Logging as user %s with role %s', user, self.user_role)
-        if self.user_role!= UserRole.VIEWER and \
-           not self.password_vault.password_is_valid(self.user_role.name, pwd):
-            logger.error('Invalid password for role %s' % self.user_role.name)
-            raise InvalidPassword('role %s' % self.user_role.name)
+        self.user_role = self.get_user_role()
+        logger.info('Logging as user %s with role %s',
+                    self.user, self.user_role)
+        if self.user_role != UserRole.VIEWER:
+            if not self.password_vault.has_password_key(self.user_role.name):
+                raise NoRolePasswordError(self.user_role.name)
+            if not self.password_vault.password_is_valid(self.user_role.name,
+                                                         pwd):
+                logger.error('Invalid password for role %s', self.user_role.name)
+                raise InvalidPassword('role %s' % self.user_role.name)
 
         for linked_book, sheet_filter in self.linked_books:
             linked_book.user_login(user, pwd, load_sheets=load_sheets)
@@ -3570,7 +3834,8 @@ class WorkBook:
             self.reload(progress_callback)
 
     def get_sheet(self, sheet_label):
-        assert(self.logged_in)
+        if not self.logged_in:
+            raise WorkBookLoginError()
         return self.sheets[sheet_label]
 
     def get_nb_sheets(self, sheet_re):
@@ -3738,9 +4003,9 @@ class WorkBook:
 
         if not self.filesystem.exists(sheet_folder):
             self.filesystem.makedirs(sheet_folder)
-        sheet.set_filesystem(self.filesystem.change_dir(sheet_folder))
-        sheet.save()
 
+        sheet.change_filesystem(self.filesystem.change_dir(sheet_folder),
+                                save_logic=True, save_live_data=True)
         sheet.set_workbook(self)
         self.sheets[sheet.label] = sheet
 
@@ -3828,16 +4093,11 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('-----------------------')
         logger.debug('utest: create workbook1')
 
-        wb = WorkBook(wb_id, data_folder, fs)
-        wb.set_access_password(self.access_pwd)
-        wb.set_password(UserRole.ADMIN, self.admin_pwd)
-        wb.set_password(UserRole.EDITOR, self.editor_pwd)
-        cfg_bfn = 'wb.psh'
-        wb.save_configuration_file(cfg_bfn)
-
-        wb.decrypt(self.access_pwd)
-        wb.set_user(user, UserRole.ADMIN)
-        wb.user_login(user, self.admin_pwd)
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd,
+                             manager_password=None,
+                             editor_password=self.editor_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
 
         sheet_id = 'Participant_info'
         items = [FormItem({'Participant_ID' :
@@ -3900,18 +4160,44 @@ class TestWorkBook(unittest.TestCase):
 
     def test_set_user(self):
         fs = LocalFileSystem(self.tmp_dir)
-        wb_id = 'Participant_info'
-        data_folder = 'pinfo_files'
-        wb = WorkBook(wb_id, data_folder, fs)
-        access_pwd = '1245'
-        self.assertRaises(EncryptionError, wb.set_user, 'me', UserRole.ADMIN)
-        wb.set_access_password(access_pwd)
-        wb.decrypt(access_pwd)
-        self.assertRaises(NoRolePasswordError, wb.set_user, 'me',
-                          UserRole.ADMIN)
-        admin_pwd = '12T64'
-        wb.set_password(UserRole.ADMIN, admin_pwd)
-        wb.set_user('me', UserRole.ADMIN)
+        wb = WorkBook.create('Participant_info', fs, access_password='12345',
+                             admin_password='12T64', manager_password='456782',
+                             editor_password=None, admin_user='admin')
+
+        wb['__users__'].add_new_entry({'User_Name' : 'me',
+                                        'Role' : UserRole.EDITOR.name})
+
+        self.assertRaises(NoRolePasswordError, wb.user_login, 'me', 'hahaha')
+
+        editor_pwd = '1fvnez'
+        wb.set_password(UserRole.EDITOR, editor_pwd)
+        wb.user_login('me', editor_pwd)
+
+    def test_edit_users(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb = WorkBook.create('Participant_info', fs, access_password='12345',
+                             admin_password='12T64', manager_password='456782',
+                             editor_password='fnezjk', admin_user='admin')
+        self.assertEqual(wb.get_users(), {'admin' : UserRole.ADMIN})
+        wb['__users__'].add_new_entry({'User_Name' : 'me',
+                                       'Role' : UserRole.EDITOR.name})
+        wb['__users__'].add_new_entry({'User_Name' : 'other',
+                                       'Role' : UserRole.MANAGER.name})
+        self.assertEqual(wb.get_users(),
+                         {'admin' : UserRole.ADMIN,
+                          'me' : UserRole.EDITOR,
+                          'other' : UserRole.MANAGER})
+        form_update_or_new('__users__', wb, {'User_Name' : 'other'},
+                           {'Status' : 'non_active'})[0].submit()
+        self.assertEqual(wb.get_users(),
+                         {'admin' : UserRole.ADMIN,
+                          'me' : UserRole.EDITOR})
+        form_update_or_new('__users__', wb, {'User_Name' : 'other'},
+                           {'Status' : 'active'})[0].submit()
+        self.assertEqual(wb.get_users(),
+                         {'admin' : UserRole.ADMIN,
+                          'me' : UserRole.EDITOR,
+                          'other' : UserRole.MANAGER})
 
     def test_create_empty_workbook(self):
         fs = LocalFileSystem(self.tmp_dir)
@@ -3982,17 +4268,11 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('utest: create workbook1')
         wb_id = 'Participant_info'
         user = 'me'
-        user_roles = {user : UserRole.ADMIN}
-        data_folder = 'pinfo_files'
-        wb1 = WorkBook(wb_id, data_folder, fs)
-
-        wb1.set_access_password(self.access_pwd)
-        wb1.set_password(UserRole.ADMIN, self.admin_pwd)
-        wb1.set_password(UserRole.EDITOR, self.editor_pwd)
-
-        wb1.decrypt(self.access_pwd)
-        wb1.set_user(user, UserRole.ADMIN)
-        wb1.user_login(user, self.admin_pwd)
+        wb1 = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                              admin_password=self.admin_pwd,
+                              manager_password=None,
+                              editor_password=self.editor_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
 
         # Create a sheet with data
         sheet_id = 'Participant_info'
@@ -4042,7 +4322,7 @@ class TestWorkBook(unittest.TestCase):
         # Create a new workbook
         logger.debug('-----------------------')
         logger.debug('utest: create workbook2')
-        wb2 = WorkBook(wb_id, data_folder, fs)
+        wb2 = WorkBook.from_configuration_file(op.join(self.tmp_dir, cfg_bfn))
         wb2.decrypt(self.access_pwd)
 
         wb2.user_login(user, self.admin_pwd)
@@ -4078,14 +4358,11 @@ class TestWorkBook(unittest.TestCase):
         # Create new workbook from scratch
         wb_id = 'Participant_info'
         user = 'me'
-        data_folder = 'pinfo_files'
-        wb = WorkBook(wb_id, data_folder, fs)
-        wb.set_access_password(self.access_pwd)
-        wb.set_password(UserRole.ADMIN, self.admin_pwd)
-        wb.set_password(UserRole.EDITOR, self.editor_pwd)
-        wb.decrypt(self.access_pwd)
-        wb.set_user(user, UserRole.ADMIN)
-        wb.user_login(user, self.admin_pwd)
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd,
+                             manager_password=None,
+                             editor_password=self.editor_pwd,
+                             admin_user=user)
 
         # Create data sheet participant info (no form)
         sheet_id = 'Participants'
@@ -4138,14 +4415,14 @@ class TestWorkBook(unittest.TestCase):
 
         # Create dashboard sheet that gets list of participants from p_info
         # and compute evaluation status. Action is a string report.
-        class Dashboard(LescaDashboard):
+        class DashboardEval(LescaDashboard):
             def sheets_to_watch(self):
-                return super(Dashboard, self).sheets_to_watch() + \
+                return super(DashboardEval, self).sheets_to_watch() + \
                     ['Evaluation']
 
             def after_workbook_load(self):
                 self.eval = self.workbook['Evaluation']
-                super(Dashboard, self).after_workbook_load()
+                super(DashboardEval, self).after_workbook_load()
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
@@ -4174,7 +4451,7 @@ class TestWorkBook(unittest.TestCase):
                 if selected_column.startswith('Eval'):
                     participant_id = entry_df.index[0]
                     eval_df = self.eval.get_df_view('latest')
-                    selection = eval_df[eval_df.Participant_ID == participant_id]
+                    selection = eval_df[eval_df.Participant_ID==participant_id]
                     if selection.shape[0] == 0:
                         form = self.eval.form_new_entry()
                         form.set_values_from_entry({'Participant_ID' :
@@ -4192,7 +4469,11 @@ class TestWorkBook(unittest.TestCase):
 
         logger.debug('utest: Create dashboard')
         sh_dashboard = DataSheet('Dashboard')
-        sh_dashboard.set_plugin(Dashboard(sh_dashboard))
+        code = (plugin_source_header + \
+                strip_indent(inspect.getsource(DashboardEval)
+                             .replace('DashboardEval',
+                                      'CustomSheetPlugin')))
+        sh_dashboard.set_plugin_from_code(code)
         wb.add_sheet(sh_dashboard)
 
         wb.after_workbook_load()
@@ -4267,14 +4548,11 @@ class TestWorkBook(unittest.TestCase):
         # Create new workbook from scratch
         wb_id = 'Study'
         user = 'me'
-        data_folder = 'pinfo_files'
-        wb = WorkBook(wb_id, data_folder, fs)
-        wb.set_access_password(self.access_pwd)
-        wb.set_password(UserRole.ADMIN, self.admin_pwd)
-        wb.set_password(UserRole.EDITOR, self.editor_pwd)
-        wb.decrypt(self.access_pwd)
-        wb.set_user(user, UserRole.ADMIN)
-        wb.user_login(user, self.admin_pwd)
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd,
+                             manager_password=None,
+                             editor_password=self.editor_pwd,
+                             admin_user=user)
 
         # Create sheet for participant status
         sheet_id = 'Participants'
@@ -4343,12 +4621,12 @@ class TestWorkBook(unittest.TestCase):
         wb.add_sheet(sh_pnote)
         wb.add_sheet(sh_pp)
 
-        class Dashboard(LescaDashboard):
+        class DashboardStatus(LescaDashboard):
             def __init__(self, *args, **kwargs):
-                super(Dashboard, self).__init__(*args, **kwargs)
+                super(DashboardStatus, self).__init__(*args, **kwargs)
 
             def sheets_to_watch(self):
-                return super(Dashboard, self).sheets_to_watch() + \
+                return super(DashboardStatus, self).sheets_to_watch() + \
                     ['Progress_Note']
 
             def refresh_all(self):
@@ -4365,9 +4643,13 @@ class TestWorkBook(unittest.TestCase):
                                                  self.workbook, 'Participants')
 
         sh_dashboard = DataSheet('Dashboard')
-        sh_dashboard.set_plugin(Dashboard(sh_dashboard))
-        wb.add_sheet(sh_dashboard)
+        code = (plugin_source_header + \
+                strip_indent(inspect.getsource(DashboardStatus)
+                             .replace('DashboardStatus',
+                                      'CustomSheetPlugin')))
+        sh_dashboard.set_plugin_from_code(code)
 
+        wb.add_sheet(sh_dashboard)
         wb.after_workbook_load()
 
         dashboard_df = wb['Dashboard'].get_df_view()
@@ -4430,15 +4712,12 @@ class TestWorkBook(unittest.TestCase):
 
         # Create new workbook from scratch
         wb_id = 'Participant_info'
-        self.user = 'me'
-        data_folder = 'pinfo_files'
-        wb = WorkBook(wb_id, data_folder, fs)
-        wb.set_access_password(self.access_pwd)
-        wb.set_password(UserRole.ADMIN, self.admin_pwd)
-        wb.set_password(UserRole.EDITOR, self.editor_pwd)
-        wb.decrypt(self.access_pwd)
-        wb.set_user(self.user, UserRole.ADMIN)
-        wb.user_login(self.user, self.admin_pwd)
+        user = 'me'
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd,
+                             manager_password=None,
+                             editor_password=self.editor_pwd,
+                             admin_user=user)
 
         # Create data sheet participant info (no form)
         sheet_id = 'Participants'
@@ -4454,7 +4733,7 @@ class TestWorkBook(unittest.TestCase):
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
                     title={'French':'Participant Information'})
-        sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=self.user)
+        sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
 
         # Create Interview plan sheet
         sheet_id = DEFAULT_INTERVIEW_PLAN_SHEET_LABEL
@@ -4542,7 +4821,7 @@ class TestWorkBook(unittest.TestCase):
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
                     title={'French':'Plannification'})
-        sh_plan = DataSheet(sheet_id, form, user=self.user)
+        sh_plan = DataSheet(sheet_id, form, user=user)
 
         # Create evaluation sheet
         sheet_id = 'Eval'
@@ -4579,7 +4858,7 @@ class TestWorkBook(unittest.TestCase):
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
                     title={'French':'Evaluation'})
-        sh_eval = DataSheet(sheet_id, form, user=self.user)
+        sh_eval = DataSheet(sheet_id, form, user=user)
 
         wb.add_sheet(sh_plan)
         wb.add_sheet(sh_eval)
@@ -4587,17 +4866,17 @@ class TestWorkBook(unittest.TestCase):
 
         # Create dashboard sheet that gets list of participants from p_info
         # and compute evaluation status.
-        class Dashboard(LescaDashboard):
+        class DashboardInterview(LescaDashboard):
             def __init__(self, *args, **kwargs):
-                super(Dashboard, self).__init__(*args, **kwargs)
+                super(DashboardInterview, self).__init__(*args, **kwargs)
                 self.date_now = None
 
             def after_workbook_load(self):
                 self.eval_tracker = InterviewTracker('Eval', self.workbook)
-                super(Dashboard, self).after_workbook_load()
+                super(DashboardInterview, self).after_workbook_load()
 
             def sheets_to_watch(self):
-                return super(Dashboard, self).sheets_to_watch() + \
+                return super(DashboardInterview, self).sheets_to_watch() + \
                     [DEFAULT_INTERVIEW_PLAN_SHEET_LABEL, 'Eval']
 
             def refresh_all(self):
@@ -4612,7 +4891,11 @@ class TestWorkBook(unittest.TestCase):
                 return self.eval_tracker.action(entry_df, selected_column)
 
         sh_dashboard = DataSheet('Dashboard')
-        sh_dashboard.set_plugin(Dashboard(sh_dashboard))
+        code = (plugin_source_header + \
+                strip_indent(inspect.getsource(DashboardInterview)
+                             .replace('DashboardInterview',
+                                      'CustomSheetPlugin')))
+        sh_dashboard.set_plugin_from_code(code)
         wb.add_sheet(sh_dashboard)
 
         wb.after_workbook_load()
@@ -4864,14 +5147,11 @@ class TestWorkBook(unittest.TestCase):
         # Create new workbook from scratch
         wb_id = 'Participant_info'
         user = 'me'
-        data_folder = 'pinfo_files'
-        wb = WorkBook(wb_id, data_folder, fs)
-        wb.set_access_password(self.access_pwd)
-        wb.set_password(UserRole.ADMIN, self.admin_pwd)
-        wb.set_password(UserRole.EDITOR, self.editor_pwd)
-        wb.decrypt(self.access_pwd)
-        wb.set_user(user, UserRole.ADMIN)
-        wb.user_login(user, self.admin_pwd)
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd,
+                             manager_password=None,
+                             editor_password=self.editor_pwd,
+                             admin_user=user)
 
         # Create data sheet participant info (no form)
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002']})
@@ -4975,13 +5255,13 @@ class TestWorkBook(unittest.TestCase):
         wb.add_sheet(sh_poll)
         wb.add_sheet(sh_pp)
 
-        class Dashboard(LescaDashboard):
+        class DashboardPoll(LescaDashboard):
             def __init__(self, *args, **kwargs):
-                super(Dashboard, self).__init__(*args, **kwargs)
+                super(DashboardPoll, self).__init__(*args, **kwargs)
                 self.date_now = None
 
             def sheets_to_watch(self):
-                return super(Dashboard, self).sheets_to_watch() + \
+                return super(DashboardPoll, self).sheets_to_watch() + \
                     ['Poll', 'Email']
 
             def refresh_all(self):
@@ -4990,15 +5270,19 @@ class TestWorkBook(unittest.TestCase):
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
-                track_emailled_poll(self.df, 'Poll', 'Email', self.workbook, pids,
-                                    date_now=self.date_now)
+                track_emailled_poll(self.df, 'Poll', 'Email', self.workbook,
+                                    pids, date_now=self.date_now)
 
             def action(self, entry_df, selected_column):
                 return emailled_poll_action(entry_df, selected_column, 'Email',
                                             self.workbook)
 
         sh_dashboard = DataSheet('Dashboard')
-        sh_dashboard.set_plugin(Dashboard(sh_dashboard))
+        code = (plugin_source_header + \
+                strip_indent(inspect.getsource(DashboardPoll)
+                             .replace('DashboardPoll',
+                                      'CustomSheetPlugin')))
+        sh_dashboard.set_plugin_from_code(code)
         wb.add_sheet(sh_dashboard)
 
         wb.after_workbook_load()
@@ -5664,7 +5948,7 @@ class EditorTabCloser:
             self.check_on_close.remove(self.editor_widget)
             self.tab_widget.removeTab(self.tab_widget.indexOf(self.editor_widget))
 
-class WorkBookCreateDialog(QtWidgets.QDialog):
+class CreateWorkBookDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super(QtWidgets.QDialog, self).__init__(parent)
 
@@ -5703,7 +5987,7 @@ class WorkBookCreateDialog(QtWidgets.QDialog):
 
     @staticmethod
     def create(self, parent=None):
-        dialog = WorkBookCreateDialog(parent=parent)
+        dialog = CreateWorkBookDialog(parent=parent)
         result = dialog.exec_()
         if result == QtWidgets.QDialog.Accepted:
             return (dialog.workbook_cfg_fn, dialog.access_pwd, dialog.admin_name,
@@ -5748,6 +6032,8 @@ class WorkBookCreateDialog(QtWidgets.QDialog):
         return True
 
     def _make_workbook(self):
+        raise Exception('Use WorkBook.create()')
+
         # ASSUME: all fields are valid
         wb_label = self.form_ui.workbook_label_lineEdit.text()
         root_dir = self.form_ui.root_folder_lineEdit.text()
@@ -5767,7 +6053,8 @@ class WorkBookCreateDialog(QtWidgets.QDialog):
         self.admin_pwd = self.form_ui.admin_pwd_field.text()
         wb.set_password(UserRole.ADMIN, self.admin_pwd)
         self.admin_name = self.form_ui.adminNameLineEdit.text()
-        wb.set_users({self.admin_name : UserRole.ADMIN})
+        wb['__users__'].add_new_entry({'User_Name' : self.admin_name,
+                                       'Role' : UserRole.ADMIN.name})
 
         self.workbook_cfg_fn = fs.full_path(wb_cfg_rfn)
 
@@ -5775,6 +6062,11 @@ class WorkBookWidget(QtWidgets.QWidget, ui.workbook_ui.Ui_Form):
     def __init__(self, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
+
+        self.edit_user_button.clicked.connect(self.edit_users)
+
+    def edit_users(self):
+        UsersEditorDialog.run(self)
 
 class WorkBookWindow(QtWidgets.QMainWindow):
 
@@ -5790,27 +6082,76 @@ class WorkBookWindow(QtWidgets.QMainWindow):
             if not widget.closeEvent(event):
                 break
 
+class UsersEditorDialog(QtWidgets.QDialog):
+    def __init__(self, workbook, parent=None):
+        super(QtWidgets.QDialog, self).__init__(parent)
+
+        self.workbook = workbook
+        self.setWindowTitle("Edit users")
+
+        QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
+        self.buttonBox.accepted.connect(self.accept)
+        self.buttonBox.rejected.connect(self.reject)
+
+        self.editor_widget = UsersEditWidget(self.workbook.get_users(),
+                                             self.workbook.get_user_role())
+
+        self.layout = QtWidgets.QVBoxLayout()
+        self.layout.addWidget(self.editor_widget)
+        self.layout.addWidget(self.buttonBox)
+        self.setLayout(self.layout)
+
+    @staticmethod
+    def run(self, workbook, parent=None):
+        dialog = UsersEditorDialog(workbook, parent=parent)
+        result = dialog.exec_()
+        if result == QtWidgets.QDialog.Accepted:
+            return True
+        else:
+            return False
+
+    def accept(self):
+        try:
+            self._make_workbook()
+            super().accept()
+        except Exception as e:
+            # log
+            # Show error
+            return
 
 
-class UsersEditor(QtWidgets.QWidget)
-    def __init__(self, users, user_role, parent=None):
+
+# Helper function: single_section_form()
+# Embedd user update @Workbook class
+    # user_add, user_set_status
+# Build a workbook with only one sheet
+# Add user with a form
+# When sheet data change -> send
+
+class UsersEditWidget(QtWidgets.QWidget):
+    def __init__(self, users, current_user_role, parent=None):
         super(UsersEditor, self).__init__(parent)
 
+        self.current_user_role
         self.table = QtGui.QTableWidget()
         self.table.setColumnCount(3) # User / Role / -
+        self.table.setItem(0, 0, QtGui.QTableWidgetItem('+'))
 
         for irow, (user, role) in enumerate(users.items()):
-            item1 = QtGui.QTableWidgetItem(user)
-            self.table.setItem(irow, 0, item1)
-            item2 = QtGui.QTableWidgetItem()
-            role_select = QtGui.QComboBox()
-            for role in userRole:
-                role_select.addItem(role.name)
-            self.table.setCellWidget(irow, 1, role_select)
-            item_minus = QtGui.QTableWidgetItem('-')
-            self.table.setItem(irow, 0, item_minus)
+            self.append_entry(user, role)
 
-        self.table.setItem(irow+1, 0, QtGui.QTableWidgetItem('+'))
+    def append_entry(self, user, role):
+        self.table.insertRow(self.table.rowCount()-1)
+        irow = self.table.rowCount() - 2
+        item_user = QtGui.QTableWidgetItem(user)
+        self.table.setItem(irow, 0, item_user)
+        role_select = QtGui.QComboBox()
+        for role in userRole:
+            role_select.addItem(role.name)
+        self.table.setCellWidget(irow, 1, role_select)
+        if self.current_user_role >= role:
+            self.table.setItem(irow, 2, QtGui.QTableWidgetItem('-'))
 
 class PiccelApp(QtWidgets.QApplication):
 
@@ -5841,7 +6182,7 @@ class PiccelApp(QtWidgets.QApplication):
 
         button_icon = QtGui.QIcon(':/icons/top_selection_create_icon')
         _selector_ui.button_create.setIcon(button_icon)
-        _selector_ui.button_create.clicked.connect(self.create)
+        _selector_ui.button_create.clicked.connect(self.on_create)
 
         if cfg_fns is None:
             self.recent_files = self.logic.get_recent_files()
@@ -5923,9 +6264,9 @@ class PiccelApp(QtWidgets.QApplication):
                 if self.default_user is not None and self.role_pwd is not None:
                     self.login_process()
 
-    def create(self):
+    def on_create(self):
         cfg_fn, self.access_pwd, self.default_user, self.role_pwd = \
-            WorkBookCreateDialog.create(self)
+            CreateWorkBookDialog.create(self)
         if cfg_fn is not None:
             self.open_configuration_file(cfg_fn)
             if self.logic.workbook is not None:

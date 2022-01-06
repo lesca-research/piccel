@@ -5,12 +5,9 @@ from piccel.plugin_tools import conditional_set
 from piccel.sheet_plugin import SheetPlugin
 
 class CustomSheetPlugin(SheetPlugin):
-    
-    def __init__(self, data_sheet, workbook=None):
-        """
-        workbook (WorkBook | None): workbook in which the sheet has been loaded.
-        May be None if the sheet is stand-alone.
 
+    def __init__(self, data_sheet):
+        """
         Useful methods:
            - workbook.user_roles():
                  Itrator over user, role
@@ -26,23 +23,22 @@ class CustomSheetPlugin(SheetPlugin):
         Useful sheet methods:
            - df = sheet.get_df_view(view_label)
         """
-        self.sheet = data_sheet
-        self.workbook = workbook
+        super(CustomSheetPlugin, self).__init__(data_sheet)
 
-    def views(self):
+    def views(self, base_views):
         """
         Return a dictionnary that maps a view label to a callable.
         The callable will be given the raw panda.Dataframe of the sheet and
         should return a transformed panda.Dataframe (view).
 
         Example:
-            def views(self):
-                views = {
-                   'Staff' : lambda df: df[df.staff=='John']
-                }
-                return views
+            def views(self, base_views):
+                return base_views.update({
+                    'Staff' : lambda df: df[df.staff=='John']
+                    }
         """
-        return {}
+        base_views = super(CustomSheetPlugin, self).views(base_views)
+        return base_views
 
     def default_view(self):
         """
@@ -51,22 +47,14 @@ class CustomSheetPlugin(SheetPlugin):
 
         Return None to keep the original default view.
         """
-        return None
+        return super(CustomSheetPlugin, self).default_view()
 
     def view_validity(self, df, view):
         """
         Indicate if the given view is valid.
         Return a DataFrame with boolean values and the same shape as df
         """
-        df_validity = pd.DataFrame(np.zeros(df.shape, dtype=np.bool))
-        df_validity.index = df.index
-        df_validity.columns = df.columns
-        return df_validity
+        return super(CustomSheetPlugin, self).view_validity(df, view)
 
     def hint(self, value):
-        return None
-
-    # def style(self)
-
-    # def request_new_entry(self, column, row_df)
-    #  Action = None | (sheet_label, {key:values}) # Important! form item key must be valid identifier!
+        return super(CustomSheetPlugin, self).hint(value)

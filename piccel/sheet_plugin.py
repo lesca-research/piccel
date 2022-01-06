@@ -88,7 +88,7 @@ class SheetPlugin:
 
         Example:
             def views(self, base_views):
-                # Keep default 'raw' and 'latest' view and
+                # Keep default 'full' and 'latest' view and
                 # add a John-specific one
                 base_view.update({
                    'John' : lambda df: df[df.Staff=='John']
@@ -104,7 +104,7 @@ class SheetPlugin:
 
         Return None to keep the original default view.
         """
-        return 'raw'
+        return 'full'
 
     def view_validity(self, df, view):
         """

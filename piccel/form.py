@@ -251,11 +251,11 @@ function snakeCaseToCamelCase(s) {
         section_names = list(sections.keys())
         for i_section, (section_name, section) in enumerate(sections.items()):
             if section.tr.supported_languages != self.tr.supported_languages:
-                raise UnsupportedLanguage('Supported languages for Form %s (s) =!'\
-                                          'those of section %s (%s)',
-                                          self, self.tr.supported_languages,
-                                          section_name,
-                                          section.tr.supported_languages)
+                raise UnsupportedLanguage('Supported languages in Form %s (%s)'\
+                                          ' != those of section %s (%s)' % \
+                                          (self, self.tr.supported_languages,
+                                           section_name,
+                                           section.tr.supported_languages))
             section.notifier.add_watcher('section_valid',
                                          LazyFunc(self.on_section_is_valid,
                                                   section_name, section))
