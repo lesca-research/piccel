@@ -3,6 +3,8 @@
     <qresource prefix="icons">
         <file alias="main_icon">piccel_icon.svg</file>
         <file alias="close_icon">cross.svg</file>
+        <file alias="on_icon">on.svg</file>
+        <file alias="off_icon">off.svg</file>
         <file alias="view_icon">filter.svg</file>
         <file alias="refresh_icon">refresh.svg</file>
         <file alias="form_input_icon">edit.svg</file>
@@ -16,6 +18,7 @@
         <file alias="form_unsaved_icon">alert-circle-red.svg</file>
         <file alias="top_selection_open_icon">file-download.svg</file>
         <file alias="top_selection_create_icon">file-plus.svg</file>
+        <file alias="workbook_tab_menu_icon">menu-2.svg</file>
     </qresource>
 </RCC>
 
