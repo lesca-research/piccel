@@ -17,7 +17,8 @@ from .generated import workbook_ui
 from .generated import workbook_creation_ui
 # from .generated import dynamic_vlist_ui
 # from .generated import dynamic_vlist_item_ui
-from .generated import form_editor_main_ui
+from .generated import form_editor_widget_ui
+from .generated import form_editor_file_ui
 from .generated import form_edit_ui
 from .generated import section_edit_ui
 from .generated import item_edit_ui

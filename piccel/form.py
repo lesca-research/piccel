@@ -25,7 +25,8 @@ from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
                    FormEditionOrphanError, FormEditionNotAvailable)
 
 
-from .ui import (form_editor_main_ui, form_edit_ui, section_edit_ui, item_edit_ui,
+from .ui import (form_editor_widget_ui, form_editor_file_ui,
+                 form_edit_ui, section_edit_ui, item_edit_ui,
                  choice_edit_ui, variable_edit_ui, section_transition_edit_ui)
 from .ui.widgets import ListSelectDialog
 
@@ -3463,43 +3464,20 @@ class FormEditorFileIO:
     def locked_variable_types(self):
         return {}
 
+class FormFileEditor():
+    def __init__(self, form_fn=None, parent=None):
+        # button bar
 
-class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
-    def __init__(self, form_io=None, parent=None):
-        super(QtWidgets.QWidget, self).__init__(parent)
-        self.setupUi(self)
+        # form widget
+        if form_fn is not None:
+            form = self.load_form_fn(form_fn)
+        else:
+            form = Form()
+        self.form_editor = FormEditor(form)
+
+        self.form_editor.formChanged.connect(self.on_form_change)
 
         self.pending_changes = False
-        self.form_io = (form_io if form_io is not None else
-                        FormEditorFileIO())
-
-        self.tree_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        self.tree_view.customContextMenuRequested.connect(self.open_menu)
-
-        self.tree_view.doubleClicked.connect(self.on_view_double_click)
-        self.tree_view.clicked.connect(self.on_view_click)
-
-        self.form_property_editor = FormPropertyEditor()
-        self.verticalLayout.addWidget(self.form_property_editor)
-
-        self.section_property_editor = SectionPropertyEditor()
-        self.verticalLayout.addWidget(self.section_property_editor)
-
-        self.section_transition_property_editor = SectionTransitionPropertyEditor()
-        self.verticalLayout.addWidget(self.section_transition_property_editor)
-
-        self.item_property_editor = ItemPropertyEditor()
-        self.verticalLayout.addWidget(self.item_property_editor)
-
-        self.choice_property_editor = ChoicePropertyEditor()
-        self.verticalLayout.addWidget(self.choice_property_editor)
-
-        self.variable_property_editor = VariablePropertyEditor()
-        self.verticalLayout.addWidget(self.variable_property_editor)
-
-        form = self.form_io.get_preloaded_form()
-        if form is not None:
-            self.set_form(form, self.form_io.locked_variable_types())
 
         if hasattr(self.form_io, 'open_form'):
             def on_open():
@@ -3534,6 +3512,43 @@ class FormEditor(QtWidgets.QWidget, form_editor_main_ui.Ui_FormEditor):
             if self.check_pending_changes():
                 self.form_io.close_form_edition()
         self.button_close.clicked.connect(on_close)
+
+class FormEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
+    def __init__(self, form, locked_variable_types=None, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.setupUi(self)
+
+        locked_variable_types = (locked_variable_types
+                                 if locked_variable_types is not None
+                                 else {})
+
+        self.tree_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.tree_view.customContextMenuRequested.connect(self.open_menu)
+
+        self.tree_view.doubleClicked.connect(self.on_view_double_click)
+        self.tree_view.clicked.connect(self.on_view_click)
+
+        self.form_property_editor = FormPropertyEditor()
+        self.verticalLayout.addWidget(self.form_property_editor)
+
+        self.section_property_editor = SectionPropertyEditor()
+        self.verticalLayout.addWidget(self.section_property_editor)
+
+        self.section_transition_property_editor = \
+            SectionTransitionPropertyEditor()
+        self.verticalLayout.addWidget(self.section_transition_property_editor)
+
+        self.item_property_editor = ItemPropertyEditor()
+        self.verticalLayout.addWidget(self.item_property_editor)
+
+        self.choice_property_editor = ChoicePropertyEditor()
+        self.verticalLayout.addWidget(self.choice_property_editor)
+
+        self.variable_property_editor = VariablePropertyEditor()
+        self.verticalLayout.addWidget(self.variable_property_editor)
+
+        self.set_form(form, locked_variable_types)
+
 
         def on_preview():
             pass

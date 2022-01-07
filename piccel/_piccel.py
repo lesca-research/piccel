@@ -656,6 +656,32 @@ from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
                    FormEditionNotOpen, FormEditionLockedType,
                    FormEditionOrphanError, FormEditionNotAvailable)
 
+class DataSheetSetupDialog(QtWidgets.QDialog):
+    def __init__(self, sheet, parent=None):
+        super(QtWidgets.QDialog, self).__init__(parent)
+
+        self.setWindowTitle("Setup sheet %s" % sheet.label)
+        self.sheet = sheet
+
+        QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
+        self.buttonBox.accepted.connect(self.accept)
+        self.buttonBox.rejected.connect(self.reject)
+
+        self.layout = QtWidgets.QVBoxLayout()
+        # self.layout.addWidget(self.form_widget)
+        self.layout.addWidget(self.buttonBox)
+        self.setLayout(self.layout)
+
+    @staticmethod
+    def edit_sheet(sheet, parent=None):
+        dialog = DataSheetSetupDialog(sheet)
+        result = dialog.exec_()
+        if result == QtWidgets.QDialog.Accepted:
+            return dialog.sheet
+        else:
+            return None
+
 class DataSheet:
     """
     Table data where entries where input is done with an associated form.
@@ -665,7 +691,7 @@ class DataSheet:
     CSV_SEPARATOR = '\t'
     DATA_FILE_EXT = '.csv'
 
-    SHEET_LABEL_RE = re.compile('[A-Za-z._-]+')
+    SHEET_LABEL_RE = re.compile('^[A-Za-z._-]+$')
 
     def __init__(self, label, form_master=None, df=None, user=None,
                  filesystem=None, live_forms=None, watchers=None,
@@ -682,7 +708,7 @@ class DataSheet:
         Tracking of file changes is reset here.
         """
 
-        self.label = self.validate_sheet_label(label)
+        self.label = DataSheet.validate_sheet_label(label)
         self.properties = {}
         self.access_level = UserRole.VIEWER
         self.update_properties(properties if properties is not None else {})
@@ -1327,8 +1353,10 @@ class DataSheet:
     def get_sheet_label_from_filesystem(fs):
         return PurePath(fs.root_folder).parts[-1]
 
-    def validate_sheet_label(self, label):
-        if DataSheet.SHEET_LABEL_RE.match(label) is None:
+    @staticmethod
+    def validate_sheet_label(label):
+        # DataSheet.SHEET_LABEL_RE.match(label) is None
+        if not label.isidentifier():
             raise InvalidSheetLabel("Sheet label %s has invalid format" % \
                                     label)
         return label
@@ -3482,6 +3510,7 @@ class WorkBook:
                  FormItem(keys={'Role':None},
                           choices=roles_tr,
                           allow_empty=False,
+                          init_values={'Role':'EDITOR'},
                           supported_languages={'French', 'English'},
                           default_language='French'),
                  FormItem(keys={'Status':None},
@@ -5931,8 +5960,7 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
             return None, None, None, None
 
     def accept(self):
-        if self.check():
-            self._make_workbook()
+        if self.check() and self._make_workbook():
             super().accept()
 
     def check(self, show_errors=True):
@@ -5967,31 +5995,38 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
         return True
 
     def _make_workbook(self):
-        raise Exception('Use WorkBook.create()')
 
         # ASSUME: all fields are valid
         wb_label = self.form_ui.workbook_label_lineEdit.text()
         root_dir = self.form_ui.root_folder_lineEdit.text()
         protected_wb_label = protect_fn(wb_label)
         fs = LocalFileSystem(root_dir)
-        wb_cfg_rfn = protected_wb_label + '.psh'
-        data_rpath = protected_wb_label + '_files'
-        wb = WorkBook(wb_label, data_rpath, fs)
-        wb.save_configuration_file(wb_cfg_rfn)
         self.access_pwd = self.form_ui.access_pwd_field.text()
-        wb.set_access_password(self.access_pwd)
-        wb.decrypt(self.access_pwd)
         editor_pwd = self.form_ui.editor_pwd_field.text()
-        wb.set_password(UserRole.EDITOR, editor_pwd)
         manager_pwd = self.form_ui.manager_pwd_field.text()
-        wb.set_password(UserRole.MANAGER, manager_pwd)
         self.admin_pwd = self.form_ui.admin_pwd_field.text()
-        wb.set_password(UserRole.ADMIN, self.admin_pwd)
         self.admin_name = self.form_ui.adminNameLineEdit.text()
-        wb['__users__'].add_new_entry({'User_Name' : self.admin_name,
-                                       'Role' : UserRole.ADMIN.name})
 
-        self.workbook_cfg_fn = fs.full_path(wb_cfg_rfn)
+        try:
+            wb = WorkBook.create(wb_label, fs,
+                                 access_password=self.access_pwd,
+                                 admin_password=self.admin_pwd,
+                                 manager_password=manager_pwd,
+                                 editor_password=editor_pwd,
+                                 admin_user=self.admin_name)
+        except Exception as e:
+            msg = 'Error while creating workbook:\n%s' % repr(e)
+            show_critical_message_box(msg)
+            return False
+
+        self.workbook_cfg_fn = fs.full_path(protect_fn(wb_label) + '.psh')
+        return True
+
+def show_critical_message_box(msg):
+    message_box = QtWidgets.QMessageBox()
+    message_box.setIcon(QtWidgets.QMessageBox.Critical)
+    message_box.setText(msg)
+    message_box.exec_()
 
 class WorkBookWidget(QtWidgets.QWidget, ui.workbook_ui.Ui_Form):
     def __init__(self, parent=None):
@@ -6018,6 +6053,73 @@ class WorkBookWindow(QtWidgets.QMainWindow):
 # Build a workbook with only one sheet
 # Add user with a form
 # When sheet data change -> send
+
+class BlackListValidator(QtGui.QValidator):
+    def __init__(self, black_list, parent=None):
+        super(BlackListValidator, self).__init__(parent=parent)
+        self.black_list = set(black_list)
+
+    def validate(self, sheet_label, pos):
+        try:
+            DataSheet.validate_sheet_label(sheet_label)
+        except InvalidSheetLabel:
+            return QtGui.QValidator.Intermediate, sheet_label, pos
+
+        if sheet_label in self.black_list:
+            return QtGui.QValidator.Intermediate, sheet_label, pos
+
+        return QtGui.QValidator.Acceptable, sheet_label, pos
+
+class TextInputDialog(QtWidgets.QDialog):
+    def __init__(self, prompt_text=None, forbidden_entries=None, parent=None):
+        super(QtWidgets.QDialog, self).__init__(parent)
+
+        forbidden_entries = (forbidden_entries
+                             if forbidden_entries is not None
+                             else [])
+
+        QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
+        self.buttonBox.accepted.connect(self.accept)
+        self.buttonBox.rejected.connect(self.reject)
+
+        self.layout = QtWidgets.QVBoxLayout()
+        if prompt_text is not None:
+            self.layout.addWidget(QtWidgets.QLabel(prompt_text))
+        self.input_field = QtWidgets.QLineEdit(self)
+        self.validator = BlackListValidator(forbidden_entries, parent=self)
+        self.input_field.setValidator(self.validator)
+        self.input_field.textChanged.connect(self.validity_feedback)
+        # self.input_field.editingFinished.connect(self.on_edit_finished)
+        self.layout.addWidget(self.input_field)
+        self.layout.addWidget(self.buttonBox)
+        self.setLayout(self.layout)
+
+    def validity_feedback(self):
+        state = self.validator.validate(self.input_field.text(), 0)[0]
+        if state == QtGui.QValidator.Acceptable:
+            color = '#c4df9b' # green
+        elif state == QtGui.QValidator.Intermediate:
+            color = '#FEA82F' # yellow orange
+        else:
+            color = '#f6989d' # red
+        (self.input_field
+         .setStyleSheet('QLineEdit { background-color: %s }' % color))
+
+    def accept(self):
+        if self.input_field.hasAcceptableInput():
+            super().accept()
+
+    def ask(self):
+        result = self.exec_()
+        return result == QtWidgets.QDialog.Accepted and \
+            self.input_field.hasAcceptableInput()
+
+    def sheet_name(self):
+        if self.input_field.hasAcceptableInput():
+            return self.input_field.text()
+        else:
+            raise Exception('Invalid input')
 
 class PiccelApp(QtWidgets.QApplication):
 
@@ -6576,7 +6678,7 @@ class PiccelApp(QtWidgets.QApplication):
                 if isinstance(action_result, Form):
                     self.make_form_tab(action_label, model, _data_sheet_ui,
                                        self._workbook_ui.tabWidget,
-                                       tab_idx=max(0,self.tab_indexes[sh_name]-1),
+                                       tab_idx=max(1,self.tab_indexes[sh_name]-1),
                                        form=action_result)
                 else:
                     print('action result:', action_result)
@@ -6634,13 +6736,22 @@ class PiccelApp(QtWidgets.QApplication):
             f = SheetViewChanger(_data_sheet_ui.comboBox_view, model)
             _data_sheet_ui.comboBox_view.currentIndexChanged.connect(f)
 
-            self.tab_indexes[sh_name] = (self._workbook_ui.tabWidget
-                                         .addTab(sheet_widget, sh_name))
+            if sh_name.startswith('__'):
+                tab_idx = (self._workbook_ui.tabWidget
+                           .addTab(sheet_widget, sh_name))
+            else:
+                #TODO: better handle sheet order. This only works if
+                # there is only one sheet starting with "__"
+                insert_idx = max(1, self._workbook_ui.tabWidget.count()-1)
+                tab_idx = (self._workbook_ui.tabWidget
+                           .insertTab(insert_idx, sheet_widget, sh_name))
+            self.tab_indexes[sh_name] = tab_idx
 
             def make_form_editor(tab_widget, sheet, check_on_close):
                 tab_closer = EditorTabCloser(tab_widget, check_on_close)
                 try:
-                    sheet_io = FormEditorSheetIO(sheet, close_callback=tab_closer)
+                    sheet_io = FormEditorSheetIO(sheet,
+                                                 close_callback=tab_closer)
                 except FormEditionNotAvailable:
                     return
                 editor_widget = FormEditor(sheet_io, parent=tab_widget)
@@ -6677,18 +6788,72 @@ class PiccelApp(QtWidgets.QApplication):
                                    self._workbook_ui.tabWidget,
                                    self.tab_indexes[sh_name]+1, form)
 
+            return tab_idx
+        tab_icon = QtGui.QIcon(':/icons/workbook_tab_menu_icon')
+        tab_menu_idx = (self._workbook_ui.tabWidget
+                        .addTab(QtWidgets.QWidget(), tab_icon, ''))
+
+        first_tab_idx = tab_menu_idx
         if len(self.logic.workbook.sheets) > 0:
             # TODO: handle tab order
             # TODO: load pending forms
             # TODO: attach file change watcher to datasheet -> trigger refresh when change
-            for sheet_name, sheet in self.logic.workbook.sheets.items():
+            for isheet, (sheet_name, sheet) \
+                in enumerate(self.logic.workbook.sheets.items()):
                 if self.logic.workbook.user_role >= sheet.access_level:
                     logger.info('Load sheet %s in UI', sheet_name)
-                    make_tab_sheet(sheet_name, sheet)
+                    tab_idx = make_tab_sheet(sheet_name, sheet)
+                    if isheet == 0:
+                        first_tab_idx = tab_idx
                 else:
                     logger.info('Sheet %s not loaded in UI because user role %s < %s',
                                 sheet_name, self.logic.workbook.user_role,
                                 sheet.access_level)
+            self._workbook_ui.tabWidget.setCurrentIndex(first_tab_idx)
+
+        def on_add_sheet():
+            existing_sheet_labels = list(self.logic.workbook.sheets.keys())
+            sheet_name_prompt = \
+                TextInputDialog(prompt_text='Sheet name:',
+                                forbidden_entries=existing_sheet_labels)
+
+            if sheet_name_prompt.ask():
+                new_sheet = DataSheet(sheet_name_prompt.sheet_name())
+                # TODO:
+                edited_sheet = DataSheetSetupDialog.edit_sheet(new_sheet)
+                if edited_sheet is not None:
+                    self.logic.workbook.add_sheet(edited_sheet)
+                    make_tab_sheet(edited_sheet.label, edited_sheet)
+
+        self.previous_tab_idx = first_tab_idx
+        def on_tab_clicked(tab_idx):
+            if tab_idx < 0:
+                return
+            self.previous_tab_idx = self._workbook_ui.tabWidget.currentIndex()
+            if tab_idx == tab_menu_idx:
+                print('wb menu clicked!!')
+                menu = QtWidgets.QMenu(self._workbook_ui.tabWidget)
+                add_sheet_action = QtWidgets.QAction('Add sheet',
+                                                     self._workbook_ui.tabWidget)
+                add_sheet_action.triggered.connect(on_add_sheet)
+                actions = [
+                    add_sheet_action
+                ]
+                for action in actions:
+                    menu.addAction(action)
+                menu.exec_(QtGui.QCursor.pos(), actions[-1])
+            #     self._workbook_ui.tabWidget.setCurrentIndex(current_idx)
+            # else:
+            #     self._workbook_ui.tabWidget.setCurrentIndex(tab_idx)
+
+        self._workbook_ui.tabWidget.tabBarClicked.connect(on_tab_clicked)
+
+        def on_tab_idx_change(tab_idx):
+            if tab_idx == tab_menu_idx:
+                self._workbook_ui.tabWidget.setCurrentIndex(self.previous_tab_idx)
+
+        self._workbook_ui.tabWidget.currentChanged.connect(on_tab_idx_change)
+
         self.workbook_screen.setWindowTitle(self.logic.workbook.label)
         self.workbook_screen.show()
 
