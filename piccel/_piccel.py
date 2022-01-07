@@ -182,12 +182,14 @@ class PasswordVault:
             self.pwd_fn == other.pwd_fn
 
     @staticmethod
-    def from_file(pwd_fn):
+    def from_file(pwd_fn, salt_hex=None):
         if not op.exists(pwd_fn):
             logger.warning('Password file %s does not exist. Create one '\
                            'and add generated salt.' %pwd_fn)
+            salt_hex = (salt_hex if salt_hex is not None
+                        else os.urandom(32).hex())
             with open(pwd_fn, 'w') as fout:
-                json.dump({PasswordVault.SALT_HEX_KEY : os.urandom(32).hex(),
+                json.dump({PasswordVault.SALT_HEX_KEY : salt_hex,
                            'passwords' : {}}, fout)
 
         vault = {}
@@ -346,7 +348,8 @@ class LocalFileSystem:
 
     def change_dir(self, folder, track_changes=False):
         """ Note: change tracking will be reset """
-        assert(self.exists(folder))
+        if not self.exists(folder):
+            raise IOError('%s does not exist' % folder)
         return LocalFileSystem(op.join(self.root_folder, folder),
                                self.encrypter, track_changes)
 
@@ -797,25 +800,8 @@ class DataSheet:
             latest = self.empty_df_from_master()
         return latest
 
-    #@check_role(UserRole.ADMIN)
-    def ___dump_plugin_code(self, plugin_code=None, overwrite=False):
-        if self.filesystem is None:
-            raise IOError('Cannot save plugin for sheet %s (no associated '\
-                          'filesystem)')
-        if plugin_code is None:
-            logger.info('No plugin code given to dump, using template.')
-            plugin_code = inspect.getsource(sheet_plugin_template)
-        plugin_module = 'plugin_%s' % self.label
-        plugin_fn = '%s.py' % plugin_module
-        self.filesystem.save(plugin_fn, plugin_code, overwrite=overwrite)
-        return plugin_fn
-
-    def ___get_plugin_code(self):
-        plugin_fn = 'plugin.py'
-        if self.filesystem.exists(plugin_fn):
-            return self.filesystem.load(plugin_fn)
-        else:
-            return ''
+    def get_plugin_code(self):
+        return self.plugin_code_str
 
     @staticmethod
     def load_plugin_code_from_file(filesystem):
@@ -828,15 +814,6 @@ class DataSheet:
             logger.info('No plugin to load because %s does not exists',
                         filesystem.full_path(plugin_fn))
         return plugin_code_str
-
-    def ___load_plugin_old():
-        tmp_folder = op.dirname(self.filesystem.copy_to_tmp(plugin_fn,
-                                                            decrypt=True))
-        sys.path.insert(0, tmp_folder)
-        plugin_module = import_module(plugin_module)
-        reload_module(plugin_module)
-        sys.path.pop(0)
-        self.set_plugin(plugin_module.CustomSheetPlugin(self))
 
     def set_plugin_from_code(self, code_str):
         """ Code is not saved. See save_plugin_code """
@@ -1355,26 +1332,6 @@ class DataSheet:
             raise InvalidSheetLabel("Sheet label %s has invalid format" % \
                                     label)
         return label
-
-    def ___set_plugin(self, plugin, overwrite=None):
-        plugin_str = None
-        if isinstance(plugin, str):
-            plugin_str = plugin
-            plugin = (module_from_code_str(plugin)
-                      .CustomSheetPlugin(self))
-        self.plugin = plugin
-        # cached views invalidated there:
-        views = plugin.views(self.base_views())
-        logger.debug2('Sheet %s, load plugin views: %s',
-                     self.label, ','.join(views))
-        self.set_views(views)
-        default_view = plugin.default_view()
-        if default_view is not None:
-            self.set_default_view(default_view)
-        if plugin_str is not None:
-            self.dump_plugin_code(plugin_str, overwrite=overwrite)
-
-        self.plugin.set_workbook(self.workbook)
 
     def after_workbook_load(self):
         self.plugin.after_workbook_load()
@@ -3415,7 +3372,7 @@ class WorkBook:
     ENCRYPTION_FN = 'encryption.json'
 
     def __init__(self, label, data_folder, filesystem, password_vault=None,
-                 linked_book_fns=None):
+                 linked_book_fns=None, salt_hex=None):
         """
         Create workbook from basic configuration: where is the main data folder
         and passwords for every role.
@@ -3459,7 +3416,7 @@ class WorkBook:
             logger.info('WorkBook %s: Create password vault', self.label)
             pwd_rfn = op.join(data_folder, WorkBook.ENCRYPTION_FN)
             pwd_fn = self.filesystem.full_path(pwd_rfn)
-            password_vault = PasswordVault.from_file(pwd_fn)
+            password_vault = PasswordVault.from_file(pwd_fn, salt_hex=salt_hex)
             logger.info('WorkBook %s: Save password vault to %s',
                         self.label, pwd_fn)
             password_vault.save()
@@ -3492,13 +3449,13 @@ class WorkBook:
     @staticmethod
     def create(label, filesystem, access_password, admin_password,
                manager_password, editor_password, admin_user,
-               data_folder=None):
+               data_folder=None, salt_hex=None):
         data_folder = (data_folder if data_folder is not None
                        else protect_fn(label) + '_files')
         cfg_bfn = protect_fn(label) + '.psh'
         if filesystem.exists(data_folder) or filesystem.exists(cfg_bfn):
             raise WorkBookExistsError()
-        wb = WorkBook(label, data_folder, filesystem)
+        wb = WorkBook(label, data_folder, filesystem, salt_hex=salt_hex)
         wb.set_access_password(access_password)
         assert(admin_password is not None)
         wb.set_password(UserRole.ADMIN, admin_password)
@@ -3683,15 +3640,12 @@ class WorkBook:
         self.filesystem.set_encrypter(encrypter)
         self.decrypted = True
 
-        # users_fn = op.join(self.data_folder, 'users.json')
-        # if not self.filesystem.exists(users_fn):
-        #     self.filesystem.save(users_fn, json.dumps({}))
+        # TODO: fix handling roles in linked workbooks
 
         # self.user_roles = self._load_user_roles()
         # logger.info('WorkBook %s: Loaded users:\n %s', self.label,
         #              pformat(self.user_roles))
 
-        # TODO: fix handling roles in linked workbooks
         # for linked_wb, sheet_filter in self.linked_books:
         #     linked_wb.decrypt(access_pwd)
         #     linked_user_roles = linked_wb._load_user_roles()
@@ -3713,17 +3667,6 @@ class WorkBook:
         assert(self.decrypted)
         with open(key_afn, 'w') as fout:
             fout.write(self.filesystem.encrypter.get_key())
-
-    def ___load_user_roles(self):
-        assert(self.decrypted)
-        users_fn = op.join(self.data_folder, 'users.json')
-        logger.info('WorkBook %s: Load users from %s',
-                    self.label, users_fn)
-        user_roles = json.loads(self.filesystem.load(users_fn))
-        for role in set(user_roles.values()):
-            if not self.password_vault.has_password_key(role):
-                logger.warning('No password set for role %s.' % role)
-        return {u:UserRole[r] for u,r in user_roles.items()}
 
     def refresh_all_data(self):
         logger.debug2('Workbook %s: Refresh data', self.label)
@@ -3765,21 +3708,6 @@ class WorkBook:
             raise UnknownUser(user)
 
         return user_role
-
-    def set_users(self, user_roles):
-        for u,r in user_roles.items():
-            assert(isinstance(r, UserRole))
-        self.user_roles.update(user_roles)
-        self.save_user_roles()
-
-    def save_user_roles(self):
-        if not self.decrypted:
-            raise EncryptionError()
-
-        users_fn = op.join(self.data_folder, 'users.json')
-        logger.info('Save user file to %s', users_fn)
-        to_dump = {u:r.name for u,r in self.user_roles.items()}
-        self.filesystem.save(users_fn, json.dumps(to_dump), overwrite=True)
 
     def access_password_is_valid(self, pwd):
         try:
@@ -3948,9 +3876,16 @@ class WorkBook:
                            'common plugin: %s' \
                            %(self.label, ', '.join(unknown_sheets)))
 
+        last_sheets = []
         for sheet_label in sheet_folders:
-            if sheet_label not in sheet_list:
-                sheet_list.append(sheet_label)
+           if sheet_label not in sheet_list:
+                if not sheet_label.startswith('__'):
+                    sheet_list.append(sheet_label)
+                else:
+                    last_sheets.append(sheet_label)
+
+        for sheet_label in last_sheets:
+            sheet_list.append(sheet_label)
 
         logger.debug('WorkBook %s: sheets to load from files: %s',
                      self.label, sheet_list)
@@ -6063,11 +5998,6 @@ class WorkBookWidget(QtWidgets.QWidget, ui.workbook_ui.Ui_Form):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
 
-        self.edit_user_button.clicked.connect(self.edit_users)
-
-    def edit_users(self):
-        UsersEditorDialog.run(self)
-
 class WorkBookWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
@@ -6082,76 +6012,12 @@ class WorkBookWindow(QtWidgets.QMainWindow):
             if not widget.closeEvent(event):
                 break
 
-class UsersEditorDialog(QtWidgets.QDialog):
-    def __init__(self, workbook, parent=None):
-        super(QtWidgets.QDialog, self).__init__(parent)
-
-        self.workbook = workbook
-        self.setWindowTitle("Edit users")
-
-        QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
-        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
-        self.buttonBox.accepted.connect(self.accept)
-        self.buttonBox.rejected.connect(self.reject)
-
-        self.editor_widget = UsersEditWidget(self.workbook.get_users(),
-                                             self.workbook.get_user_role())
-
-        self.layout = QtWidgets.QVBoxLayout()
-        self.layout.addWidget(self.editor_widget)
-        self.layout.addWidget(self.buttonBox)
-        self.setLayout(self.layout)
-
-    @staticmethod
-    def run(self, workbook, parent=None):
-        dialog = UsersEditorDialog(workbook, parent=parent)
-        result = dialog.exec_()
-        if result == QtWidgets.QDialog.Accepted:
-            return True
-        else:
-            return False
-
-    def accept(self):
-        try:
-            self._make_workbook()
-            super().accept()
-        except Exception as e:
-            # log
-            # Show error
-            return
-
-
-
 # Helper function: single_section_form()
 # Embedd user update @Workbook class
     # user_add, user_set_status
 # Build a workbook with only one sheet
 # Add user with a form
 # When sheet data change -> send
-
-class UsersEditWidget(QtWidgets.QWidget):
-    def __init__(self, users, current_user_role, parent=None):
-        super(UsersEditor, self).__init__(parent)
-
-        self.current_user_role
-        self.table = QtGui.QTableWidget()
-        self.table.setColumnCount(3) # User / Role / -
-        self.table.setItem(0, 0, QtGui.QTableWidgetItem('+'))
-
-        for irow, (user, role) in enumerate(users.items()):
-            self.append_entry(user, role)
-
-    def append_entry(self, user, role):
-        self.table.insertRow(self.table.rowCount()-1)
-        irow = self.table.rowCount() - 2
-        item_user = QtGui.QTableWidgetItem(user)
-        self.table.setItem(irow, 0, item_user)
-        role_select = QtGui.QComboBox()
-        for role in userRole:
-            role_select.addItem(role.name)
-        self.table.setCellWidget(irow, 1, role_select)
-        if self.current_user_role >= role:
-            self.table.setItem(irow, 2, QtGui.QTableWidgetItem('-'))
 
 class PiccelApp(QtWidgets.QApplication):
 
@@ -6795,7 +6661,7 @@ class PiccelApp(QtWidgets.QApplication):
                                               sh_name,
                                               sh.get_plugin_code(),
                                               'python',
-                                              lambda s : sh.set_plugin(s, overwrite=True)))
+                                              lambda s : sh.set_plugin_from_code(s)))
 
             if self.logic.workbook.user_role < UserRole.ADMIN:
                 _data_sheet_ui.button_edit_plugin.hide()

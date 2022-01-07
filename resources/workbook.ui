@@ -29,13 +29,6 @@
      </property>
      <layout class="QHBoxLayout" name="horizontalLayout">
       <item>
-       <widget class="QPushButton" name="edit_user_button">
-        <property name="text">
-         <string>Edit users</string>
-        </property>
-       </widget>
-      </item>
-      <item>
        <widget class="QPushButton" name="add_sheet_button">
         <property name="text">
          <string>Add sheet</string>
