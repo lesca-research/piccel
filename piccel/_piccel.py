@@ -6054,9 +6054,9 @@ class WorkBookWindow(QtWidgets.QMainWindow):
 # Add user with a form
 # When sheet data change -> send
 
-class BlackListValidator(QtGui.QValidator):
+class SheetNameValidator(QtGui.QValidator):
     def __init__(self, black_list, parent=None):
-        super(BlackListValidator, self).__init__(parent=parent)
+        super(SheetNameValidator, self).__init__(parent=parent)
         self.black_list = set(black_list)
 
     def validate(self, sheet_label, pos):
@@ -6070,13 +6070,56 @@ class BlackListValidator(QtGui.QValidator):
 
         return QtGui.QValidator.Acceptable, sheet_label, pos
 
-class TextInputDialog(QtWidgets.QDialog):
-    def __init__(self, prompt_text=None, forbidden_entries=None, parent=None):
+class FileFieldValidator(QtGui.QValidator):
+    def __init__(self, allow_empty=False, parent=None):
+        super(FileFieldValidator, self).__init__(parent=parent)
+        self.allow_empty = allow_empty
+
+    def validate(self, file_fn, pos):
+        if file_fn == '':
+            if self.allow_empty:
+                return QtGui.QValidator.Acceptable, file_fn, pos
+            else:
+                return QtGui.QValidator.Intermediate, file_fn, pos
+        else:
+            if op.exists(file_fn):
+                return QtGui.QValidator.Acceptable, file_fn, pos
+            else:
+                return QtGui.QValidator.Intermediate, file_fn, pos
+
+class SheetCreationDialog(QtWidgets.QDialog):
+    def __init__(self, existing_sheet_labels=None, parent=None):
         super(QtWidgets.QDialog, self).__init__(parent)
 
-        forbidden_entries = (forbidden_entries
-                             if forbidden_entries is not None
-                             else [])
+        existing_sheet_labels = (existing_sheet_labels
+                                 if existing_sheet_labels is not None
+                                 else [])
+
+        input_widget = QtWidgets.QWidget()
+        self.input_widget_ui = ui.sheet_creation_ui.Ui_Form()
+        self.input_widget_ui.setupUi(input_widget)
+
+        self.name_validator = \
+            SheetNameValidator(existing_sheet_labels, parent=self)
+        self.input_widget_ui.sheet_name_edit.setValidator(self.name_validator)
+        (self.input_widget_ui.sheet_name_edit.textChanged
+         .connect(partial(self.line_edit_validity_feedback,
+                          self.input_widget_ui.sheet_name_edit)))
+
+        self.fn_validator = FileFieldValidator(allow_empty=True)
+        # TODO add a status bar to the dialog window to display error feedback
+        # TODO also validate if file is openable and content is valid
+        # Add arg validate_content to FileFieldValidator
+        self.input_widget_ui.form_file_edit.setValidator(self.fn_validator)
+
+        (self.input_widget_ui.form_file_edit.textChanged
+         .connect(partial(self.line_edit_validity_feedback,
+                          self.input_widget_ui.form_file_edit)))
+
+        self.input_widget_ui.plugin_file_edit.setValidator(self.fn_validator)
+        (self.input_widget_ui.plugin_file_edit.textChanged
+         .connect(partial(self.line_edit_validity_feedback,
+                          self.input_widget_ui.plugin_file_edit)))
 
         QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
         self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
@@ -6084,42 +6127,81 @@ class TextInputDialog(QtWidgets.QDialog):
         self.buttonBox.rejected.connect(self.reject)
 
         self.layout = QtWidgets.QVBoxLayout()
-        if prompt_text is not None:
-            self.layout.addWidget(QtWidgets.QLabel(prompt_text))
-        self.input_field = QtWidgets.QLineEdit(self)
-        self.validator = BlackListValidator(forbidden_entries, parent=self)
-        self.input_field.setValidator(self.validator)
-        self.input_field.textChanged.connect(self.validity_feedback)
-        # self.input_field.editingFinished.connect(self.on_edit_finished)
-        self.layout.addWidget(self.input_field)
+
+        self.layout.addWidget(input_widget)
         self.layout.addWidget(self.buttonBox)
         self.setLayout(self.layout)
 
-    def validity_feedback(self):
-        state = self.validator.validate(self.input_field.text(), 0)[0]
+    def line_edit_validity_feedback(self, line_edit):
+        input_text = line_edit.text()
+        state = line_edit.validator().validate(input_text, 0)[0]
         if state == QtGui.QValidator.Acceptable:
             color = '#c4df9b' # green
         elif state == QtGui.QValidator.Intermediate:
             color = '#FEA82F' # yellow orange
         else:
             color = '#f6989d' # red
-        (self.input_field
-         .setStyleSheet('QLineEdit { background-color: %s }' % color))
+        line_edit.setStyleSheet('QLineEdit { background-color: %s }' % color)
 
     def accept(self):
-        if self.input_field.hasAcceptableInput():
-            super().accept()
+        try:
+            self.get_sheet()
+        except Exception as e:
+            show_critical_message_box('Error while creating sheet:\n%s' %\
+                                      repr(e))
+            return
+        super().accept()
 
-    def ask(self):
-        result = self.exec_()
-        return result == QtWidgets.QDialog.Accepted and \
-            self.input_field.hasAcceptableInput()
+    # def is_valid(self):
+    #     try:
+    #         self.get_sheet()
+    #     except Exception:
+    #         return False
+    #     return True
 
-    def sheet_name(self):
-        if self.input_field.hasAcceptableInput():
-            return self.input_field.text()
+    def get_sheet(self):
+
+        def empty_or_fn_exists(fn):
+            return fn=='' or op.exists(fn)
+
+        form_fn = self.input_widget_ui.form_file_edit.text()
+        plugin_fn = self.input_widget_ui.plugin_file_edit.text()
+
+        if not self.input_widget_ui.sheet_name_edit.hasAcceptableInput():
+            raise Exception('Invalid sheet name')
+
+        label = self.input_widget_ui.sheet_name_edit.text()
+        return DataSheet(label, self._get_form(), self._get_plugin_str())
+
+    @staticmethod
+    def new_sheet(existing_sheet_labels=None, parent=None):
+        dialog = SheetCreationDialog(existing_sheet_labels=existing_sheet_labels,
+                                     parent=parent)
+        result = dialog.exec_()
+        if result == QtWidgets.QDialog.Accepted:
+            return dialog.get_sheet()
+        return None
+
+    def _get_form(self):
+        form_fn = self.input_widget_ui.form_file_edit.text()
+        if form_fn == '':
+            form = None
+        elif not op.exists(form_fn):
+            raise IOError('Form file does not exists: %s' % form_fn)
         else:
-            raise Exception('Invalid input')
+            form = Form.from_json_file(form_fn)
+
+        return form
+
+    def _get_plugin_str(self):
+        plugin_fn = self.input_widget_ui.plugin_file_edit.text()
+        if plugin_fn == '':
+            plugin_str = None
+        elif not op.exists(plugin_fn):
+            raise IOError('Plugin file does not exists: %s' % form_fn)
+        else:
+            with open(plugin_fn, 'r') as fin:
+                plugin_str = fn.read()
 
 class PiccelApp(QtWidgets.QApplication):
 
@@ -6813,12 +6895,11 @@ class PiccelApp(QtWidgets.QApplication):
 
         def on_add_sheet():
             existing_sheet_labels = list(self.logic.workbook.sheets.keys())
-            sheet_name_prompt = \
-                TextInputDialog(prompt_text='Sheet name:',
-                                forbidden_entries=existing_sheet_labels)
 
-            if sheet_name_prompt.ask():
-                new_sheet = DataSheet(sheet_name_prompt.sheet_name())
+            new_sheet = (SheetCreationDialog
+                         .new_sheet(existing_sheet_labels=existing_sheet_labels,
+                                    parent=self._workbook_ui.tabWidget))
+            if new_sheet is not None:
                 # TODO:
                 edited_sheet = DataSheetSetupDialog.edit_sheet(new_sheet)
                 if edited_sheet is not None:
