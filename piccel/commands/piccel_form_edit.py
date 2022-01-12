@@ -4,7 +4,7 @@ from optparse import OptionParser
 
 from PyQt5.QtWidgets import QApplication
 
-from piccel.form import FormEditor, FormEditorFileIO
+from piccel.form import FormFileEditor
 
 logger = logging.getLogger('piccel')
 
@@ -39,6 +39,6 @@ def main():
 
     form_fn = args[0] if len(args) == 1 else None
     app = QApplication(sys.argv)
-    form_editor = FormEditor(FormEditorFileIO(form_fn))
+    form_editor = FormFileEditor(form_fn)
     form_editor.show()
     sys.exit(app.exec_())

@@ -364,6 +364,10 @@ function snakeCaseToCamelCase(s) {
         return {k:its[0].vtype for k,its in self.key_to_items.items()
                 if len(its)>0}
 
+    def get_vchoices(self):
+        return {k:its[0].choices for k,its in self.key_to_items.items()
+                if len(its)>0}
+
     def has_key(self, key):
         return key in self.key_to_items
 
@@ -691,6 +695,16 @@ function snakeCaseToCamelCase(s) {
     def from_json(json_str):
         return Form.from_dict(json.loads(json_str)) # object_hook=FormJsonHook()
 
+    @staticmethod
+    def from_json_file(form_fn):
+        def _load(encoding):
+            with open(form_fn, 'r', encoding=encoding):
+                return Form.from_json(fin.read())
+        try:
+            return _load('utf-8')
+        except ValueError:
+            return _load('latin-1')
+
     def __getitem__(self, k):
         return self.sections[k]
 
@@ -747,6 +761,7 @@ function snakeCaseToCamelCase(s) {
                 if not self[section_name].is_valid():
                     invalid_items = self[section_name].get_invalid_items()
                     invalid_sections.append((section_name, invalid_items))
+            from IPython import embed; embed()
             raise InvalidForm('\n'.join('%s: %s' %(s,', '.join('%s'%i for i in its)) \
                                         for s,its in invalid_sections))
         logger.debug('Collecting values in form "%s" for submission',
@@ -1568,6 +1583,9 @@ class FormItem:
                     # empty string maps to None
                     # logger.debug('%s: Set empty string for key %s', self, key)
                     self.set_input_str('', key, force=force)
+        else:
+            for key in self.keys:
+                self.validate(key)
 
     def __str__(self):
         return 'item(%s)' % ','.join(self.keys)
@@ -1600,6 +1618,7 @@ class FormItem:
         value_str = self.values_str[key]
         if (self.generator is not None and \
             self.generator.endswith('submission')) or \
+            (self.vtype == 'user_name') or \
             (len(value_str)==0 and self.allow_None):
             self._set_validity(True, '', key)
             return
@@ -3390,16 +3409,52 @@ class FormEditorSheetIO:
         self.close_callback()
 
 import os
-class FormEditorFileIO:
-    def __init__(self, form_fn=None):
-        self.current_form_fn = form_fn
-        self.current_tmp_form_fn = None
 
-    def get_preloaded_form(self, parent_widget=None):
-        return self.open_form(self.current_form_fn, parent_widget=parent_widget)
+class FormFileEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
+    def __init__(self, form_fn=None, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.setupUi(self)
+
+        self.button_open.clicked.connect(self.on_open)
+        self.button_close.clicked.connect(self.on_close)
+        self.button_save.clicked.connect(self.on_save)
+        self.button_save_as.clicked.connect(self.on_save_as)
+
+        # Form widget
+        self.form_editor = FormEditor(parent=self)
+        self.form_editor.formChanged.connect(self.on_form_change)
+
+        self.current_tmp_form_fn = None
+        self.set_pending_change_state(False)
+
+        if form_fn is not None:
+            self.load_form(form_fn)
+
+    def load_form(self, form_fn):
+        if form_fn is None:
+            return
+
+        try:
+            self.form_editor.set_form(Form.from_json_file(form_fn))
+        except Exception as e:
+            show_critical_message_box('Error while opening %s:\n%s' % \
+                                      (form_fn, repr(e)))
+
+        self._end_tmp_form_session()
+        self.current_form_fn = form_fn
+        self._start_tmp_form_session()
+
+    def on_form_change(self):
+        self.set_pending_change_state(True)
+
+    def set_pending_change_state(self, state):
+        if state:
+            pass
+        else:
+            pass
 
     def _start_tmp_form_session(self):
-        ftmp, tmp_fn = tempfile.mkstemp(prefix='%s.bak.' % \
+        ftmp, tmp_fn = tempfile.mkstemp(prefix='%s.bak' % \
                                         op.basename(self.current_form_fn),
                                         dir=op.dirname(self.current_form_fn))
         os.close(ftmp)
@@ -3410,33 +3465,59 @@ class FormEditorFileIO:
             os.remove(self.current_tmp_form_fn)
             self.current_tmp_form_fn = None
 
-    def _load_form(self, form_fn):
-        with open(form_fn, 'r', encoding='utf8') as fin:
-            return Form.from_json(fin.read())
-
-    def can_save_as():
+    def check_pending_changes(self):
+        if self.pending_changes:
+            message_box = QtWidgets.QMessageBox()
+            message_box.setIcon(QtWidgets.QMessageBox.Question)
+            message_box.setText('There are unsaved modification. Save them?')
+            message_box.addButton(QtWidgets.QMessageBox.Discard)
+            message_box.addButton(QtWidgets.QMessageBox.Cancel)
+            message_box.addButton(QtWidgets.QMessageBox.Save)
+            result = message_box.exec_()
+            if result == QtWidgets.QMessageBox.Discard:
+                return True
+            elif result == QtWidgets.QMessageBox.Cancel:
+                return False
+            elif result == QtWidgets.QMessageBox.Save:
+                form_dict = self.model.root.childItems[0].to_dict()
+                return self.form_io.save_form(Form.from_dict(form_dict),
+                                              parent_widget=self)
         return True
 
-    def open_form(self, form_fn=None, parent_widget=None):
-        if form_fn is None or not op.exists(form_fn):
-            open_dir = (op.dirname(self.current_form_fn)
-                        if self.current_form_fn is not None else '')
-            form_fn, _ = (QtWidgets.QFileDialog
-                          .getOpenFileName(parent_widget, "Load Form", open_dir,
-                                           "Piccel Form Files (*.form)"))
-        form = None
-        if form_fn is not None and form_fn != '':
-            self._end_tmp_form_session()
-            self.current_form_fn = form_fn
-            form = self._load_form(self.current_form_fn)
-            # TODO: handle error!
-            self._start_tmp_form_session()
-        return form
+    def on_save_as():
+        # TODO: reset unsaved hint...
+        # depends on how form_IO behaves ...
+        # TODO: fully delegate save state in IO, do not handle buttons here
+        form_dict = self.model.root.childItems[0].to_dict()
+        self.form_io.save_form(Form.from_dict(form_dict), ask_as=True,
+                               parent_widget=self)
 
-    def save_form(self, form, ask_as=False, parent_widget=None):
+    def on_close():
+        if self.check_pending_changes():
+            self._end_tmp_form_session()
+
+    def on_save():
+        form_dict = self.model.root.childItems[0].to_dict()
+        if self.form_io.save_form(Form.from_dict(form_dict), parent_widget=self):
+            self.button_save.setIcon(QtGui.QIcon());
+            self.pending_changes = False
+
+    def on_open(self):
+        if self.check_pending_changes():
+            self.load_form(self.open_form())
+
+    def open_form(self):
+        open_dir = (op.dirname(self.current_form_fn)
+                    if self.current_form_fn is not None else '')
+        form_fn, _ = (QtWidgets.QFileDialog
+                      .getOpenFileName(self, "Load Form", open_dir,
+                                       "Piccel Form Files (*.form)"))
+        return form_fn if form_fn != '' else None
+
+    def save_form(self, form, ask_as=False):
         if ask_as:
             form_fn, _ = (QtWidgets.QFileDialog
-                          .getSaveFileName(parent_widget, "Save Form",
+                          .getSaveFileName(self, "Save Form",
                                            self.current_form_fn,
                                            "Piccel Form Files (*.form)"))
         else:
@@ -3454,64 +3535,10 @@ class FormEditorFileIO:
         with open(form_fn, 'w') as fout:
             fout.write(form_json)
 
-    def close_form_edition(self):
-        self._end_tmp_form_session()
 
     def save_temporary_form(self, form):
         # TODO show some message in status bar!
         self._save_form(form, self.current_tmp_form_fn)
-
-    def locked_variable_types(self):
-        return {}
-
-class FormFileEditor():
-    def __init__(self, form_fn=None, parent=None):
-        # button bar
-
-        # form widget
-        if form_fn is not None:
-            form = self.load_form_fn(form_fn)
-        else:
-            form = Form()
-        self.form_editor = FormEditor(form)
-
-        self.form_editor.formChanged.connect(self.on_form_change)
-
-        self.pending_changes = False
-
-        if hasattr(self.form_io, 'open_form'):
-            def on_open():
-                self.hide_property_editors()
-                if self.check_pending_changes():
-                    self.set_form(self.form_io.open_form(parent_widget=self),
-                                  self.form_io.locked_variable_types())
-            self.button_open.clicked.connect(on_open)
-        else:
-            self.open_button.hide()
-
-        def on_save():
-            form_dict = self.model.root.childItems[0].to_dict()
-            if self.form_io.save_form(Form.from_dict(form_dict), parent_widget=self):
-                self.button_save.setIcon(QtGui.QIcon());
-                self.pending_changes = False
-        self.button_save.clicked.connect(on_save)
-
-        if hasattr(self.form_io, 'get_save_as_button_label'):
-            self.button_save_as.setText(self.form_io.get_save_as_button_label())
-
-        def on_save_as():
-            # TODO: reset unsaved hint...
-            # depends on how form_IO behaves ...
-            # TODO: fully delegate save state in IO, do not handle buttons here
-            form_dict = self.model.root.childItems[0].to_dict()
-            self.form_io.save_form(Form.from_dict(form_dict), ask_as=True,
-                                   parent_widget=self)
-        self.button_save_as.clicked.connect(on_save_as)
-
-        def on_close():
-            if self.check_pending_changes():
-                self.form_io.close_form_edition()
-        self.button_close.clicked.connect(on_close)
 
 class FormEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
     def __init__(self, form, locked_variable_types=None, parent=None):
@@ -3562,24 +3589,6 @@ class FormEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
         self.button_save.setIcon(self.model.unsaved_icon);
         # self.button_save.button.setIconSize(QtGui.QPixmap("Save").rect().size());
 
-    def check_pending_changes(self):
-        if self.pending_changes:
-            message_box = QtWidgets.QMessageBox()
-            message_box.setIcon(QtWidgets.QMessageBox.Question)
-            message_box.setText('There are unsaved modification. Save them?')
-            message_box.addButton(QtWidgets.QMessageBox.Discard)
-            message_box.addButton(QtWidgets.QMessageBox.Cancel)
-            message_box.addButton(QtWidgets.QMessageBox.Save)
-            result = message_box.exec_()
-            if result == QtWidgets.QMessageBox.Discard:
-                return True
-            elif result == QtWidgets.QMessageBox.Cancel:
-                return False
-            elif result == QtWidgets.QMessageBox.Save:
-                form_dict = self.model.root.childItems[0].to_dict()
-                return self.form_io.save_form(Form.from_dict(form_dict),
-                                              parent_widget=self)
-        return True
 
     def set_form(self, form, lock_variable_types):
         if form is not None:

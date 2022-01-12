@@ -282,85 +282,96 @@ def form_update_or_new(sheet_label, workbook, primary_keys, entry_dict=None):
     return form, action_label
 
 
-def participant_status_action(entry_df, selected_column, workbook,
-                              participant_sheet):
-    participant_id = entry_df.index[0]
-    return form_update_or_new(participant_sheet, workbook,
-                              {'Participant_ID' : participant_id},
-                              {'Staff' : workbook.user})
+class ParticipantStatusTracker:
+    def __init__(self, participant_sheet_label, progress_note_sheet_label,
+                 workbook, dashboard_column_status='Study_Status'):
+        self.participant_sheet_label = participant_sheet_label
+        self.progress_note_sheet_label = progress_note_sheet_label
+        self.workbook = workbook
+        self.dashboard_column_status = dashboard_column_status
 
-def track_participant_status(dashboard_df, dashboard_column_status,
-                             participant_status_sheet,
-                             common_progress_notes_sheet,
-                             workbook, pids):
-    """
-    If progress note with drop status is more recent than latest entry in
-    participant_status_sheet -> confirm_drop
-    Else: Display current participant status in participant_status_sheet
-    """
-    # expected_columns=['Participant_ID', 'Note_Type',
-    #                   'Timestamp_Submission'],
-
-    pnotes_df = latest_sheet_data(workbook, common_progress_notes_sheet,
-                                  index_column='Participant_ID')
-    # expected_columns=['Participant_ID', 'Study_Status',
-    #                   'Timestamp_Submission'],
-
-    status_df = latest_sheet_data(workbook, participant_status_sheet,
-                                  index_column='Participant_ID')
-
-    pnotes_fresher, status_fresher = df_keep_higher(pnotes_df, status_df)
-
-    dashboard_df.loc[status_fresher.index, dashboard_column_status] = \
-        status_fresher.loc[:, 'Study_Status']
-
-    map_set(dashboard_df, dashboard_column_status,
-            conditions={'confirm_drop':
-                        (pnotes_fresher, 'Note_Type',
-                         ['withdrawal', 'exclusion'])})
+        errors = self.check()
+        if len(errors) > 0:
+            for error in errors:
+                logger.error(error)
+            raise DataConsistencyError(errors)
 
 
-def track_poll_answer(dashboard_df, dashboard_column, poll_sheet_label,
-                      poll_answer_column, default_status, workbook, pids,
-                      poll_filter=None):
-    poll_df = latest_sheet_data(workbook, poll_sheet_label,
-                                index_column='Participant_ID',
-                                filter_dict=poll_filter,
-                                indexes=pids)
-    dashboard_df.loc[pids, dashboard_column] = default_status
-    if poll_df.shape[0] > 0:
-        answered_df = poll_df[~pd.isna(poll_df[poll_answer_column])]
-        dashboard_df.loc[answered_df.index, dashboard_column] = \
-            answered_df[poll_answer_column]
+    def check(self):
+        expected_fields = {
+            'Participant_ID' : 'text',
+            'Study_Status' : 'text',
+            'User' : 'user_name',
+            'Timestamp_Submission' : 'datetime'
+        }
+        errors = check_sheet(self.workbook, self.participant_sheet_label,
+                             expected_fields=expected_fields)
+        expected_fields = {
+            'Participant_ID' : 'text',
+            'Note_Type' : Choice('text', ['withdrawal', 'exclusion']),
+            'User' : 'user_name',
+            'Timestamp_Submission' : 'datetime'
+        }
+        errors.extend(check_sheet(self.workbook, self.progress_note_sheet_label,
+                                  expected_fields=expected_fields))
+        return errors
 
-def emailled_poll_action(entry_df, poll_column, email_sheet_label, workbook):
-    poll_status = entry_df[poll_column].iat[0]
-    if poll_status=='' or pd.isna(poll_status) or poll_status is None or \
-       poll_status == '%s_answered' % poll_column:
-        return None, ''
-    participant_id = entry_df.index[0]
-    return form_update_or_new(email_sheet_label, workbook,
-                              {'Participant_ID' : participant_id,
-                               'Email_Template' : poll_column},
-                              {'Email_Action' : 'plan',
-                               'Staff' : workbook.user})
+    def action(self, entry_df, selected_column):
+        participant_id = entry_df.index[0]
+        return form_update_or_new(self.participant_sheet_label, self.workbook,
+                                  {'Participant_ID' : participant_id})
 
-def track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
+    def track(self, dashboard_df, pids):
+        """
+        If progress note with drop status is more recent than latest entry in
+        participant_status_sheet -> confirm_drop
+        Else: Display current participant status in participant_status_sheet
+        """
+
+        pnotes_df = latest_sheet_data(self.workbook,
+                                      self.progress_note_sheet_label,
+                                      index_column='Participant_ID')
+
+        status_df = latest_sheet_data(self.workbook,
+                                      self.participant_sheet_label,
+                                      index_column='Participant_ID')
+
+        pnotes_fresher, status_fresher = df_keep_higher(pnotes_df, status_df)
+
+        dashboard_df.loc[status_fresher.index, self.dashboard_column_status] = \
+            status_fresher.loc[:, 'Study_Status']
+
+        map_set(dashboard_df, self.dashboard_column_status,
+                conditions={'confirm_drop':
+                            (pnotes_fresher, 'Note_Type',
+                             ['withdrawal', 'exclusion'])})
+
+class PollTracker:
+    def __init__(self, poll_sheet_label, poll_answer_column, workbook,
+                 default_status, dashboard_column=None):
+        self.poll_sheet_label = poll_sheet_label
+        self.workbook = workbook
+        self.dashboard_column = if_none(dashboard_column, poll_sheet_label)
+        self.poll_answer_column = poll_answer_column
+
+    def check(self):
+        return check_sheet(self.workbook, self.interview_label,
+                           expected_fields={'Participant_ID' : 'text'})
+
+    def track(self, dashboard_df, pids, poll_filter=None):
+        poll_df = latest_sheet_data(self.workbook, self.poll_sheet_label,
+                                    index_column='Participant_ID',
+                                    filter_dict=poll_filter,
+                                    indexes=pids)
+        dashboard_df.loc[pids, self.dashboard_column] = self.default_status
+        if poll_df.shape[0] > 0:
+            answered_df = poll_df[~pd.isna(poll_df[self.poll_answer_column])]
+            dashboard_df.loc[answered_df.index, self.dashboard_column] = \
+                answered_df[self.poll_answer_column]
+
+
+def ___track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
                         workbook, pids, date_now=None):
-    """
-    * default status -> _to_send
-
-    * if form answered -> _answered
-      ElseIf email action == plan
-          If email status == to_send -> _email_pending
-          ElseIf email status == error -> _email_error
-          ElseIf email status == sent:
-              If  date_now < timestamp + overdue_days
-                 -> _email_sent
-              Else
-                 -> _email_overdue
-      ElseIf email action == call_off -> _cancelled
-    """
     poll_tag = poll_label.lower()
     default_status = ('%s_to_send' % poll_tag)
     column_status = poll_label
@@ -372,10 +383,6 @@ def track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
 
     pids = set(pids).intersection(dashboard_df.index)
 
-    # expected_columns=['Participant_ID', 'Staff',
-    #                   'Email_Action', 'Email_Status',
-    #                   'Email_Template', 'Overdue_Days',
-    #                   'Timestamp_Submission'],
     email_df = latest_sheet_data(workbook, email_sheet_label,
                                  filter_dict={'Email_Template' : poll_label},
                                  index_column='Participant_ID', indexes=pids)
@@ -521,6 +528,199 @@ def df_keep_higher(df1, df2, compare_column='Timestamp_Submission'):
 
 class DataConsistencyError(Exception): pass
 
+class Choice:
+    def __init__(self, vtype, choices):
+        self.vtype = vtype
+        self.choices = choices
+
+def if_none(value, default_value):
+    return value if value is not None else default_value
+
+def check_sheet(workbook, sheet_label, expected_fields=None):
+
+    errors = []
+    expected_fields = if_none(expected_fields, {})
+    expected_columns = set(expected_fields.keys())
+    try:
+        sheet = workbook[sheet_label]
+    except SheetNotFound:
+        return ['Sheet %s not found' % sheet_label]
+    # missing_columns = ', '.join(sorted(expected_columns
+    #                                    .difference(sheet.df.columns)))
+    # if len(missing_columns) > 0:
+    #     errors.append('Missing columns in sheet %s: %s' % \
+    #                   (sheet_label, missing_columns))
+
+    form_master = sheet.form_master
+    form_fields = form_master.get_vtypes()
+    fields_choices = form_master.get_vchoices()
+    # missing_fields = ', '.join(sorted(set(expected_columns)
+    #                                   .difference(form_fields.keys())))
+    # if len(missing_fields) > 0:
+    #     errors.append('Missing fields in form of sheet %s: %s' % \
+    #                   (sheet_label, missing_fields))
+    for field_name, expected_type in expected_fields.items():
+        if field_name not in form_fields:
+            errors.append('Missing field %s in form of sheet %s' % \
+                          (field_name, sheet_label))
+        elif not isinstance(expected_type, Choice):
+            if form_fields[field_name] != expected_type:
+                errors.append('Type of field %s in form of sheet %s is %s '\
+                              'but must be %s' % \
+                              (sheet_label, field_name, expected_type))
+        else:
+            if form_fields[field_name] != expected_type.vtype:
+                errors.append('Type of field %s in form of sheet %s is %s '\
+                              'but must be %s' % \
+                              (field_name, sheet_label, expected_type))
+            field_choices = if_none(fields_choices[field_name], [])
+            missing_choices = (set(expected_type.choices)
+                               .difference(field_choices))
+            if len(missing_choices) > 0:
+                errors.append('Missing choice(s) %s for field %s '\
+                              'in form of sheet %s' % \
+                              (', '.join(['"%s"'%c for c in missing_choices]),
+                               field_name, sheet_label))
+    return errors
+
+class EmailledPollTracker:
+    """
+    * default status -> _to_send
+
+    if form answered -> _answered
+    ElseIf email action == plan
+        If email status == to_send -> _email_pending
+        ElseIf email status == error -> _email_error
+        ElseIf email status == sent:
+            If  date_now < timestamp + overdue_days
+                -> _email_sent
+            Else
+                -> _email_overdue
+        ElseIf email action == call_off -> _cancelled
+    """
+
+    def __init__(self, poll_label, email_sheet_label, workbook):
+
+        self.poll_label = poll_label
+        self.email_sheet_label = email_sheet_label
+        self.workbook = workbook
+
+        errors = self.check()
+        if len(errors) > 0:
+            for error in errors:
+                logger.error(error)
+            raise DataConsistencyError(errors)
+
+
+    def check(self):
+        """
+        Errors to handle:
+        - missing poll sheet
+        """
+        # TODO: cross check that poll_label is values of email_template
+        expected_fields = {
+            'Participant_ID' : 'text',
+            'Email_Action' : Choice('text', ['plan', 'cancel', 'revoke']),
+            'Email_Status' : Choice('text', ['to_send', 'sent', 'error']),
+            'Email_Template' : Choice('text', [self.poll_label]),
+            'Overdue_Days' : 'int',
+            'User' : 'user_name',
+            'Timestamp_Submission' : 'datetime'
+        }
+        errors = check_sheet(self.workbook, self.email_sheet_label,
+                             expected_fields=expected_fields)
+        errors.extend(check_sheet(self.workbook, self.poll_label,
+                                  expected_fields={'Participant_ID' : 'text',
+                                                   'Timestamp_Submission' : \
+                                                   'datetime'}))
+        return errors
+
+    def track(self, dashboard_df, pids, date_now=None):
+        poll_tag = self.poll_label.lower()
+        default_status = ('%s_to_send' % poll_tag)
+        column_status = self.poll_label
+
+        if column_status not in dashboard_df.columns:
+            dashboard_df[column_status] = pd.NA
+
+        date_now = date_now if date_now is not None else datetime.now()
+
+        pids = set(pids).intersection(dashboard_df.index)
+
+        email_df = latest_sheet_data(self.workbook, self.email_sheet_label,
+                                     filter_dict={'Email_Template' :
+                                                  self.poll_label},
+                                     index_column='Participant_ID', indexes=pids)
+
+        poll_df = latest_sheet_data(self.workbook, self.poll_label,
+                                    index_column='Participant_ID', indexes=pids)
+
+        dashboard_df.loc[pids, column_status] = default_status
+
+        if email_df.shape[0] > 0:
+            try:
+                def od_ts(email_df, email_col):
+                    f_ts = lambda x: date_now - timedelta(days=x)
+                    # from IPython import embed; embed()
+                    return email_df['Overdue_Days'].apply(f_ts)
+
+                map_set(dashboard_df, column_status,
+                        conditions={
+                            '%s_to_send' % poll_tag:
+                            (email_df, 'Email_Action', ['cancelled']),
+                            '%s_cancelled' % poll_tag:
+                            (email_df, 'Email_Action', ['revoke']),
+                            '%s_email_pending' % poll_tag:
+                            And((email_df, 'Email_Action', ['plan']),
+                                (email_df, 'Email_Status', ['to_send'])),
+                            '%s_email_sent' % poll_tag:
+                            And((email_df, 'Email_Action', ['plan']),
+                                (email_df, 'Email_Status', ['sent']),
+                                (email_df, 'Overdue_Days', IsNotNA()),
+                                (email_df, 'Timestamp_Submission',
+                                 GreaterEqual(od_ts))),
+                            '%s_overdue' % poll_tag:
+                            And((email_df, 'Email_Action', ['plan']),
+                                (email_df, 'Email_Status', ['sent']),
+                                (email_df, 'Overdue_Days', IsNotNA()),
+                                (email_df, 'Timestamp_Submission',
+                                 Lower(od_ts))),
+                            '%s_email_error' % poll_tag:
+                            And((email_df, 'Email_Action', ['plan']),
+                                (email_df, 'Email_Status', ['error'])),
+                        })
+            except SrcColumnNotFound as e:
+                msg = 'Column %s not found in df of sheet %s' % \
+                    (e.message, self.email_sheet_label)
+                raise SrcColumnNotFound(msg) from e
+            except DestColumnNotFound as e:
+                msg = 'Column %s not found in dashboard df' % e.message
+                raise DestColumnNotFound(msg) from e
+
+        if poll_df.shape[0] > 0:
+            try:
+                map_set(dashboard_df, column_status,
+                        conditions={'%s_answered' % poll_tag:
+                                    (poll_df, 'Timestamp_Submission', Any())})
+            except SrcColumnNotFound as e:
+                msg = 'Column %s not found in df of sheet %s' % \
+                    (e.message, self.poll_label)
+                raise SrcColumnNotFound(msg) from e
+            except DestColumnNotFound as e:
+                msg = 'Column %s not found in dashboard df' % e.message
+                raise DestColumnNotFound(msg) from e
+
+    def action(self, entry_df, poll_column):
+        poll_status = entry_df[poll_column].iat[0]
+        if poll_status=='' or pd.isna(poll_status) or poll_status is None or \
+           poll_status == '%s_answered' % poll_column:
+            return None, ''
+        participant_id = entry_df.index[0]
+        return form_update_or_new(self.email_sheet_label, self.workbook,
+                                  {'Participant_ID' : participant_id,
+                                   'Email_Template' : poll_column},
+                                  {'Email_Action' : 'plan'})
+
 class InterviewTracker:
     def __init__(self, interview_label, workbook,
                  plan_sheet_label=DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
@@ -539,43 +739,34 @@ class InterviewTracker:
     def check(self):
 
         errors = []
-        interview_df = latest_sheet_data(self.workbook, self.interview_label)
-        expected_columns=['Participant_ID', 'User', 'Session_Action',
-                          'Session_Status', 'Timestamp_Submission']
-        missing_columns = ', '.join(sorted(set(expected_columns)
-                                           .difference(interview_df.columns)))
-        if len(missing_columns) > 0:
-            errors.append('Missing columns in sheet %s: %s' % \
-                          (self.interview_label, missing_columns))
+        expected_fields = {
+            'Participant_ID' : 'text',
+            'Session_Action' : Choice('text', ['do_session', 'cancel_session']),
+            'Session_Status' : Choice('text', ['done', 'redo']),
+            'User' : 'user_name',
+            'Timestamp_Submission' : 'datetime'
+        }
+        errors = check_sheet(self.workbook, self.interview_label,
+                             expected_fields=expected_fields)
 
-        form_master = self.workbook[self.interview_label].form_master
-        form_fields = form_master.get_vtypes()
-        missing_fields = ', '.join(sorted(set(expected_columns)
-                                          .difference(form_fields.keys())))
-        if len(missing_fields) > 0:
-            errors.append('Missing fields in form of sheet %s: %s' % \
-                          (self.interview_label, missing_fields))
-        if form_fields['User'] != 'user_name':
-            errors.append('Type of field User in form of sheet %s is %s '\
-                          'but must be user_name' % \
-                          (self.interview_label, form_fields['User']))
-
-        plan_df = latest_sheet_data(self.workbook, self.plan_sheet_label,
-                                    filter_dict={'Interview_Type' :
-                                                 self.interview_label})
-        expected_columns = ['Participant_ID', 'Staff', 'Plan_Action',
-                            'Interview_Type', 'Interview_Date', 'Availability',
-                            'Date_Is_Set', 'Send_Email', 'Email_Schedule',
-                            'Email_Template', 'Email_Status', 'Callback_Days',
-                            'Timestamp_Submission']
-        missing_columns = ', '.join(sorted(set(expected_columns)
-                                           .difference(plan_df.columns)))
-        if len(missing_columns) > 0:
-            errors.append('Missing columns in sheet %s: %s' % \
-                          (self.plan_sheet_label, missing_columns))
-
-        # TODO: check that Email_Template and 'Interview_Type' fields
-        #       in plan_sheet allows interview_label
+        expected_fields = {
+            'Participant_ID' : 'text',
+            'Staff' : 'text',
+            'Plan_Action' : Choice('text', ['assign_staff', 'plan']),
+            'Interview_Type' : Choice('text', [self.interview_label]),
+            'Interview_Date' : 'datetime',
+            'Availability' : 'text',
+            'Date_Is_Set' : 'boolean',
+            'Send_Email' : 'boolean',
+            'Email_Schedule' : Choice('text', ['days_before_2']),
+            'Email_Template' : Choice('text', [self.interview_label]),
+            'Email_Status' : Choice('text', []),
+            'Callback_Days' : 'int',
+            'User' : 'user_name',
+            'Timestamp_Submission' : 'datetime'
+        }
+        errors.extend(check_sheet(self.workbook, self.plan_sheet_label,
+                                  expected_fields=expected_fields))
         return errors
 
     def action(self, entry_df, interview_column):
@@ -601,7 +792,7 @@ class InterviewTracker:
             # if value.endswith('_not_done') or value.endswith('_cancelled'):
             # elif value.endswith('_scheduled') or value.endswith('_email_pending') or \
             #  value.endswith('_email_sent') or value.endswith('_email_error') or \
-            #  value.endswith('_ok') or value.endswith('_redo'): 
+            #  value.endswith('_ok') or value.endswith('_redo'):
         elif interview_column.endswith('_Staff'):
             interview_label = interview_column[:-len('_Staff')]
             return form_update_or_new(self.plan_sheet_label, self.workbook,

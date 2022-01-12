@@ -30,9 +30,10 @@ from . import sheet_plugin_template
 from . import workbook_plugin_template
 from .plugin_tools import map_set, And, Or #, Less, LessEqual, Greater, GreaterEqual
 from .plugin_tools import (LescaDashboard, InterviewTracker,
-                           form_update_or_new, DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
-                           track_emailled_poll, emailled_poll_action,
-                           track_participant_status, participant_status_action)
+                           form_update_or_new,
+                           DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
+                           PollTracker, EmailledPollTracker,
+                           ParticipantStatusTracker)
 from .form import (Form, FormSection, FormItem, FormEditor, FormEditorSheetIO,
                    NotEditableError, DateTimeCollector, LanguageError)
 
@@ -2051,9 +2052,8 @@ from piccel.plugin_tools import map_set, And, Or
 from piccel.plugin_tools import (LescaDashboard, InterviewTracker,
                                  form_update_or_new,
                                  DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
-                                 track_emailled_poll, emailled_poll_action,
-                                 track_participant_status,
-                                 participant_status_action)
+                                 PollTracker, EmailledPollTracker,
+                                 ParticipantStatusTracker)
 from piccel.logging import logger
 """
 
@@ -3582,6 +3582,7 @@ class WorkBook:
         if sheet_label not in self.sheets:
             logger.error('WorkBook %s: cannot find sheet %s in %s',
                          self.label, sheet_label, ', '.join(self.sheets))
+            raise SheetNotFound(sheet_label)
         return self.sheets[sheet_label]
 
     def has_sheet(self, sheet_label):
@@ -4543,6 +4544,11 @@ class TestWorkBook(unittest.TestCase):
                               'drop_out' : {'French' : "Sorti.e de l'étude"},
                           },
                           allow_empty=False),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
                  FormItem(keys={'Timestamp_Submission' : None},
                           vtype='datetime',
                           generator='timestamp_submission',
@@ -4570,6 +4576,11 @@ class TestWorkBook(unittest.TestCase):
                                    },
                           default_language='French',
                           allow_empty=False),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
                  FormItem(keys={'Timestamp_Submission' : None},
                           vtype='datetime',
                           generator='timestamp_submission',
@@ -4593,18 +4604,22 @@ class TestWorkBook(unittest.TestCase):
                 return super(DashboardStatus, self).sheets_to_watch() + \
                     ['Progress_Note']
 
+            def after_workbook_load(self):
+                self.status_tracker = \
+                    ParticipantStatusTracker('Participants', 'Progress_Note',
+                                             self.workbook)
+                super(DashboardStatus, self).after_workbook_load()
+
             def refresh_all(self):
                 self.refresh_entries(self.df.index)
                 self.sheet.invalidate_cached_views()
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
-                track_participant_status(self.df, 'Study_Status', 'Participants',
-                                         'Progress_Note', self.workbook, pids)
+                self.status_tracker.track(self.df, pids)
 
             def action(self, entry_df, selected_column):
-                return participant_status_action(entry_df, selected_column,
-                                                 self.workbook, 'Participants')
+                return self.status_tracker.action(entry_df, selected_column)
 
         sh_dashboard = DataSheet('Dashboard')
         code = (plugin_source_header + \
@@ -4775,6 +4790,11 @@ class TestWorkBook(unittest.TestCase):
                                   'error':None},
                          init_values={'Email_Status' : 'to_send'},
                          allow_empty=True),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
                  FormItem(keys={'Timestamp_Submission':None},
                           vtype='datetime',
                           allow_empty=False,
@@ -5151,7 +5171,7 @@ class TestWorkBook(unittest.TestCase):
                                    {'French':"Plannifier l'envoi d'un courriel"},
                                    'cancel':
                                    {'French':"Annuler l'envoi d'un courriel"},
-                                   'call_off':
+                                   'revoke':
                                    {'French':"Supprimer le suivi d'envoi de courriel"}},
                           allow_empty=False),
                  FormItem(keys={'Email_Template':None},
@@ -5177,6 +5197,11 @@ class TestWorkBook(unittest.TestCase):
                                    'error':None},
                           init_values={'Email_Status' : 'to_send'},
                           allow_empty=True),
+                 FormItem(keys={'User' : None},
+                          vtype='user_name',
+                          allow_empty=False,
+                          supported_languages={'French', 'English'},
+                          default_language='French'),
                  FormItem(keys={'Timestamp_Submission':None},
                           vtype='datetime',
                           allow_empty=True,
@@ -5224,6 +5249,11 @@ class TestWorkBook(unittest.TestCase):
                 super(DashboardPoll, self).__init__(*args, **kwargs)
                 self.date_now = None
 
+            def after_workbook_load(self):
+                self.poll_tracker = EmailledPollTracker('Poll', 'Email',
+                                                        self.workbook)
+                super(DashboardPoll, self).after_workbook_load()
+
             def sheets_to_watch(self):
                 return super(DashboardPoll, self).sheets_to_watch() + \
                     ['Poll', 'Email']
@@ -5234,12 +5264,10 @@ class TestWorkBook(unittest.TestCase):
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
-                track_emailled_poll(self.df, 'Poll', 'Email', self.workbook,
-                                    pids, date_now=self.date_now)
+                self.poll_tracker.track(self.df, pids, date_now=self.date_now)
 
             def action(self, entry_df, selected_column):
-                return emailled_poll_action(entry_df, selected_column, 'Email',
-                                            self.workbook)
+                return self.poll_tracker.action(entry_df, selected_column)
 
         sh_dashboard = DataSheet('Dashboard')
         code = (plugin_source_header + \
