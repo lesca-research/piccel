@@ -34,7 +34,7 @@ from .plugin_tools import (LescaDashboard, InterviewTracker,
                            DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
                            PollTracker, EmailledPollTracker,
                            ParticipantStatusTracker)
-from .form import (Form, FormSection, FormItem, FormEditor, FormEditorSheetIO,
+from .form import (Form, FormSection, FormItem, FormSheetEditor,
                    NotEditableError, DateTimeCollector, LanguageError)
 
 import unittest
@@ -60,6 +60,7 @@ from io import BytesIO
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from . import ui
+from .ui.widgets import show_critical_message_box
 
 from .core import LazyFunc, df_index_from_value
 
@@ -286,10 +287,15 @@ class FileExistsError(Exception): pass
 # Progress note COVEPIC compréhension FIC préliminaire
 
 def module_from_code_str(code):
-     spec = importlib.util.spec_from_loader('helper', loader=None)
-     module = importlib.util.module_from_spec(spec)
-     exec(code, module.__dict__)
-     return module
+    spec = importlib.util.spec_from_loader('helper', loader=None)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        exec(code, module.__dict__)
+    except Exception as e:
+        logger.error('Error while importing code:\n%s\nError:\n%s',
+                     code, repr(e))
+        raise e
+    return module
 
 class LocalFileSystem:
     """
@@ -530,7 +536,7 @@ class Hints:
         for hint in Hints.ALL_HINTS:
             hint.preload(qobj)
 
-from .sheet_plugin import SheetPlugin
+from .sheet_plugin import SheetPlugin, UserSheetPlugin
 
 """
 class FolderContentWatcher:
@@ -683,6 +689,15 @@ class DataSheetSetupDialog(QtWidgets.QDialog):
         else:
             return None
 
+def if_plugin_valid(f):
+    def wrapper(*args):
+        if args[0].plugin_is_valid():
+            return f(*args)
+        else:
+            logger.warning('Cannot call %s for sheet %s because plugin '\
+                           'is invalid', f.__name__, args[0].label)
+    return wrapper
+
 class DataSheet:
     """
     Table data where entries where input is done with an associated form.
@@ -790,6 +805,7 @@ class DataSheet:
         if save_live_data:
             self.save_live_data()
 
+    @if_plugin_valid
     def set_workbook(self, workbook):
         self.plugin.set_workbook(workbook)
 
@@ -820,8 +836,8 @@ class DataSheet:
     def latest_update_df(self, df=None):
         if df is None:
             df = self.df
-        # fm = lambda x : x.loc[[x.index.max()]]
-        # latest = df.groupby(level=0, group_keys=False).apply(fm)
+            # fm = lambda x : x.loc[[x.index.max()]]
+            # latest = df.groupby(level=0, group_keys=False).apply(fm)
         latest = df.groupby(level=0, group_keys=False).tail(1).sort_index()
         if latest.empty:
             latest = self.empty_df_from_master()
@@ -842,24 +858,47 @@ class DataSheet:
                         filesystem.full_path(plugin_fn))
         return plugin_code_str
 
-    def set_plugin_from_code(self, code_str):
+    def set_plugin_from_code(self, code_str, first_attempt=True):
         """ Code is not saved. See save_plugin_code """
         self.plugin_code_str = code_str
-        if code_str is None:
-            self.plugin = SheetPlugin(self)
-        else:
-            self.plugin = (module_from_code_str(code_str)
-                           .CustomSheetPlugin(self))
-        # cached views invalidated there:
-        views = self.plugin.views(self.base_views())
-        logger.debug2('Sheet %s, load plugin views: %s',
-                      self.label, ','.join(views))
-        self.set_views(views)
-        default_view = self.plugin.default_view()
-        if default_view is not None:
-            self.set_default_view(default_view)
+        try:
+            if code_str is None:
+                self.plugin = SheetPlugin(self)
+            else:
+                self.plugin = (module_from_code_str(code_str)
+                               .CustomSheetPlugin(self))
 
-        self.plugin.set_workbook(self.workbook)
+            # cached views invalidated there:
+            views = self.plugin.views(self.base_views())
+            logger.debug('Sheet %s, load plugin views: %s',
+                         self.label, ','.join(views))
+
+            self.set_views(views)
+            default_view = self.plugin.default_view()
+            if default_view is not None:
+                self.set_default_view(default_view)
+
+            self.plugin.set_workbook(self.workbook)
+
+        except Exception as e:
+            if first_attempt and self.label == '__users__':
+                logger.info('Trying to fix plugin code of sheet __user__')
+                self.set_plugin_from_code(UserSheetPlugin.get_code_str(),
+                                          first_attempt=False)
+            logger.error('Could not load plugin of sheet %s '\
+                         'from code:\n%s\nException:\n%s', self.label,
+                         code_str, repr(e))
+            self.plugin_valid = False
+            self.plugin = None
+            return
+
+        if not first_attempt and self.filesystem is not None:
+            self.save_plugin_code(overwrite=True)
+
+        self.plugin_valid = True
+
+    def plugin_is_valid(self):
+        return self.plugin_valid
 
     @staticmethod
     def load_properties_from_file(filesystem):
@@ -1196,6 +1235,7 @@ class DataSheet:
 
             self.df['__fn__'] = pd.NA
 
+    @if_plugin_valid
     def load_live_forms(self):
         if self.user is None:
             return
@@ -1362,9 +1402,11 @@ class DataSheet:
                                     label)
         return label
 
+    @if_plugin_valid
     def after_workbook_load(self):
         self.plugin.after_workbook_load()
 
+    @if_plugin_valid
     def view_validity(self, view_label=None):
         if view_label is None:
             view_label = self.default_view
@@ -1476,6 +1518,7 @@ class DataSheet:
             self.cached_inconsistent_entries = None
         self.notifier.notify('views_refreshed')
 
+    @if_plugin_valid
     def get_df_view(self, view_label=None):
 
         if view_label is None:
@@ -1613,6 +1656,10 @@ class DataSheet:
         if not unique_ok:
             logger.warning('Value %s for key %s is not unique', value, key)
         return unique_ok
+
+    @if_plugin_valid
+    def action(self, entry_df, selected_column):
+        return self.plugin.action(entry_df, selected_column)
 
     def form_update_entry(self, entry_idx, form_id=None):
         """
@@ -2043,27 +2090,7 @@ def df_weak_equal(df1, df2):
         return False
     return True
 
-plugin_source_header = \
-"""
-import pandas as pd
-import numpy as np
-from piccel.sheet_plugin import SheetPlugin
-from piccel.plugin_tools import map_set, And, Or
-from piccel.plugin_tools import (LescaDashboard, InterviewTracker,
-                                 form_update_or_new,
-                                 DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
-                                 PollTracker, EmailledPollTracker,
-                                 ParticipantStatusTracker)
-from piccel.logging import logger
-"""
 
-def strip_indent(code):
-    indent_size = 0
-    while code[indent_size] == ' ':
-        indent_size += 1
-    if indent_size == 0:
-        return code
-    return '\n'.join(line[indent_size:] for line in code.split('\n'))
 
 class TestDataSheet(unittest.TestCase):
 
@@ -2493,6 +2520,7 @@ def foo():
 
         self.assertEqual(sheet.inconsistent_entries(), {(0,0,1),(0,0,2)})
 
+
     def test_duplicate_form_input(self):
         form = self.sheet_ts.form_new_entry()
         entry = {'Participant_ID' : 'CE0004', 'Age' : 55,
@@ -2607,6 +2635,23 @@ def foo():
         self.assertRaises(FormDataInconsitency, sheet.set_df,
                           self.data_df_ts_data)
 
+    def test_bad_plugin_from_file(self):
+        sheet_folder = op.join(self.tmp_dir, 'sh_plugin_bad')
+        os.makedirs(sheet_folder)
+        filesystem = LocalFileSystem(sheet_folder)
+
+        sheet = DataSheet('sh_plugin_bad',
+                          Form.from_dict(self.form_def_ts_data),
+                          filesystem=filesystem)
+        sheet.plugin_code_str = "baaad"
+        sheet.save_logic()
+
+        sheet2 = DataSheet.from_files('me', filesystem)
+        self.assertFalse(sheet2.plugin_is_valid())
+        self.assertIsNone(sheet2.action(None, None))
+        self.assertIsNone(sheet2.plugin)
+        self.assertIsNone(sheet2.get_df_view())
+
     def test_plugin_views(self):
         # TODO: test against all versions of plugin API (may change overtime)
 
@@ -2620,11 +2665,7 @@ def foo():
                 return pd.DataFrame(index=df.index, columns=df.columns,
                                     data=np.ones(df.shape, dtype=bool))
 
-        code = (plugin_source_header + \
-                strip_indent(inspect.getsource(TestViewSheetPlugin)
-                             .replace('TestViewSheetPlugin',
-                                      'CustomSheetPlugin')))
-        self.sheet_ts.set_plugin_from_code(code)
+        self.sheet_ts.set_plugin_from_code(TestViewSheetPlugin.get_code_str())
 
         df_young = self.sheet_ts.get_df_view('young')
         mask = df_young.Participant_ID=='CE0004'
@@ -2650,11 +2691,7 @@ def foo():
                     validity[col] = ~df[col].duplicated(keep=False).to_numpy()
                 return validity
 
-        code = (plugin_source_header + \
-                strip_indent(inspect.getsource(ValiditySheetPlugin)
-                             .replace('ValiditySheetPlugin',
-                                      'CustomSheetPlugin')))
-        self.sheet_ts.set_plugin_from_code(code)
+        self.sheet_ts.set_plugin_from_code(ValiditySheetPlugin.get_code_str())
 
         # Check view validity
         view = self.sheet_ts.get_df_view('latest')
@@ -2797,8 +2834,8 @@ def foo():
 
         logger.debug('-------------------------')
         logger.debug('utest: create update form')
-        form, alabel = self.sheet_ts.plugin.action(self.sheet_ts.df.iloc[[1]],
-                                                   'Participant_ID')
+        form, alabel = self.sheet_ts.action(self.sheet_ts.df.iloc[[1]],
+                                            'Participant_ID')
         self.assertEqual(form['section1']['__submission__'].get_value(),
                          'append')
         self.assertNotEqual((form['section1']['__entry_id__'].get_value(),
@@ -3540,22 +3577,7 @@ class WorkBook:
                     title={'French': 'Utilisateur du classeur',
                            'English': 'Workbook user'})
         sh1 = DataSheet(sheet_id, form, user=admin_user)
-        class UserSheetPlugin(SheetPlugin):
-            def active_view(self, df):
-                latest = self.sheet.latest_update_df(df)
-                return latest[latest['Status'] == 'active']
-
-            def default_view(self):
-                return 'latest'
-
-            def views(self, base_views):
-                base_views.update({'active' : self.active_view})
-                return base_views
-        code = (plugin_source_header + \
-                strip_indent(inspect.getsource(UserSheetPlugin)
-                             .replace('UserSheetPlugin',
-                                      'CustomSheetPlugin')))
-        sh1.set_plugin_from_code(code)
+        sh1.set_plugin_from_code(UserSheetPlugin.get_code_str())
 
         wb.add_sheet(sh1) # TODO insure that logic is properly saved
         sh1.add_new_entry({'User_Name' : admin_user,
@@ -4410,7 +4432,7 @@ class TestWorkBook(unittest.TestCase):
                                 (eval_df, 'Outcome', ['FAIL']))
                              })
             def action(self, entry_df, selected_column):
-                logger.debug('plugin.action: entry_df=%s, selected_column=%s',
+                logger.debug('action: entry_df=%s, selected_column=%s',
                              entry_df, selected_column)
                 form, action_label = None, None
                 if selected_column.startswith('Eval'):
@@ -4434,11 +4456,7 @@ class TestWorkBook(unittest.TestCase):
 
         logger.debug('utest: Create dashboard')
         sh_dashboard = DataSheet('Dashboard')
-        code = (plugin_source_header + \
-                strip_indent(inspect.getsource(DashboardEval)
-                             .replace('DashboardEval',
-                                      'CustomSheetPlugin')))
-        sh_dashboard.set_plugin_from_code(code)
+        sh_dashboard.set_plugin_from_code(DashboardEval.get_code_str())
         wb.add_sheet(sh_dashboard)
 
         wb.after_workbook_load()
@@ -4476,8 +4494,8 @@ class TestWorkBook(unittest.TestCase):
         # Add new eval
         logger.debug('utest: Add first evaluation for CE90002')
         pid = 'CE90002'
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval')
         self.assertTrue(action_label.endswith('New'))
         self.assertTrue(action_label.startswith(sh_eval.label))
         form.set_values_from_entry({'Planned' : True,
@@ -4489,8 +4507,8 @@ class TestWorkBook(unittest.TestCase):
 
         sleep(0.01)
         logger.debug('utest: Add entry for participant who already passed eval')
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(sh_eval.label))
         form.set_values_from_entry({'Planned' : True,
@@ -4622,11 +4640,7 @@ class TestWorkBook(unittest.TestCase):
                 return self.status_tracker.action(entry_df, selected_column)
 
         sh_dashboard = DataSheet('Dashboard')
-        code = (plugin_source_header + \
-                strip_indent(inspect.getsource(DashboardStatus)
-                             .replace('DashboardStatus',
-                                      'CustomSheetPlugin')))
-        sh_dashboard.set_plugin_from_code(code)
+        sh_dashboard.set_plugin_from_code(DashboardStatus.get_code_str())
 
         wb.add_sheet(sh_dashboard)
         wb.after_workbook_load()
@@ -4655,7 +4669,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'confirm_drop')
 
         logger.debug('---- Test ignore exclusion from progress note ----')
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
                                                         'Study_Status')
         self.assertTrue(action_label.endswith('Update'), action_label)
         self.assertTrue(action_label.startswith('Participants'), action_label)
@@ -4675,7 +4689,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'confirm_drop')
 
         logger.debug('---- Test accept withdrawal from progress note ----')
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
                                                         'Study_Status')
         self.assertTrue(action_label.endswith('Update'), action_label)
         self.assertTrue(action_label.startswith('Participants'), action_label)
@@ -4875,11 +4889,7 @@ class TestWorkBook(unittest.TestCase):
                 return self.eval_tracker.action(entry_df, selected_column)
 
         sh_dashboard = DataSheet('Dashboard')
-        code = (plugin_source_header + \
-                strip_indent(inspect.getsource(DashboardInterview)
-                             .replace('DashboardInterview',
-                                      'CustomSheetPlugin')))
-        sh_dashboard.set_plugin_from_code(code)
+        sh_dashboard.set_plugin_from_code(DashboardInterview.get_code_str())
         wb.add_sheet(sh_dashboard)
 
         wb.after_workbook_load()
@@ -4896,7 +4906,7 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('----- Assign staff for %s -----', pid)
 
         dashboard_df = wb['Dashboard'].get_df_view()
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
                                                         'Eval_Staff')
         self.assertTrue(action_label.endswith('New'), action_label)
         plan_sheet_label = DEFAULT_INTERVIEW_PLAN_SHEET_LABEL
@@ -4916,7 +4926,7 @@ class TestWorkBook(unittest.TestCase):
                      pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
                                                         'Eval_Plan')
         print('action_label:', action_label)
         self.assertTrue(action_label.endswith('Update'))
@@ -4940,8 +4950,8 @@ class TestWorkBook(unittest.TestCase):
                      pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11,30)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Plan')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Plan_Action' : 'plan',
@@ -4962,8 +4972,8 @@ class TestWorkBook(unittest.TestCase):
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11,35)
         wb['Dashboard'].plugin.date_now = ts
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Plan')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         callback_nb_days = 7
@@ -4995,8 +5005,8 @@ class TestWorkBook(unittest.TestCase):
                      pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,12)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Plan')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Interview_Date' : idate,
@@ -5013,8 +5023,8 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview email sent for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,13)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Plan')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Email_Status' : 'sent',
@@ -5032,8 +5042,8 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview email error for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,14)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Plan')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Email_Status' : 'error',
@@ -5050,8 +5060,8 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview done for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,16)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval')
         self.assertTrue(action_label.endswith('New'))
         self.assertTrue(action_label.startswith('Eval'))
 
@@ -5070,8 +5080,8 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview to redo for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,17)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Eval'))
         form.set_values_from_entry({'Session_Action' : 'do_session',
@@ -5088,8 +5098,8 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('------- Interview cancelled for %s --------' % pid)
         idate = datetime(2021,10,11,10,10)
         ts = datetime(2021,9,10,10,18)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Eval'))
         form.set_values_from_entry({'Session_Action' : 'cancel_session',
@@ -5105,8 +5115,8 @@ class TestWorkBook(unittest.TestCase):
                      pid)
         idate = datetime(2021,10,15,10,10)
         ts = datetime(2021,9,10,10,29)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Plan')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
         form.set_values_from_entry({'Interview_Date' : idate,
@@ -5270,11 +5280,7 @@ class TestWorkBook(unittest.TestCase):
                 return self.poll_tracker.action(entry_df, selected_column)
 
         sh_dashboard = DataSheet('Dashboard')
-        code = (plugin_source_header + \
-                strip_indent(inspect.getsource(DashboardPoll)
-                             .replace('DashboardPoll',
-                                      'CustomSheetPlugin')))
-        sh_dashboard.set_plugin_from_code(code)
+        sh_dashboard.set_plugin_from_code(DashboardPoll.get_code_str())
         wb.add_sheet(sh_dashboard)
 
         wb.after_workbook_load()
@@ -5287,8 +5293,8 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue((dashboard_df['Poll'] == 'poll_to_send').all())
 
         logger.debug('--- Pid %s: Plan email ----', pid)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Poll')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Poll')
         self.assertTrue(action_label.endswith('New'))
         self.assertTrue(action_label.startswith('Email'))
         form.set_values_from_entry({'Email_Action' : 'plan',
@@ -5301,8 +5307,8 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_pending')
 
         logger.debug('--- Pid %s: Cancel email ----', pid)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Poll')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Poll')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Email'))
         form.set_values_from_entry({'Email_Action' : 'cancel',
@@ -5312,8 +5318,8 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_to_send')
 
         logger.debug('--- Pid %s: Plan email again ----', pid)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Poll')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Poll')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Email'))
         form.set_values_from_entry({'Email_Action' : 'plan',
@@ -5326,8 +5332,8 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_pending')
 
         logger.debug('--- Pid %s: Email error ----', pid)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Poll')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Poll')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Email'))
         form.set_values_from_entry({'Email_Action' : 'plan',
@@ -5341,8 +5347,8 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_email_error')
 
         logger.debug('--- Pid %s: Email sent, not answered ----', pid)
-        form, action_label = sh_dashboard.plugin.action(dashboard_df.loc[[pid]],
-                                                        'Poll')
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Poll')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Email'))
         ts = datetime(2021,9,10,10,29)
@@ -6050,12 +6056,6 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
         self.workbook_cfg_fn = fs.full_path(protect_fn(wb_label) + '.psh')
         return True
 
-def show_critical_message_box(msg):
-    message_box = QtWidgets.QMessageBox()
-    message_box.setIcon(QtWidgets.QMessageBox.Critical)
-    message_box.setText(msg)
-    message_box.exec_()
-
 class WorkBookWidget(QtWidgets.QWidget, ui.workbook_ui.Ui_Form):
     def __init__(self, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
@@ -6625,7 +6625,7 @@ class PiccelApp(QtWidgets.QApplication):
             #self.current_section_widget.show()
 
             # End of def set_section_ui
-
+            
         set_section_ui(form.current_section_name, form.current_section)
         _form_ui.title_label.setText(form.tr['title'])
 
@@ -6784,7 +6784,10 @@ class PiccelApp(QtWidgets.QApplication):
             def f_cell_action(idx):
                 row_df = model.entry_df(idx)
                 column = row_df.columns[idx.column()-(row_df.index.name is not None)]
-                action_result, action_label = sh.plugin.action(row_df, column)
+                action_ouput = sh.action(row_df, column)
+                if action_ouput is None:
+                    return
+                action_result, action_label = action_ouput
                 if isinstance(action_result, Form):
                     self.make_form_tab(action_label, model, _data_sheet_ui,
                                        self._workbook_ui.tabWidget,
@@ -6860,11 +6863,11 @@ class PiccelApp(QtWidgets.QApplication):
             def make_form_editor(tab_widget, sheet, check_on_close):
                 tab_closer = EditorTabCloser(tab_widget, check_on_close)
                 try:
-                    sheet_io = FormEditorSheetIO(sheet,
-                                                 close_callback=tab_closer)
+                    editor_widget = FormSheetEditor(sheet,
+                                                    close_callback=tab_closer,
+                                                    parent=tab_widget)
                 except FormEditionNotAvailable:
                     return
-                editor_widget = FormEditor(sheet_io, parent=tab_widget)
                 tab_label = '%s | Form edit' % sh_name
                 tab_idx = tab_widget.addTab(editor_widget, tab_label)
                 tab_closer.set_editor_tab(editor_widget)
@@ -6886,9 +6889,11 @@ class PiccelApp(QtWidgets.QApplication):
 
             if self.logic.workbook.user_role < UserRole.ADMIN:
                 _data_sheet_ui.button_edit_plugin.hide()
-            if self.logic.workbook.user_role < UserRole.ADMIN or \
+            if self.logic.workbook.user_role < UserRole.MANAGER or \
                sh.form_master is None:
                 _data_sheet_ui.button_edit_form.hide()
+            if self.logic.workbook.user_role < UserRole.ADMIN or \
+               sh.form_master is None:
                 _data_sheet_ui.button_delete_entry.hide()
 
             for form_id, form in sh.live_forms.items():

@@ -1,5 +1,11 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+def show_critical_message_box(msg):
+    message_box = QtWidgets.QMessageBox()
+    message_box.setIcon(QtWidgets.QMessageBox.Critical)
+    message_box.setText(msg)
+    message_box.exec_()
+
 class ListSelectDialog(QtWidgets.QDialog):
     def __init__(self, choices, title=None, parent=None):
         super(QtWidgets.QDialog, self).__init__(parent)

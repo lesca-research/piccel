@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 
-from piccel.plugin_tools import conditional_set
+import piccel.plugin_tools as ptools
 from piccel.sheet_plugin import SheetPlugin
 
 class CustomSheetPlugin(SheetPlugin):

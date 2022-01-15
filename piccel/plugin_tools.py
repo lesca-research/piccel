@@ -2,7 +2,7 @@ import pandas as pd
 import logging
 from datetime import datetime, timedelta, time
 from .sheet_plugin import SheetPlugin
-from .core import df_filter_from_dict
+from .core import df_filter_from_dict, if_none
 
 logger = logging.getLogger('piccel')
 
@@ -35,6 +35,7 @@ class LescaDashboard(SheetPlugin):
         else:
             self.df = (pd.DataFrame(columns=['Participant_ID'])
                        .set_index('Participant_ID'))
+        logger.debug('LescaDashboard.reset_data - df: %s', self.df.shape)
         self.sheet.invalidate_cached_views()
 
     def sheets_to_watch(self):
@@ -347,14 +348,19 @@ class ParticipantStatusTracker:
                              ['withdrawal', 'exclusion'])})
 
 class PollTracker:
-    def __init__(self, poll_sheet_label, poll_answer_column, workbook,
-                 default_status, dashboard_column=None):
+    def __init__(self, poll_sheet_label, workbook, default_status,
+                 dashboard_column=None, poll_answer_column=None,
+                 answered_tag='answered'):
         self.poll_sheet_label = poll_sheet_label
         self.workbook = workbook
         self.dashboard_column = if_none(dashboard_column, poll_sheet_label)
         self.poll_answer_column = poll_answer_column
+        self.answered_tag = answered_tag
+        self.default_status = default_status
 
     def check(self):
+        # TODO insure that poll_answer_column is in fields
+        #      (field can have any type)
         return check_sheet(self.workbook, self.interview_label,
                            expected_fields={'Participant_ID' : 'text'})
 
@@ -366,8 +372,12 @@ class PollTracker:
         dashboard_df.loc[pids, self.dashboard_column] = self.default_status
         if poll_df.shape[0] > 0:
             answered_df = poll_df[~pd.isna(poll_df[self.poll_answer_column])]
-            dashboard_df.loc[answered_df.index, self.dashboard_column] = \
-                answered_df[self.poll_answer_column]
+            if self.poll_answer_column is not None:
+                dashboard_df.loc[answered_df.index, self.dashboard_column] = \
+                    answered_df[self.poll_answer_column]
+            else:
+                dashboard_df.loc[answered_df.index, self.dashboard_column] = \
+                    self.answered_tag
 
 
 def ___track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
@@ -532,9 +542,6 @@ class Choice:
     def __init__(self, vtype, choices):
         self.vtype = vtype
         self.choices = choices
-
-def if_none(value, default_value):
-    return value if value is not None else default_value
 
 def check_sheet(workbook, sheet_label, expected_fields=None):
 

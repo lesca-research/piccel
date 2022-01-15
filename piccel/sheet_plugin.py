@@ -1,11 +1,35 @@
 import pandas as pd
 import numpy as np
+import inspect
 
 from piccel.core import LazyFunc, SheetNotFound
 
 import logging
 logger = logging.getLogger('piccel')
 
+
+
+plugin_source_header = \
+"""
+import pandas as pd
+import numpy as np
+from piccel.sheet_plugin import SheetPlugin
+from piccel.plugin_tools import map_set, And, Or
+from piccel.plugin_tools import (LescaDashboard, InterviewTracker,
+                                 form_update_or_new,
+                                 DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
+                                 PollTracker, EmailledPollTracker,
+                                 ParticipantStatusTracker)
+from piccel.logging import logger
+"""
+
+def strip_indent(code):
+    indent_size = 0
+    while code[indent_size] == ' ':
+        indent_size += 1
+    if indent_size == 0:
+        return code
+    return '\n'.join(line[indent_size:] for line in code.split('\n'))
 
 class SheetPlugin:
 
@@ -149,3 +173,21 @@ class SheetPlugin:
         Default Hint objects available are in piccel.Hints
         """
         return None
+
+    @classmethod
+    def get_code_str(cls):
+        return (plugin_source_header + \
+                strip_indent(inspect.getsource(cls)
+                             .replace(cls.__name__, 'CustomSheetPlugin')))
+
+class UserSheetPlugin(SheetPlugin):
+    def active_view(self, df):
+        latest = self.sheet.latest_update_df(df)
+        return latest[latest['Status'] == 'active']
+
+    def default_view(self):
+        return 'latest'
+
+    def views(self, base_views):
+        base_views.update({'active' : self.active_view})
+        return base_views

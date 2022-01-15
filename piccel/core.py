@@ -4,6 +4,9 @@ import pandas as pd
 
 from .logging import logger
 
+def if_none(value, default_value):
+    return value if value is not None else default_value
+
 def nexts(l):
     """
     ASSUME: l has unique elements
