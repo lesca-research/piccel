@@ -2,7 +2,7 @@ import pandas as pd
 import logging
 from datetime import datetime, timedelta, time
 from .sheet_plugin import SheetPlugin
-from .core import df_filter_from_dict, if_none
+from .core import df_filter_from_dict, if_none, SheetNotFound
 
 logger = logging.getLogger('piccel')
 
@@ -283,6 +283,13 @@ def form_update_or_new(sheet_label, workbook, primary_keys, entry_dict=None):
     return form, action_label
 
 
+def dashboard_error_if_none(df, dashboard_df, column, error):
+    if df is None:
+        dashboard_df.loc[:, column] = pd.NA
+        dashboard_df.iloc[0, dashboard_df.columns.get_loc(column)] = error
+        return True
+    return False
+
 class ParticipantStatusTracker:
     def __init__(self, participant_sheet_label, progress_note_sheet_label,
                  workbook, dashboard_column_status='Study_Status'):
@@ -296,7 +303,6 @@ class ParticipantStatusTracker:
             for error in errors:
                 logger.error(error)
             raise DataConsistencyError(errors)
-
 
     def check(self):
         expected_fields = {
@@ -328,14 +334,25 @@ class ParticipantStatusTracker:
         participant_status_sheet -> confirm_drop
         Else: Display current participant status in participant_status_sheet
         """
+        # dashboard_df.loc[:, self.dashboard_column_status] = 'error'
 
         pnotes_df = latest_sheet_data(self.workbook,
                                       self.progress_note_sheet_label,
                                       index_column='Participant_ID')
 
+        if dashboard_error_if_none(pnotes_df, dashboard_df,
+                                   self.dashboard_column_status,
+                                   'error %s' % self.progress_note_sheet_label):
+            return
+
         status_df = latest_sheet_data(self.workbook,
                                       self.participant_sheet_label,
                                       index_column='Participant_ID')
+        if dashboard_error_if_none(status_df, dashboard_df,
+                                   self.dashboard_column_status,
+                                   'error %s' % self.participant_sheet_label):
+            return
+
 
         pnotes_fresher, status_fresher = df_keep_higher(pnotes_df, status_df)
 
@@ -369,6 +386,11 @@ class PollTracker:
                                     index_column='Participant_ID',
                                     filter_dict=poll_filter,
                                     indexes=pids)
+        if dashboard_error_if_none(poll_df, dashboard_df,
+                                   self.dashboard_column,
+                                   'error %s' % self.poll_sheet_label):
+            return
+
         dashboard_df.loc[pids, self.dashboard_column] = self.default_status
         if poll_df.shape[0] > 0:
             answered_df = poll_df[~pd.isna(poll_df[self.poll_answer_column])]
@@ -511,7 +533,8 @@ def latest_sheet_data(workbook, sheet_label, filter_dict=None,
     df = workbook[sheet_label].get_df_view('latest')
 
     if df is None:
-        from IPython import embed; embed()
+        return None
+
     if filter_dict is not None:
         df = df_filter_from_dict(df, filter_dict)
     if index_column is not None:
@@ -574,7 +597,8 @@ def check_sheet(workbook, sheet_label, expected_fields=None):
             if form_fields[field_name] != expected_type:
                 errors.append('Type of field %s in form of sheet %s is %s '\
                               'but must be %s' % \
-                              (sheet_label, field_name, expected_type))
+                              (field_name, sheet_label, form_fields[field_name],
+                               expected_type))
         else:
             if form_fields[field_name] != expected_type.vtype:
                 errors.append('Type of field %s in form of sheet %s is %s '\
@@ -658,9 +682,15 @@ class EmailledPollTracker:
                                      filter_dict={'Email_Template' :
                                                   self.poll_label},
                                      index_column='Participant_ID', indexes=pids)
+        if dashboard_error_if_none(email_df, dashboard_df, column_status,
+                                   'error %s' % self.email_sheet_label):
+            return
 
         poll_df = latest_sheet_data(self.workbook, self.poll_label,
                                     index_column='Participant_ID', indexes=pids)
+        if dashboard_error_if_none(poll_df, dashboard_df, column_status,
+                                   'error %s' % self.poll_label):
+            return
 
         dashboard_df.loc[pids, column_status] = default_status
 
@@ -860,12 +890,19 @@ class InterviewTracker:
         interview_df = latest_sheet_data(self.workbook, self.interview_label,
                                          index_column='Participant_ID',
                                          indexes=pids)
+        if dashboard_error_if_none(interview_df, dashboard_df, column_status,
+                                   'error %s' % self.interview_label):
+            return
 
         plan_df = latest_sheet_data(self.workbook, self.plan_sheet_label,
                                     filter_dict={'Interview_Type' :
                                                  self.interview_label},
                                     index_column='Participant_ID',
                                     indexes=pids)
+        if dashboard_error_if_none(plan_df, dashboard_df, column_status,
+                                   'error %s' % self.plan_sheet_label):
+            return
+
         if 1:
             print('dashboard_df beginning of track_interview')
             print(dashboard_df)
@@ -1060,7 +1097,7 @@ class InterviewTracker:
             print(dashboard_df)
 
 
-def track_interview_old(dashboard_df, interview_label, workbook, pids,
+def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
                         plan_sheet_label=DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
                         date_now=None, show_staff_column=True):
     """

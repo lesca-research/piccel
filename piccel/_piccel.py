@@ -24,6 +24,7 @@ from pathlib import PurePath
 import importlib
 from importlib import import_module, reload as reload_module
 import inspect
+from traceback import format_stack, format_exc
 import csv
 
 from . import sheet_plugin_template
@@ -35,7 +36,8 @@ from .plugin_tools import (LescaDashboard, InterviewTracker,
                            PollTracker, EmailledPollTracker,
                            ParticipantStatusTracker)
 from .form import (Form, FormSection, FormItem, FormSheetEditor,
-                   NotEditableError, DateTimeCollector, LanguageError)
+                   NotEditableError, DateTimeCollector, LanguageError,
+                   FormWidget, FormFileEditor)
 
 import unittest
 import tempfile
@@ -62,7 +64,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from . import ui
 from .ui.widgets import show_critical_message_box
 
-from .core import LazyFunc, df_index_from_value
+from .core import LazyFunc, df_index_from_value, if_none, refresh_text
 
 from appdirs import user_data_dir
 
@@ -661,7 +663,7 @@ class NonUniqueIndexFromValues(Exception) : pass
 
 from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
                    FormEditionNotOpen, FormEditionLockedType,
-                   FormEditionOrphanError, FormEditionNotAvailable)
+                   FormEditionOrphanError, FormEditionNotAvailable, SheetNotFound)
 
 class DataSheetSetupDialog(QtWidgets.QDialog):
     def __init__(self, sheet, parent=None):
@@ -777,6 +779,12 @@ class DataSheet:
                            else inspect.getsource(sheet_plugin_template))
         self.set_plugin_from_code(plugin_code_str)
 
+        
+    def set_user(self, user):
+        self.user = user
+        self.live_forms.clear()
+        self.load_live_forms()
+
     def empty_df_from_master(self):
         df = None
         if self.form_master is not None:
@@ -860,6 +868,8 @@ class DataSheet:
 
     def set_plugin_from_code(self, code_str, first_attempt=True):
         """ Code is not saved. See save_plugin_code """
+        logger.debug('Sheet %s, set plugin from code', self.label)
+
         self.plugin_code_str = code_str
         try:
             if code_str is None:
@@ -872,6 +882,12 @@ class DataSheet:
             views = self.plugin.views(self.base_views())
             logger.debug('Sheet %s, load plugin views: %s',
                          self.label, ','.join(views))
+
+            if self.form_master is not None:
+                first_section = self.form_master[self.form_master
+                                                 .first_section()]
+                last_key = next(iter(first_section.items[-1].keys))
+                self.plugin.hint(last_key, '')
 
             self.set_views(views)
             default_view = self.plugin.default_view()
@@ -886,16 +902,29 @@ class DataSheet:
                 self.set_plugin_from_code(UserSheetPlugin.get_code_str(),
                                           first_attempt=False)
             logger.error('Could not load plugin of sheet %s '\
-                         'from code:\n%s\nException:\n%s', self.label,
-                         code_str, repr(e))
-            self.plugin_valid = False
-            self.plugin = None
+                         'from code:\n%s\nException:\n%s\nStack:\n%s',
+                         self.label, code_str, repr(e),
+                         format_exc())
+            self.indicate_invalid_plugin(repr(e))
             return
 
+        # There has been an exception during first call but second call
+        # call worked so save fixes
         if not first_attempt and self.filesystem is not None:
             self.save_plugin_code(overwrite=True)
 
+        self.indicate_valid_plugin()
+
+    def indicate_valid_plugin(self):
         self.plugin_valid = True
+        self.plugin_error_reporting = None
+        self.notifier.notify('plugin_valid')
+
+    def indicate_invalid_plugin(self, reporting=None):
+        self.plugin_valid = False
+        self.plugin = None
+        self.plugin_error_reporting = reporting
+        self.notifier.notify('plugin_invalid', reporting)
 
     def plugin_is_valid(self):
         return self.plugin_valid
@@ -1404,7 +1433,15 @@ class DataSheet:
 
     @if_plugin_valid
     def after_workbook_load(self):
-        self.plugin.after_workbook_load()
+        try:
+            self.plugin.after_workbook_load()
+        except Exception as e:
+            logger.error('Error in after_workbook_load for sheet %s. '\
+                         'Plugin code:\n%s\nException:\n%s\nStack:\n%s',
+                         self.label, self.plugin_code_str, repr(e),
+                         format_exc())
+            logger.error('Disable plugin of sheet %s', self.label)
+            self.indicate_invalid_plugin(reporting=repr(e))
 
     @if_plugin_valid
     def view_validity(self, view_label=None):
@@ -1660,6 +1697,14 @@ class DataSheet:
     @if_plugin_valid
     def action(self, entry_df, selected_column):
         return self.plugin.action(entry_df, selected_column)
+
+    @if_plugin_valid
+    def hint(self, column, value):
+        return self.plugin.hint(column, value)
+
+    @if_plugin_valid
+    def show_index_in_ui(self):
+        return self.plugin.show_index_in_ui()
 
     def form_update_entry(self, entry_idx, form_id=None):
         """
@@ -2642,15 +2687,27 @@ def foo():
 
         sheet = DataSheet('sh_plugin_bad',
                           Form.from_dict(self.form_def_ts_data),
+                          df=self.data_df_ts_data,
                           filesystem=filesystem)
         sheet.plugin_code_str = "baaad"
         sheet.save_logic()
+        sheet.save_live_data()
 
         sheet2 = DataSheet.from_files('me', filesystem)
         self.assertFalse(sheet2.plugin_is_valid())
         self.assertIsNone(sheet2.action(None, None))
         self.assertIsNone(sheet2.plugin)
         self.assertIsNone(sheet2.get_df_view())
+
+        # Fix plugin:
+        sheet2.set_plugin_from_code(SheetPlugin.get_code_str())
+        self.assertTrue(sheet2.plugin_is_valid())
+
+        form, action_label = sheet2.action(sheet2.df.loc[[(0,0,0)]],
+                                           'Participant_ID')
+        self.assertEqual(action_label, '%s | update' % sheet2.label)
+        self.assertTrue(sheet2.plugin is not None)
+        self.assertTrue(sheet2.get_df_view() is not None)
 
     def test_plugin_views(self):
         # TODO: test against all versions of plugin API (may change overtime)
@@ -3437,7 +3494,7 @@ class WorkBook:
     ENCRYPTION_FN = 'encryption.json'
 
     def __init__(self, label, data_folder, filesystem, password_vault=None,
-                 linked_book_fns=None, salt_hex=None):
+                 linked_book_fns=None, salt_hex=None, color_hex_str=None):
         """
         Create workbook from basic configuration: where is the main data folder
         and passwords for every role.
@@ -3460,6 +3517,9 @@ class WorkBook:
         wb.save_configuration_file('../my_wb.psh')
         """
         self.label = label
+        # TODO: validate color format
+        self.color_hex_str = color_hex_str
+
         self.filesystem = filesystem
         if self.filesystem.encrypter is not None:
             logger.warning('Init of workbook %s: Encrypter already associated '\
@@ -3514,13 +3574,14 @@ class WorkBook:
     @staticmethod
     def create(label, filesystem, access_password, admin_password,
                manager_password, editor_password, admin_user,
-               data_folder=None, salt_hex=None):
+               data_folder=None, salt_hex=None, color_hex_str=None):
         data_folder = (data_folder if data_folder is not None
                        else protect_fn(label) + '_files')
         cfg_bfn = protect_fn(label) + '.psh'
         if filesystem.exists(data_folder) or filesystem.exists(cfg_bfn):
             raise WorkBookExistsError()
-        wb = WorkBook(label, data_folder, filesystem, salt_hex=salt_hex)
+        wb = WorkBook(label, data_folder, filesystem, salt_hex=salt_hex,
+                      color_hex_str=color_hex_str)
         wb.set_access_password(access_password)
         assert(admin_password is not None)
         wb.set_password(UserRole.ADMIN, admin_password)
@@ -3547,10 +3608,11 @@ class WorkBook:
                  FormItem(keys={'Role':None},
                           choices=roles_tr,
                           allow_empty=False,
-                          init_values={'Role':'EDITOR'},
+                          init_values={'Role' : 'EDITOR'},
                           supported_languages={'French', 'English'},
                           default_language='French'),
-                 FormItem(keys={'Status':None},
+                 FormItem(keys={'Status':{'French' : 'Statut',
+                                          'English' : 'Status'}},
                           choices={'active' : {'French' : 'Actif.ve',
                                                'English' : 'Active'},
                                    'non_active' : {'French' : 'Non actif.ve',
@@ -3568,8 +3630,9 @@ class WorkBook:
                  FormItem(keys={'Timestamp_Submission':None},
                           vtype='datetime', generator='timestamp_creation',
                           supported_languages={'French', 'English'},
-                          default_language='French')]
-        sections = {'section1' : \
+                          default_language='French',
+                          access_level=UserRole.ADMIN)]
+        sections = {'section_main' : \
                     FormSection(items, default_language='French',
                                 supported_languages={'French', 'English'})}
         form = Form(sections, default_language='French',
@@ -3613,6 +3676,7 @@ class WorkBook:
     def save_configuration_file(self, workbook_fn):
         cfg = {
             'workbook_label' : self.label,
+            'color_hex_str' : self.color_hex_str,
             'data_folder' : self.data_folder,
             'linked_sheets' : self.linked_book_fns
             }
@@ -3628,6 +3692,7 @@ class WorkBook:
         {
         'workbook_label' : 'Workbook Title',
         'data_folder' : 'path_to_wb_folder',
+        'color_hex_str' : 'color_for_main_titles',
         'linked_sheets' : {
             'path_to_other_workbook' : 'sheet_label_regexp'
             }
@@ -3655,7 +3720,8 @@ class WorkBook:
 
         return WorkBook(cfg['workbook_label'], cfg['data_folder'],
                         filesystem, password_vault=password_vault,
-                        linked_book_fns=cfg['linked_sheets'])
+                        linked_book_fns=cfg['linked_sheets'],
+                        color_hex_str=cfg.get('color_hex_str', None))
 
     def set_password(self, role, pwd, old_pwd=''):
         assert(role in UserRole)
@@ -3929,14 +3995,14 @@ class WorkBook:
                            %(self.label, ', '.join(unknown_sheets)))
 
         last_sheets = []
-        for sheet_label in sheet_folders:
+        for sheet_label in sorted(sheet_folders):
            if sheet_label not in sheet_list:
                 if not sheet_label.startswith('__'):
                     sheet_list.append(sheet_label)
                 else:
                     last_sheets.append(sheet_label)
 
-        for sheet_label in last_sheets:
+        for sheet_label in sorted(last_sheets):
             sheet_list.append(sheet_label)
 
         logger.debug('WorkBook %s: sheets to load from files: %s',
@@ -3994,6 +4060,10 @@ class WorkBook:
         sheet.change_filesystem(self.filesystem.change_dir(sheet_folder),
                                 save_logic=True, save_live_data=True)
         sheet.set_workbook(self)
+
+        if self.user is not None:
+            sheet.set_user(self.user)
+
         self.sheets[sheet.label] = sheet
 
     @check_role(UserRole.EDITOR)
@@ -5535,7 +5605,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.sort_idx = []
         if self.view_df is not None:
             view_validity_df = self.sheet.view_validity()
-            if self.sheet.plugin.show_index_in_ui():
+            if self.sheet.show_index_in_ui():
                 self.columns, self.view = df_to_list_of_arrays(self.view_df
                                                                .reset_index())
                 _, self.view_validity = df_to_list_of_arrays(view_validity_df
@@ -5574,7 +5644,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
                     value_str = str(value) if not pd.isna(value) else ''
                     return value_str
 
-                hint = self.sheet.plugin.hint(self.columns[icol], value)
+                hint = self.sheet.hint(self.columns[icol], value)
                 if hint is not None:
                     if role == QtCore.Qt.ForegroundRole:
                         return hint.foreground_qcolor
@@ -5667,201 +5737,7 @@ def dict_lazy_setdefault(d, k, make_value):
     else:
         return d[k]
 
-class text_connect:
-    def __init__(self, text_get, text_set, ignore_empty=False):
-        self.text_get = text_get
-        self.text_set = text_set
-        self.ignore_empty = ignore_empty
-    def __call__(self):
-        txt = self.text_get()
-        if txt != '' or not self.ignore_empty:
-            self.text_set(txt)
-
-class get_set_connect:
-    def __init__(self, f_get, f_set):
-        self.get = f_get
-        self.set = f_set
-    def __call__(self):
-        self.set(self.get())
-
-def make_item_input_widget(item_widget, item, key, key_label,
-                           item_is_single=False):
-    input_widget = QtWidgets.QWidget(item_widget)
-    init_value = item.values_str[key]
-    _input_ui = None
-    if (item.vtype == 'text' and item.choices is None and \
-        item.nb_lines<=1) or item.vtype == 'int' or \
-        item.vtype == 'number' or item.vtype == 'int64':
-        # Single line input field
-        _input_ui = ui.item_single_line_ui.Ui_Form()
-        _input_ui.setupUi(input_widget)
-        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
-        refresh_label_key()
-        if not item_is_single:
-            item.notifier.add_watcher('language_changed', refresh_label_key)
-        #_input_ui.label_key.setText(item.tr[key])
-        _input_ui.value_field.setText(init_value)
-        callback = text_connect(_input_ui.value_field.text, item.set_input_str)
-        _input_ui.value_field.editingFinished.connect(callback)
-    elif item.vtype == 'text' and item.choices is None and \
-         item.nb_lines>1:
-        # Multi line input field
-        _input_ui = ui.item_text_multi_line_ui.Ui_Form()
-        _input_ui.setupUi(input_widget)
-        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
-        refresh_label_key()
-        item.notifier.add_watcher('language_changed', refresh_label_key)
-        _input_ui.value_field.setPlainText(init_value)
-        callback = text_connect(_input_ui.value_field.toPlainText,
-                                item.set_input_str)
-        _input_ui.value_field.editingFinished.connect(callback)
-    elif (item.vtype == 'boolean' and not item_is_single):
-        _input_ui = ui.item_boolean_checkboxes_ui.Ui_Form()
-        _input_ui.setupUi(input_widget)
-        refresh_label_key = refresh_text(item, key, _input_ui.check_box)
-        refresh_label_key()
-        item.notifier.add_watcher('language_changed', refresh_label_key)
-        _input_ui.check_box.toggled.connect(lambda b: item.set_input_str('%s'%b))
-        if init_value != '':
-            _input_ui.check_box.setChecked(item.get_value())
-    elif (item.vtype == 'text' and item.choices is not None) or\
-         (item.vtype == 'boolean' and item_is_single):
-        # Radio buttons
-        _input_ui = ui.item_choice_radio_ui.Ui_Form()
-        _input_ui.setupUi(input_widget)
-        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
-        refresh_label_key()
-        if not item_is_single:
-            item.notifier.add_watcher('language_changed', refresh_label_key)
-
-        radio_group = QtWidgets.QButtonGroup(input_widget)
-        for idx, choice in enumerate(item.choices.keys()):
-            frame = _input_ui.radio_frame
-            radio_button = QtWidgets.QRadioButton(frame)
-            refresh_radio_text = refresh_text(item, choice, radio_button)
-            refresh_radio_text()
-            item.notifier.add_watcher('language_changed', refresh_radio_text)
-            radio_button.setObjectName("radio_button_"+choice)
-            _input_ui.radio_layout.addWidget(radio_button, idx)
-            radio_group.addButton(radio_button, idx)
-            class ChoiceProcess:
-                def __init__(self, item, choice_button):
-                    self.item = item
-                    self.choice_button = choice_button
-                def __call__(self, state):
-                    if state:
-                        self.item.set_input_str(self.choice_button.text())
-            radio_button.toggled.connect(ChoiceProcess(item, radio_button))
-            # if item.vtype == 'boolean':
-            #     from IPython import embed; embed()
-            if item.is_valid() and item.value_to_str() == choice:
-                radio_group.button(idx).setChecked(True)
-        if item.allow_other_choice:
-            radio_group.addButton(_input_ui.radio_button_other, idx+1)
-
-            def toggle_other_field(flag):
-                # flag = _input_ui.radio_button_other.ischecked()
-                _input_ui.other_field.setEnabled(flag)
-            _input_ui.radio_button_other.toggled.connect(toggle_other_field)
-
-            callback = text_connect(_input_ui.other_field.text, item.set_input_str)
-            _input_ui.other_field.editingFinished.connect(callback)
-        else:
-            _input_ui.radio_button_other_frame.hide()
-
-    elif item.vtype == 'date' or item.vtype == 'datetime':
-        # Date/Time input
-        _input_ui = ui.item_datetime_ui.Ui_Form()
-        _input_ui.setupUi(input_widget)
-        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
-        refresh_label_key()
-        item.notifier.add_watcher('language_changed', refresh_label_key)
-        date_str, date_fmt, hour, mins = item.split_qdatetime_str(key)
-
-        if date_str is not None:
-            qdate = QtCore.QDate.fromString(date_str, date_fmt)
-        else:
-            qdate = QtCore.QDate()
-        logger.debug2("Init date field with %s -> qdate=%s", date_str, qdate)
-        date_collector = DateTimeCollector(item.set_input_str, qdate, hour, mins)
-
-        _input_ui.datetime_field.setDate(qdate)
-        _input_ui.datetime_field.dateChanged.connect(date_collector.set_date)
-        if hour is not None:
-            _input_ui.hour_field.setValue(hour)
-        else:
-            _input_ui.hour_field.clear()
-        callback = get_set_connect(_input_ui.hour_field.value,
-                                   date_collector.set_hours)
-        _input_ui.hour_field.editingFinished.connect(callback)
-
-        if mins is not None:
-            _input_ui.minute_field.setValue(mins)
-        else:
-            _input_ui.minute_field.clear()
-        callback = get_set_connect(_input_ui.minute_field.value,
-                                   date_collector.set_minutes)
-        _input_ui.minute_field.editingFinished.connect(callback)
-
-        if item.vtype == 'date':
-            _input_ui.frame_hour.hide()
-    else:
-        logger.error('Cannot make UI for item %s (vtype: %s)', item, item.vtype)
-
-    if _input_ui is not None and item_is_single:
-        _input_ui.label_key.hide()
-
-    return input_widget
-
-class refresh_text:
-    def __init__(self, item, item_tr_label, ui_label,
-                 hide_on_empty=True):
-        self.item = item
-        self.item_tr_label = item_tr_label
-        self.ui_label = ui_label
-        self.hide_on_empty = hide_on_empty
-    def __call__(self):
-        text = self.item.tr[self.item_tr_label]
-        self.ui_label.setText(text)
-        if self.hide_on_empty and (text is None or len(text)==0):
-            self.ui_label.hide()
-        else:
-            self.ui_label.show()
-
-def make_item_widget(section_widget, item):
-    item_widget = QtWidgets.QWidget(section_widget)
-    _item_ui = ui.form_item_ui.Ui_Form()
-    _item_ui.setupUi(item_widget)
-
-    refresh_title = refresh_text(item, 'title', _item_ui.title)
-    refresh_title()
-    item.notifier.add_watcher('language_changed', refresh_title)
-
-    refresh_description = refresh_text(item, 'description',
-                                       _item_ui.description,
-                                       hide_on_empty=True)
-    refresh_description()
-    item.notifier.add_watcher('language_changed', refresh_description)
-
-    _item_ui.label_invalid_message.hide()
-    if isinstance(item, FormItem):
-        invalidity_callback = text_connect(item.get_validity_message,
-                                           _item_ui.label_invalid_message.setText)
-        item.notifier.add_watcher('item_invalid', invalidity_callback)
-        item.notifier.add_watcher('item_invalid',
-                                  _item_ui.label_invalid_message.show)
-        item.notifier.add_watcher('item_valid', _item_ui.label_invalid_message.hide)
-        if item.allow_None:
-            _item_ui.required_label.hide()
-        for key, key_label in item.keys.items():
-            input_widget = make_item_input_widget(item_widget, item, key,
-                                                  key_label,
-                                                  item_is_single=len(item.keys)==1)
-            _item_ui.input_layout.addWidget(input_widget)
-            if not item.editable:
-                input_widget.setEnabled(False)
-    return item_widget
-
+from .core import text_connect, get_set_connect
 
 class SheetViewChanger:
 
@@ -5877,16 +5753,11 @@ class SheetViewChanger:
         self.sheet_model.endResetModel()
         self.sheet_model.layoutChanged.emit()
 
-def language_abbrev(language):
-    # https://www.loc.gov/standards/iso639-2/php/code_list.php
-    return {'French' : 'Fre',
-            'English' : 'Eng'}[language]
-
-
 
 #!/usr/bin/python3
 import sys
 from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5.QtCore import Qt
 
 CSS = \
 {
@@ -5921,7 +5792,7 @@ CSS = \
         'color': '#1d90cd',
     }
 }
- 
+
 def dictToCSS(dictionnary):
     stylesheet = ""
     for item in dictionnary:
@@ -5963,6 +5834,22 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
 
         self.form_ui.open_button.clicked.connect(self.on_select_root_dir)
 
+
+        self.colors = ['#eddcd2', '#fff1e6', '#fde2e4', '#fad2e1', '#c5dedd',
+                       '#dbe7e4', '#f0efeb', '#d6e2e9', '#bcd4e6', '#99c1de']
+        self.form_ui.colorComboBox.addItems([''] * len(self.colors))
+        color_cb_model = self.form_ui.colorComboBox.model()
+        for irow, color in enumerate(self.colors):
+            idx = color_cb_model.index(irow, 0)
+            color_cb_model.setData(idx, QtGui.QColor(color),
+                                   Qt.BackgroundColorRole);
+        def f_show_selected_color(combo_idx):
+            (self.form_ui.color_label
+             .setStyleSheet("QLabel { background-color : %s ; }" % \
+                            self.colors[combo_idx]))
+        (self.form_ui.colorComboBox.currentIndexChanged
+         .connect(f_show_selected_color))
+
         self.required_fields = {
             'Access password' : self.form_ui.access_pwd_field,
             'Editor password' : self.form_ui.editor_pwd_field,
@@ -5988,8 +5875,8 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
         dialog = CreateWorkBookDialog(parent=parent)
         result = dialog.exec_()
         if result == QtWidgets.QDialog.Accepted:
-            return (dialog.workbook_cfg_fn, dialog.access_pwd, dialog.admin_name,
-                    dialog.admin_pwd)
+            return (dialog.workbook_cfg_fn, dialog.access_pwd,
+                    dialog.admin_name, dialog.admin_pwd)
         else:
             return None, None, None, None
 
@@ -6040,6 +5927,7 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
         manager_pwd = self.form_ui.manager_pwd_field.text()
         self.admin_pwd = self.form_ui.admin_pwd_field.text()
         self.admin_name = self.form_ui.adminNameLineEdit.text()
+        color = self.colors[self.form_ui.colorComboBox.currentIndex()]
 
         try:
             wb = WorkBook.create(wb_label, fs,
@@ -6047,7 +5935,8 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
                                  admin_password=self.admin_pwd,
                                  manager_password=manager_pwd,
                                  editor_password=editor_pwd,
-                                 admin_user=self.admin_name)
+                                 admin_user=self.admin_name,
+                                 color_hex_str=color)
         except Exception as e:
             msg = 'Error while creating workbook:\n%s' % repr(e)
             show_critical_message_box(msg)
@@ -6154,8 +6043,21 @@ class SheetCreationDialog(QtWidgets.QDialog):
         self.buttonBox.accepted.connect(self.accept)
         self.buttonBox.rejected.connect(self.reject)
 
-        self.layout = QtWidgets.QVBoxLayout()
+        button_icon = QtGui.QIcon(':/icons/file_open_icon')
+        self.input_widget_ui.form_file_open_button.setIcon(button_icon)
 
+        form_file_format = "Piccel form file (*.form)"
+        on_click = partial(self.ask_open_fn, form_file_format,
+                           self.input_widget_ui.form_file_edit)
+        self.input_widget_ui.form_file_open_button.clicked.connect(on_click)
+
+        plugin_file_format = "Piccel sheet plugin file (*.py)"
+        on_click = partial(self.ask_open_fn, plugin_file_format,
+                           self.input_widget_ui.plugin_file_edit)
+        self.input_widget_ui.plugin_file_open_button.setIcon(button_icon)
+        self.input_widget_ui.plugin_file_open_button.clicked.connect(on_click)
+
+        self.layout = QtWidgets.QVBoxLayout()
         self.layout.addWidget(input_widget)
         self.layout.addWidget(self.buttonBox)
         self.setLayout(self.layout)
@@ -6201,6 +6103,12 @@ class SheetCreationDialog(QtWidgets.QDialog):
         label = self.input_widget_ui.sheet_name_edit.text()
         return DataSheet(label, self._get_form(), self._get_plugin_str())
 
+    def ask_open_fn(self, fn_format, dest_line_edit):
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open file',
+                                                   '', fn_format)
+        if fn is not None and fn != '':
+            dest_line_edit.setText(fn)
+
     @staticmethod
     def new_sheet(existing_sheet_labels=None, parent=None):
         dialog = SheetCreationDialog(existing_sheet_labels=existing_sheet_labels,
@@ -6226,16 +6134,487 @@ class SheetCreationDialog(QtWidgets.QDialog):
         if plugin_fn == '':
             plugin_str = None
         elif not op.exists(plugin_fn):
-            raise IOError('Plugin file does not exists: %s' % form_fn)
+            raise IOError('Plugin file does not exists: %s' % plugin_fn)
         else:
             with open(plugin_fn, 'r') as fin:
-                plugin_str = fn.read()
+                plugin_str = fin.read()
+
+class TabSorter:
+    def __init__(self, tab_widget):
+
+        self.sheet_widgets = {}
+        self.live_form_widgets = {}
+        self.form_editors_widgets = {}
+        self.plugin_editors_widgets = {}
+
+        self.tab_widget = tab_widget
+
+        self.editor_icon = QtGui.QIcon(':/icons/editor_icon')
+        self.unsaved_editor_icon = QtGui.QIcon(':/icons/editor_unsaved_icon')
+        self.warning_icon = QtGui.QIcon(':/icons/alert_icon')
+        self.null_icon = QtGui.QIcon()
+
+        self.clear()
+
+    def clear(self):
+
+        for widgets in (self.sheet_widgets, self.live_form_widgets,
+                        self.form_editors_widgets, self.plugin_editors_widgets):
+            widgets.clear()
+
+        for tab_idx in reversed(range(self.tab_widget.count())):
+            w = self.tab_widget.widget(tab_idx)
+            self.tab_widget.removeTab(tab_idx)
+            del w
+
+    def to_first(self):
+        self.tab_widget.setCurrentIndex(0)
+
+    def to_sheet(self, sheet_label):
+        tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet_label])
+        self.tab_widget.setCurrentIndex(tab_idx)
+
+    def show_tab_sheet(self, sheet, user_role):
+        if sheet.label in self.sheet_widgets:
+            logger.debug('Tab already exists for sheet %s', sheet.label)
+            tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet.label])
+        else:
+            logger.debug('Create tab for sheet %s', sheet.label)
+            sheet_widget = SheetWidget(sheet, user_role, self,
+                                       parent=self.tab_widget)
+            self.sheet_widgets[sheet.label] = sheet_widget
+            tab_idx = self.tab_widget.addTab(sheet_widget, sheet.label)
+        if not sheet.plugin_is_valid():
+            self.show_tab_sheet_warning(sheet.label, sheet.plugin_error_reporting)
+        self.tab_widget.setCurrentIndex(tab_idx)
+
+    def close_tab_sheet(self, sheet_label):
+        """
+        Remove tab showing given form and set focus on previous tab or
+        on next one if removed sheet was the first.
+        """
+        tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet.label])
+        self.tab_widget.removeTab(tab_idx)
+        self.sheet_widgets.pop(sheet.label)
+
+    def show_tab_sheet_warning(self, sheet_name, reporting=None):
+        tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet_name])
+        self.tab_widget.setTabIcon(tab_idx, self.warning_icon)
+        if reporting is not None:
+            show_critical_message_box('Error in %s:\n%s' % \
+                                      (sheet_name, reporting))
+
+    def hide_tab_sheet_warning(self, sheet_name):
+        tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet_name])
+        self.tab_widget.setTabIcon(tab_idx, self.null_icon)
+
+    def add_tab_live_form(self, live_form, tab_name, origin_sheet_label):
+        """
+        Add tab before given origin_sheet or after if origin_sheet is first
+        """
+        # TODO: add parameter insert after, to be used when form originates
+        #       from Dashboard
+        form_widget = FormWidget(live_form, origin_sheet_label,
+                                 close_callback=self.close_tab_live_form,
+                                 parent=self.tab_widget)
+        sheet_widget = self.sheet_widgets[origin_sheet_label]
+        origin_tab_idx = self.tab_widget.indexOf(sheet_widget)
+
+        tab_idx = self.tab_widget.insertTab(origin_tab_idx, form_widget, tab_name)
+        tab_icon = QtGui.QIcon(':/icons/form_input_icon')
+        self.tab_widget.setTabIcon(tab_idx, tab_icon)
+        self.tab_widget.setCurrentIndex(tab_idx)
+
+        self.live_form_widgets[id(form_widget)] = form_widget
+
+    def close_tab_live_form(self, form_widget):
+        """ Remove tab showing given form and set focus on origin sheet """
+        self.live_form_widgets.pop(id(form_widget))
+        self.tab_widget.removeTab(self.tab_widget.indexOf(form_widget))
+        sheet_widget = self.sheet_widgets[form_widget.origin_sheet_label]
+        self.tab_widget.setCurrentIndex(self.tab_widget.indexOf(sheet_widget))
+
+    def show_tab_form_editor(self, sheet):
+        if sheet.label in self.form_editors_widgets:
+            editor_widget = self.form_editors_widgets[sheet.label]
+            tab_idx = self.tab_widget.indexOf(editor_widget)
+            self.tab_widget.setCurrentIndex(tab_idx)
+        else:
+            on_close = partial(self.close_tab_form_editor, sheet.label)
+            try:
+                editor_widget = FormSheetEditor(sheet, on_close,
+                                                parent=self.tab_widget)
+            except FormEditionNotAvailable:
+                return
+            tab_label = '%s | Form edit' % sheet.label
+            self.form_editors_widgets[sheet.label] = editor_widget
+            tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet.label])+1
+            self.tab_widget.insertTab(tab_idx, editor_widget, self.editor_icon,
+                                      tab_label)
+            self.tab_widget.setCurrentIndex(tab_idx)
+
+    def _close_tab_editor(self, sheet_name, widgets):
+        editor_widget = widgets.pop(sheet_name)
+        self.tab_widget.removeTab(self.tab_widget.indexOf(editor_widget))
+
+        sheet_widget = self.sheet_widgets[sheet_name]
+        self.tab_widget.setCurrentIndex(self.tab_widget.indexOf(sheet_widget))
+
+    def close_tab_form_editor(self, sheet_name):
+        self._close_tab_editor(sheet_name, self.form_editors_widgets)
+
+    def show_tab_plugin_editor(self, sheet):
+        if sheet.label in self.plugin_editors_widgets:
+            editor_widget = self.plugin_editors_widgets[sheet.label]
+            tab_idx = self.tab_widget.indexOf(editor_widget)
+            self.tab_widget.setCurrentIndex(tab_idx)
+        else:
+            def _set_plugin(text):
+                try:
+                    sheet.set_plugin_from_code(text)
+                    sheet.save_plugin_code(overwrite=True)
+                    sheet.reload_all_data()
+                    # TODO: live forms are not loaded and not displayed in UI
+                except Exception as e:
+                    msg = 'Error while setting plugin:\n%s' % repr(e)
+                    show_critical_message_box(msg)
+                    return False
+                return True
+
+            _on_close = partial(self.close_tab_plugin_editor, sheet.label)
+            text_editor = TextEditorWidget(sheet.get_plugin_code(),
+                                           submit=_set_plugin,
+                                           close_callback=_on_close)
+            self.plugin_editors_widgets[sheet.label] = text_editor
+
+            tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet.label])+1
+            self.tab_widget.insertTab(tab_idx, text_editor,
+                                      self.editor_icon, sheet.label)
+            self.tab_widget.setCurrentIndex(tab_idx)
+
+    def close_tab_plugin_editor(self, sheet_name):
+        self._close_tab_editor(sheet_name, self.plugin_editors_widgets)
+
+class TextEditorWidget(QtWidgets.QWidget, ui.text_editor_ui.Ui_Form):
+    def __init__(self, text, submit, close_callback=None, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.setupUi(self)
+
+        self.close_callback = if_none(close_callback, lambda : None)
+        self.submit = submit
+        self.textBrowser.setText(text)
+
+        # __editor = Qsci.QsciScintilla()
+        # __editor.setText(text)
+        # __editor.setUtf8(True)
+        # lexer = {
+        #     'json' : lambda : Qsci.QsciLexerJSON(),
+        #     'python' : lambda : Qsci.QsciLexerPython(),
+        # }[language]()
+        # __editor.setLexer(lexer)
+        # vlayout = QtWidgets.QVBoxLayout(_text_editor_ui.frame_editor)
+        # vlayout.setObjectName("vlayout_editor_frame")
+        # vlayout.addWidget(__editor)
+
+        self.button_cancel.clicked.connect(self.on_cancel)
+        self.button_apply.clicked.connect(self.on_apply)
+        self.button_ok.clicked.connect(self.on_ok)
+
+    def on_apply(self):
+        self.submit(self.textBrowser.toPlainText())
+
+    def on_cancel(self):
+        # TODO process pending changes
+        self.close_callback()
+
+    def on_ok(self):
+        if self.submit(self.textBrowser.toPlainText()):
+            self.close_callback()
+
+
+class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
+    def __init__(self, sheet, user_role, tab_sorter, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.setupUi(self)
+
+        self.tab_sorter = tab_sorter
+
+        self.cell_value_frame.hide()
+
+        if user_role < UserRole.MANAGER:
+            self.button_edit_entry.hide()
+
+        view_icon = (QtGui.QIcon(':/icons/view_icon')
+                     .pixmap(QtCore.QSize(24,24)))
+        self.label_view.setPixmap(view_icon)
+
+        # button_icon = QtGui.QIcon(':/icons/refresh_icon')
+        # self.button_refresh.setIcon(button_icon)
+        # self.button_refresh.clicked.connect(sh.refresh_data)
+
+        model = DataSheetModel(sheet)
+        sheet.notifier.add_watcher('appended_entry', model.update_after_append)
+        sheet.notifier.add_watcher('entry_set', model.update_after_set)
+        sheet.notifier.add_watcher('pre_delete_entry',
+                                model.update_before_delete)
+        sheet.notifier.add_watcher('deleted_entry', model.update_after_delete)
+        sheet.notifier.add_watcher('clear_data', model.update_after_clear)
+
+        self.tableView.setModel(model)
+        hHeader = self.tableView.horizontalHeader()
+        hHeader.setMaximumSectionSize(400) # TODO expose param
+        #hHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+
+        vHeader = self.tableView.verticalHeader()
+        #vHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+
+        def resize_table_view(*args, **kwargs):
+            self.tableView.resizeRowsToContents()
+            self.tableView.resizeColumnsToContents()
+
+        for notification in ['appended_entry', 'entry_set', 'pre_delete_entry',
+                             'deleted_entry', 'clear_data']:
+            sheet.notifier.add_watcher(notification, resize_table_view)
+
+        resize_table_view()
+
+        def f_cell_action(idx):
+            row_df = model.entry_df(idx)
+            column = row_df.columns[idx.column()-(row_df.index.name is not None)]
+            action_ouput = sheet.action(row_df, column)
+            if action_ouput is None:
+                return
+            action_result, action_label = action_ouput
+            if isinstance(action_result, Form):
+                self.tab_sorter.add_tab_live_form(action_result, action_label,
+                                                  sheet.label)
+                # self.make_form_tab(action_label, model, self,
+                #                    self._workbook_ui.tabWidget,
+                #                    tab_idx=max(1,self.tab_indexes[sh_name]-1),
+                #                    form=action_result)
+            else:
+                print('action result:', action_result)
+
+        self.tableView.doubleClicked.connect(f_cell_action)
+
+        def show_details(idx):
+            self.cell_value.setText(model.data(idx))
+            self.cell_value_frame.show()
+
+        self.tableView.clicked.connect(show_details)
+
+        def f_edit_entry():
+            idx = self.tableView.currentIndex()
+            entry_id = model.entry_id(idx)
+            logger.debug('set_entry: idx.row=%s, entry_id=%s',
+                         idx.row(), entry_id)
+            self.tab_sorter.add_tab_live_form(sheet.form_set_entry(entry_id),
+                                              sheet.label,
+                                              origin_sheet_label=sheet.label)
+
+        def f_delete_entry():
+            idx = self.tableView.currentIndex()
+            entry_id = model.entry_id(idx)
+            logger.debug('delete_entry: idx.row=%s, entry_id=%s',
+                         idx.row(), entry_id)
+            sheet.delete_entry(entry_id)
+
+        if sheet.form_master is not None: #TODO: and user is admin
+            self.button_edit_entry.clicked.connect(f_edit_entry)
+        else:
+            self.button_edit_entry.hide()
+
+        def f_new_entry():
+            self.tab_sorter.add_tab_live_form(sheet.form_new_entry(),
+                                              tab_name=sheet.label,
+                                              origin_sheet_label=sheet.label)
+
+        if sheet.form_master is not None and \
+           sheet.has_write_access: #TODO: and user is admin
+            self.button_new_entry.clicked.connect(f_new_entry)
+            (self.button_delete_entry
+             .clicked.connect(f_delete_entry))
+            # new_entry_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("N"),
+            #                                      sheet_widget)
+            # new_entry_shortcut.activated.connect(f_new_entry)
+        else:
+            self.button_new_entry.hide()
+
+        self.comboBox_view.addItems(list(sheet.views.keys()))
+        self.comboBox_view.setCurrentText(sheet.default_view)
+        f = SheetViewChanger(self.comboBox_view, model)
+        self.comboBox_view.currentIndexChanged.connect(f)
+
+        # if sh_name.startswith('__'):
+        #     tab_idx = (self._workbook_ui.tabWidget
+        #                .addTab(sheet_widget, sh_name))
+        # else:
+        #     #TODO: better handle sheet order. This only works if
+        #     # there is only one sheet starting with "__"
+        #     insert_idx = max(1, self._workbook_ui.tabWidget.count()-1)
+        #     tab_idx = (self._workbook_ui.tabWidget
+        #                .insertTab(insert_idx, sheet_widget, sh_name))
+        # self.tab_indexes[sh_name] = tab_idx
+
+
+        sheet.notifier.add_watcher('plugin_invalid',
+                                   partial(self.tab_sorter.show_tab_sheet_warning,
+                                           sheet.label))
+
+        sheet.notifier.add_watcher('plugin_valid',
+                                   partial(self.tab_sorter.hide_tab_sheet_warning,
+                                           sheet.label))
+
+        f_form_editor = partial(self.tab_sorter.show_tab_form_editor, sheet)
+        self.button_edit_form.clicked.connect(f_form_editor)
+
+        f_plugin_editor = partial(self.tab_sorter.show_tab_plugin_editor,
+                                  sheet)
+        self.button_edit_plugin.clicked.connect(f_plugin_editor)
+
+        if user_role < UserRole.ADMIN:
+            self.button_edit_plugin.hide()
+        if user_role < UserRole.MANAGER or sheet.form_master is None:
+            self.button_edit_form.hide()
+        if user_role < UserRole.ADMIN or sheet.form_master is None:
+            self.button_delete_entry.hide()
+
+        # for form_id, form in sheet.live_forms.items():
+        #     logger.info('Load pending form "%s" (%s)',
+        #                 form.tr['title'], form_id)
+        #     self.tab_sorter.add_tab_live_form(form, sheet.label,
+        #                                       origin_sheet_label=sheet.label)
+
+            # self.make_form_tab(sh_name, model, self,
+            #                    self._workbook_ui.tabWidget,
+            #                    self.tab_indexes[sh_name]+1, form)
+
+class SelectorWindow(QtWidgets.QMainWindow,
+                     ui.main_single_centered_widget_ui.Ui_MainWindow):
+    def __init__(self, recent_files, open_file, on_create, parent=None):
+        super(QtWidgets.QMainWindow, self).__init__(parent)
+        self.setupUi(self)
+
+        self.open_file = open_file
+        self.on_create = on_create
+
+        self.selector = QtWidgets.QWidget()
+        _selector_ui = ui.selector_widget_ui.Ui_Form()
+        _selector_ui.setupUi(self.selector)
+        self.vlayout_main.addWidget(self.selector)
+
+        button_icon = QtGui.QIcon(':/icons/file_open_icon')
+        _selector_ui.button_open_file.setIcon(button_icon)
+        _selector_ui.button_open_file.clicked.connect(self.select_file)
+
+        button_icon = QtGui.QIcon(':/icons/file_create_icon')
+        _selector_ui.button_create.setIcon(button_icon)
+        _selector_ui.button_create.clicked.connect(self.on_create)
+
+        self.recent_files = recent_files
+
+        def load_workbook_info(wb_fn):
+            try:
+                with open(wb_fn, 'r') as fin:
+                    wb_cfg = json.load(fin)
+            except Exception as e:
+                msg = ('Error loading workbook file %s:\n %s' % \
+                       (wb_fn, repr(e)))
+                logger.error(msg)
+                show_critical_message_box(msg)
+            return wb_cfg['workbook_label'], wb_cfg.get('color_hex_str', None)
+
+        self.wbs_info = []
+        for wb_cfg_fn in sorted(self.recent_files):
+            wb_title, wb_color = load_workbook_info(wb_cfg_fn)
+            self.wbs_info.append((wb_title, wb_color, wb_cfg_fn))
+
+        self.wbs_info.sort(key=lambda e: e[0])
+        for wb_title, wb_color, wb_cfg_fn in self.wbs_info:
+            if wb_title is not None:
+                list_item = QtWidgets.QListWidgetItem(wb_title)
+                if wb_color is not None:
+                    list_item.setBackground(QtGui.QColor(wb_color))
+                _selector_ui.recent_list.addItem(list_item)
+
+        def _cfg_fn():
+            return self.wbs_info[_selector_ui.recent_list.currentRow()][2]
+        on_double_click = lambda i: self.open_file(_cfg_fn())
+        _selector_ui.recent_list.itemDoubleClicked.connect(on_double_click)
+
+        on_click = lambda i: self.statusBar().showMessage(_cfg_fn())
+        _selector_ui.recent_list.itemClicked.connect(on_click)
+
+        self.statusBar().showMessage("Ready")
+
+    def select_file(self):
+        fn_format = "Piccel file (*.psh *.form)"
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open file',
+                                                      '', fn_format)
+        self.open_file(fn)
+
+class AccessWindow(QtWidgets.QMainWindow,
+                   ui.main_single_centered_widget_ui.Ui_MainWindow):
+    def __init__(self, access_process, access_cancel, parent=None):
+        super(QtWidgets.QMainWindow, self).__init__(parent)
+        self.setupUi(self)
+
+        self.wb_label, self.wb_color, self.access_pwd = None, None, None
+
+        self.access_process = access_process
+        self.access_cancel = access_cancel
+
+        self.access_widget = QtWidgets.QWidget()
+        self._access_ui = ui.access_widget_ui.Ui_Form()
+        self._access_ui.setupUi(self.access_widget)
+        self._access_ui.button_cancel.clicked.connect(self.access_cancel)
+        self._access_ui.button_ok.clicked.connect(self.access_process)
+        access_ok_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Return"),
+                                                 self.access_widget)
+        access_ok_shortcut.activated.connect(self.access_process)
+        access_cancel_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Escape"),
+                                                     self.access_widget)
+        access_cancel_shortcut.activated.connect(self.access_cancel)
+
+        self.vlayout_main.addWidget(self.access_widget)
+
+    def on_ok(self):
+        pwd_text = self._access_ui.access_password_field.text()
+        self.access_password = pwd_text if pwd_text != '' else None
+
+    def disable_buttons(self):
+        self._access_ui.button_ok.setEnabled(False)
+        self._access_ui.button_cancel.setEnabled(False)
+
+    def access_password(self):
+        pwd_text = self._access_ui.access_password_field.text()
+        return pwd_text if pwd_text != '' else None
+
+    def set_wb_info(self, wb_label, wb_color, access_pwd):
+        self.wb_label = wb_label
+        self.wb_color = wb_color
+        self.access_pwd = access_pwd
+
+    def show(self):
+        super(QtWidgets.QMainWindow, self).show()
+
+        self._access_ui.button_ok.setEnabled(True)
+        self._access_ui.button_cancel.setEnabled(True)
+
+        self._access_ui.workbook_label.setText(self.wb_label)
+        if self.wb_color is not None:
+            ss = "QFrame { background-color : %s; }" % self.wb_color
+            self._access_ui.title_frame.setStyleSheet(ss)
+
+        self._access_ui.access_password_field.clear()
+        if self.access_pwd is not None:
+            self._access_ui.access_password_field.setText(self.access_pwd)
 
 class PiccelApp(QtWidgets.QApplication):
 
     USER_FILE = 'piccel.json'
 
-    def __init__(self, argv, cfg_fn=None, user=None, access_pwd=None,
+    def __init__(self, argv, fn=None, user=None, access_pwd=None,
                  role_pwd=None, cfg_fns=None, refresh_rate_ms=0):
         super(PiccelApp, self).__init__(argv)
 
@@ -6250,76 +6629,73 @@ class PiccelApp(QtWidgets.QApplication):
         self.setWindowIcon(QtGui.QIcon(':/icons/main_icon'))
         self.logic = PiccelLogic(UserData(PiccelApp.USER_FILE))
 
-        self.selector_screen = QtWidgets.QWidget()
-        _selector_ui = ui.selector_ui.Ui_Form()
-        _selector_ui.setupUi(self.selector_screen)
-
-        button_icon = QtGui.QIcon(':/icons/top_selection_open_icon')
-        _selector_ui.button_open_file.setIcon(button_icon)
-        _selector_ui.button_open_file.clicked.connect(self.select_file)
-
-        button_icon = QtGui.QIcon(':/icons/top_selection_create_icon')
-        _selector_ui.button_create.setIcon(button_icon)
-        _selector_ui.button_create.clicked.connect(self.on_create)
-
         if cfg_fns is None:
-            self.recent_files = self.logic.get_recent_files()
+            recent_files = self.logic.get_recent_files()
         else:
             logger.debug('Available cfg fn: %s', cfg_fns)
-            self.recent_files = cfg_fns
+            recent_files = cfg_fns
 
-        def load_workbook_title(wb_fn):
-            try:
-                with open(wb_fn, 'r') as fin:
-                    return json.load(fin)['workbook_label']
-            except Exception as e:
-                logger.warning('Error loading workbook file %s:\n %s',
-                               wb_fn, repr(e))
-            return wb_fn
-        # TODO add file path as tooltip
-        workbook_titles, workbook_fns = [], []
-        for fn in self.recent_files:
-            wb_title = load_workbook_title(fn)
-            if wb_title is not None:
-                workbook_titles.append(wb_title)
-                workbook_fns.append(fn)
-        _selector_ui.recent_list.addItems(workbook_titles)
+        self.selector_screen = SelectorWindow(recent_files,
+                                              self.open_configuration_file,
+                                              self.on_create)
+        # self.selector_screen = QtWidgets.QWidget()
+        # _selector_ui = ui.selector_ui.Ui_Form()
+        # _selector_ui.setupUi(self.selector_screen)
 
-        def _cfg_fn():
-            return workbook_fns[_selector_ui.recent_list.currentRow()]
-        on_double_click = lambda i: self.open_configuration_file(_cfg_fn())
-        _selector_ui.recent_list.itemDoubleClicked.connect(on_double_click)
-
-        self.access_screen = QtWidgets.QWidget()
-        self._access_ui = ui.access_ui.Ui_Form()
-        self._access_ui.setupUi(self.access_screen)
-        self._access_ui.button_cancel.clicked.connect(self.access_cancel) #TODO
-        self._access_ui.button_ok.clicked.connect(self.access_process) #TODO
-        access_ok_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Return"),
-                                           self.access_screen)
-        access_ok_shortcut.activated.connect(self.access_process)
-        access_cancel_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Escape"),
-                                                     self.access_screen)
-        access_cancel_shortcut.activated.connect(self.access_cancel)
+        self.access_screen = AccessWindow(self.access_process,
+                                          self.access_cancel)
 
         self.login_screen = QtWidgets.QWidget()
         self._login_ui = ui.login_ui.Ui_Form()
         self._login_ui.setupUi(self.login_screen)
-        self._login_ui.user_list.currentTextChanged.connect(self.login_preload_user)
+        (self._login_ui.user_list.currentTextChanged
+         .connect(self.login_preload_user))
         self._login_ui.button_cancel.clicked.connect(self.login_cancel)
         self._login_ui.button_ok.clicked.connect(self.login_process)
         login_ok_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Return"),
-                                           self.login_screen)
+                                                self.login_screen)
         login_ok_shortcut.activated.connect(self.login_process)
         login_cancel_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Escape"),
-                                              self.login_screen)
+                                                    self.login_screen)
         login_cancel_shortcut.activated.connect(self.login_cancel)
 
-        #self.workbook_screen = QtWidgets.QWidget()
         self.workbook_screen = WorkBookWindow()
         self._workbook_ui = self.workbook_screen.workbook_ui
-        # self._workbook_ui = ui.workbook_ui.Ui_Form()
-        # self._workbook_ui.setupUi(self.workbook_screen)
+        menu_icon = QtGui.QIcon(':/icons/workbook_tab_menu_icon')
+        self._workbook_ui.button_menu.setIcon(menu_icon)
+
+        def _make_menu():
+            menu = QtWidgets.QMenu(self._workbook_ui.tabWidget)
+            actions = []
+
+            for sheet_label in self.logic.workbook.sheets:
+                go_to_action = QtWidgets.QAction(sheet_label,
+                                                 self._workbook_ui.tabWidget)
+                go_to_action.triggered.connect(partial(self.tab_sorter.to_sheet,
+                                                       sheet_label))
+                actions.append(go_to_action)
+
+            if self.logic.workbook.user_role >= UserRole.MANAGER:
+                separator = QtWidgets.QAction('', self._workbook_ui.tabWidget)
+                separator.setSeparator(True)
+                actions.append(separator)
+
+                add_sheet_action = QtWidgets.QAction('Add sheet',
+                                                     self._workbook_ui.tabWidget)
+                add_sheet_action.triggered.connect(self.on_add_sheet)
+                actions.append(add_sheet_action)
+
+            for action in actions:
+                menu.addAction(action)
+
+            menu.exec_(QtGui.QCursor.pos(), actions[-1])
+
+        self._workbook_ui.button_menu.clicked.connect(_make_menu)
+
+        self._workbook_ui.button_close.setIcon(QtGui.QIcon(':/icons/close_icon'))
+        self._workbook_ui.button_close.clicked.connect(self.close_workbook)
+
+        self.tab_sorter = TabSorter(self._workbook_ui.tabWidget)
 
         self.current_widget = self.selector_screen
 
@@ -6335,17 +6711,32 @@ class PiccelApp(QtWidgets.QApplication):
         self.access_pwd = access_pwd
         self.tab_indexes = {}
 
-        if cfg_fn is not None:
-            self.open_configuration_file(cfg_fn)
-            if self.logic.workbook is not None and self.access_pwd is not None:
-                self.access_process()
-                if self.default_user is not None and self.role_pwd is not None:
-                    self.login_process()
+        self.open_file(fn)
+        if self.logic.workbook is not None and \
+           self.access_pwd is not None:
+            self.access_process()
+            if self.default_user is not None and \
+               self.role_pwd is not None:
+                self.login_process()
+
+    def on_add_sheet(self):
+        existing_sheet_labels = list(self.logic.workbook.sheets.keys())
+
+        new_sheet = (SheetCreationDialog
+                     .new_sheet(existing_sheet_labels=existing_sheet_labels,
+                                parent=self._workbook_ui.tabWidget))
+        if new_sheet is not None:
+            edited_sheet = DataSheetSetupDialog.edit_sheet(new_sheet)
+            if edited_sheet is not None:
+                self.logic.workbook.add_sheet(edited_sheet)
+                self.tab_sorter.show_tab_sheet(edited_sheet,
+                                               self.logic.workbook.user_role)
 
     def on_create(self):
         cfg_fn, self.access_pwd, self.default_user, self.role_pwd = \
             CreateWorkBookDialog.create(self)
         if cfg_fn is not None:
+            self.selector_screen.hide()
             self.open_configuration_file(cfg_fn)
             if self.logic.workbook is not None:
                 self.access_process()
@@ -6353,13 +6744,15 @@ class PiccelApp(QtWidgets.QApplication):
             else:
                 logger.error('Workbook not properly loaded')
 
-    def select_file(self):
-        cfg_fn = QtWidgets.QFileDialog.getOpenFileName(self.selector_screen,
-                                                       'Open file',
-                                                       '', "Piccel files (*%s)" % \
-                                                       PiccelLogic.CFG_FILE_EXT)
-        logger.debug('getOpenFileName returned: %s', cfg_fn)
-        self.open_configuration_file(cfg_fn[0])
+    def open_file(self, fn):
+        if fn is not None:
+            if fn.endswith('.psh'):
+                self.open_configuration_file(fn)
+            elif fn.endswith('.form'):
+                form_editor = FormFileEditor(fn)
+                form_editor.show()
+            else:
+                show_critical_message_box('Cannot open %s' % fn)
 
     def open_configuration_file(self, cfg_fn):
         if cfg_fn is None or cfg_fn == '':
@@ -6375,13 +6768,11 @@ class PiccelApp(QtWidgets.QApplication):
             message_box.exec_()
         else:
             if not self.logic.workbook.has_write_access:
-                message_box = QtWidgets.QMessageBox()
-                message_box.setIcon(QtWidgets.QMessageBox.Critical)
-                message_box.setText('Cannot write to %s. This could be an '\
-                                    'unauthorized access in the cloud storage '\
-                                    'client (ex Dropbox).' % \
-                                    self.logic.workbook.filesystem.root_folder)
-                message_box.exec_()
+                msg = 'Cannot write to %s. This could be an ' \
+                    'unauthorized access in the cloud storage ' \
+                    'client (ex Dropbox).' % \
+                    self.logic.workbook.filesystem.root_folder
+                show_critical_message_box(msg)
             self.refresh()
 
     def show_screen(self, screen):
@@ -6416,14 +6807,16 @@ class PiccelApp(QtWidgets.QApplication):
 
     def access_process(self):
         logger.debug('Start access process')
-        self._access_ui.button_ok.setEnabled(False)
-        self._access_ui.button_cancel.setEnabled(False)
+        self.access_screen.disable_buttons()
+        self.access_password = self.access_screen.access_password()
 
         error_message = None
         try:
-            self.logic.decrypt(self._access_ui.access_password_field.text())
+            self.logic.decrypt(self.access_password)
         except InvalidPassword:
             error_message = 'Invalid access password'
+        except Exception as e:
+            error_message = 'Error: %s' % repr(e)
 
         if error_message is not None:
             message_box = QtWidgets.QErrorMessage()
@@ -6480,15 +6873,20 @@ class PiccelApp(QtWidgets.QApplication):
         self.refresh()
 
     def show_access_screen(self):
-        self._access_ui.button_ok.setEnabled(True)
-        self._access_ui.button_cancel.setEnabled(True)
-
-        self._access_ui.workbook_label.setText(self.logic.workbook.label)
-        self._access_ui.access_password_field.clear()
-        if self.access_pwd is not None:
-            self._access_ui.access_password_field.setText(self.access_pwd)
+        self.access_screen.set_wb_info(self.logic.workbook.label,
+                                       self.logic.workbook.color_hex_str,
+                                       self.access_pwd)
         self.access_screen.show()
         return self.access_screen
+    #     self._access_ui.button_ok.setEnabled(True)
+    #     self._access_ui.button_cancel.setEnabled(True)
+
+    #     self._access_ui.workbook_label.setText(self.logic.workbook.label)
+    #     self._access_ui.access_password_field.clear()
+    #     if self.access_pwd is not None:
+    #         self._access_ui.access_password_field.setText(self.access_pwd)
+    #     self.access_screen.show()
+    #     return self.access_screen
 
     def show_login_screen(self):
         # TODO: Add option to save debug log output in workbook
@@ -6516,457 +6914,39 @@ class PiccelApp(QtWidgets.QApplication):
         _text_editor_ui = ui.text_editor_ui.Ui_Form()
         _text_editor_ui.setupUi(text_editor_widget)
 
-        _text_editor_ui.textBrowser.setText(text)
-
-        # __editor = Qsci.QsciScintilla()
-        # __editor.setText(text)
-        # __editor.setUtf8(True)
-        # lexer = {
-        #     'json' : lambda : Qsci.QsciLexerJSON(),
-        #     'python' : lambda : Qsci.QsciLexerPython(),
-        # }[language]()
-        # __editor.setLexer(lexer)
-        # vlayout = QtWidgets.QVBoxLayout(_text_editor_ui.frame_editor)
-        # vlayout.setObjectName("vlayout_editor_frame")
-        # vlayout.addWidget(__editor)
-
-        tab_idx = tab_widget.addTab(text_editor_widget, tab_label)
-        icon_style = QtWidgets.QStyle.SP_FileDialogListView
-        tab_icon = QtGui.QIcon(':/icons/editor_icon')
-        tab_widget.setTabIcon(tab_idx, tab_icon)
-        tab_widget.setCurrentIndex(tab_idx)
-
-        def _apply():
-            submit(_text_editor_ui.textBrowser.toPlainText())
-
-        def cancel():
-            tab_widget.removeTab(tab_idx)
-
-        def ok():
-            _apply()
-            tab_widget.removeTab(tab_idx)
-
-        _text_editor_ui.button_cancel.clicked.connect(cancel)
-
-        _text_editor_ui.button_apply.clicked.connect(_apply)
-        _text_editor_ui.button_ok.clicked.connect(ok)
-
-    def make_form_tab(self, tab_name, sheet_model, sheet_ui, tab_widget,
-                      tab_idx, form):
-        form_widget = QtWidgets.QWidget()
-        _form_ui = ui.form_ui.Ui_Form()
-        _form_ui.setupUi(form_widget)
-
-        # Enable form buttons based on form notifications
-        watchers = {
-            'previous_section_available':
-            [lambda: _form_ui.button_previous.setEnabled(True)],
-            'previous_section_not_available' :
-            [lambda: _form_ui.button_previous.setEnabled(False)],
-            'next_section_available' :
-            [lambda: _form_ui.button_next.setEnabled(True)],
-            'next_section_not_available' :
-            [lambda: _form_ui.button_next.setEnabled(False)],
-            'ready_to_submit' :
-            [lambda: _form_ui.button_submit.setEnabled(True)],
-            'not_ready_to_submit' :
-            [lambda: _form_ui.button_submit.setEnabled(False)],
-        }
-        logger.info('Make UI of live form "%s"', form.tr['title'])
-        form.notifier.add_watchers(watchers)
-        form.validate()
-
-        #self.section_widget_stack = QtWidgets.QStackedWidget()
-        section_widgets = {}
-        # self.current_section_widget = None
-        self.item_labels = []
-        def make_section_widget(section_label, section):
-            section_widget = QtWidgets.QWidget(form_widget)
-            section_widget.setObjectName("section_widget_" + section_label + \
-                                         section.tr.language)
-            _section_ui = ui.section_ui.Ui_Form()
-            _section_ui.setupUi(section_widget)
-            refresh_title = refresh_text(section, 'title',
-                                         _section_ui.title_label,
-                                         hide_on_empty=True)
-            refresh_title()
-            section.notifier.add_watcher('language_changed', refresh_title)
-
-            for item in section.items:
-                if self.logic.workbook.user_role >= item.access_level:
-                    item_widget = make_item_widget(section_widget, item)
-                    _section_ui.verticalLayout.addWidget(item_widget)
-            return section_widget
-
-        def set_section_ui(section_label, section):
-            #if self.current_section_widget is not None:
-            #    self.current_section_widget.hide()
-            logger.debug('Set section widget for %s, language: %s',
-                         section_label, section.tr.language)
-            if section_label not in section_widgets:
-                section_widget = make_section_widget(section_label, section)
-                section_widgets[section_label] = section_widget
-                _form_ui.scroll_section_content_layout.addWidget(section_widget,
-                                                                 0,
-                                                                 QtCore.Qt.AlignTop)
-            else:
-                section_widget = section_widgets[section_label]
-            logger.debug('set_section_ui, show widget of %s, ',
-                         section_label)
-            section_widget.show()
-
-            #_form_ui.sections_stack.setCurrentWidget(section_widget)
-            #_form_ui.scroll_section.setWidget(section_widget)
-            #
-            # self.stacked.addWidget(self.lineedit)
-            # except RuntimeError:
-            #     from IPython import embed; embed()
-            #self.current_section_widget = section_widget
-            #self.current_section_widget.show()
-
-            # End of def set_section_ui
-            
-        set_section_ui(form.current_section_name, form.current_section)
-        _form_ui.title_label.setText(form.tr['title'])
-
-        tab_idx = tab_widget.insertTab(tab_idx, form_widget, tab_name)
-        tab_icon = QtGui.QIcon(':/icons/form_input_icon')
-        tab_widget.setTabIcon(tab_idx, tab_icon)
-        tab_widget.setCurrentIndex(tab_idx)
-
-
-        radio_language_group = QtWidgets.QButtonGroup(form_widget)
-        frame = _form_ui.frame_language_select
-        for idx,language in enumerate(sorted(form.tr.supported_languages)):
-            radio_button = QtWidgets.QRadioButton(language_abbrev(language),
-                                                  frame)
-            radio_button.setObjectName("radio_button_" + language)
-            _form_ui.language_select_layout.addWidget(radio_button, idx)
-            radio_language_group.addButton(radio_button, idx)
-            logger.debug('Set radio button for switching language '\
-                         'of section %s to %s', form.current_section_name,
-                         language)
-            class ChoiceProcess:
-                def __init__(self, language):
-                    self.language = language
-                def __call__(self, state):
-                    if state:
-                        logger.debug('Process language toggle to %s, '\
-                                     'current section: %s ', self.language,
-                                     form.current_section_name)
-                        form.set_language(self.language)
-            radio_button.toggled.connect(ChoiceProcess(language))
-            if language == form.current_section.tr.language:
-                radio_language_group.button(idx).setChecked(True)
-        # Set button actions
-        def prev_sec():
-            # gen_section = lambda : set_section_ui(form.previous_section(),
-            #                                       form.to_previous_section())
-            # _form_ui.section_widget = \
-            #     dict_lazy_setdefault(sections, form.previous_section(),
-            #                          gen_section)
-            logger.debug('Prev_sec, hide widget of %s, ',
-                         form.current_section_name)
-            section_widgets[form.current_section_name].hide()
-            set_section_ui(form.previous_section(),
-                           form.to_previous_section())
-            _form_ui.scroll_section.ensureVisible(0, 0)
-        _form_ui.button_previous.clicked.connect(prev_sec)
-
-        def next_sec():
-            # def gen_section():
-            #     gen_section = lambda : set_section_ui(form.next_section(),
-            #                                       form.to_next_section())
-            # _form_ui.section_widget = \
-            #     dict_lazy_setdefault(sections, form.next_section(),
-            #                          gen_section)
-            logger.debug('Next_sec, hide widget of %s',
-                         form.current_section_name)
-            section_widgets[form.current_section_name].hide()
-            set_section_ui(form.next_section(),
-                           form.to_next_section())
-            _form_ui.scroll_section.ensureVisible(0, 0)
-
-        _form_ui.button_next.clicked.connect(next_sec)
-
-        def cancel():
-            # TODO: adapt question if form is empty
-            # TODO: see if init value are actually saved or only user-input?
-            message_box = QtWidgets.QMessageBox()
-            message_box.setIcon(QtWidgets.QMessageBox.Question)
-            message_box.setText('The current form entries can be saved '\
-                                'for later or discarded. Click on "Cancel" '\
-                                'to resume filling the form.')
-            message_box.addButton(QtWidgets.QMessageBox.Discard)
-            message_box.addButton(QtWidgets.QMessageBox.Cancel)
-            message_box.addButton(QtWidgets.QMessageBox.Save)
-            result = message_box.exec_()
-            if result == QtWidgets.QMessageBox.Discard:
-                form.cancel()
-            if result != QtWidgets.QMessageBox.Cancel:
-                tab_widget.removeTab(tab_idx)
-
-        _form_ui.button_cancel.clicked.connect(cancel)
-        cancel_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Escape"),
-                                              form_widget)
-        cancel_shortcut.activated.connect(cancel)
-
-        def submit():
-            #.setEnabled(False)
-            _form_ui.button_submit.setFocus()
-            try:
-                form.submit()
-            except Exception as e:
-                msg = 'Error occured while submitting:\n%s' % repr(e)
-                logger.error(msg)
-                from IPython import embed; embed()
-                message_box = QtWidgets.QMessageBox()
-                message_box.setIcon(QtWidgets.QMessageBox.Critical)
-                message_box.setText(msg)
-                message_box.exec_()
-            tab_widget.removeTab(tab_idx)
-
-        _form_ui.button_submit.clicked.connect(submit)
-
 
     def close_workbook(self):
         self.logic.close_workbook()
         self.refresh()
 
     def show_workbook_screen(self):
-        self._workbook_ui.tabWidget.clear()
-        self.tab_indexes.clear()
+        self.tab_sorter.clear()
 
-        def make_tab_sheet(sh_name, sh):
-            sheet_widget = QtWidgets.QWidget()
-            _data_sheet_ui = ui.data_sheet_ui.Ui_Form()
-            _data_sheet_ui.setupUi(sheet_widget)
-            _data_sheet_ui.cell_value_frame.hide()
-            if self.logic.workbook.user_role < UserRole.MANAGER:
-                _data_sheet_ui.button_edit_entry.hide()
-
-            button_icon = QtGui.QIcon(':/icons/close_icon')
-            _data_sheet_ui.button_close.setIcon(button_icon)
-            _data_sheet_ui.button_close.clicked.connect(self.close_workbook)
-
-            view_icon = QtGui.QIcon(':/icons/view_icon').pixmap(QtCore.QSize(24,24))
-            _data_sheet_ui.label_view.setPixmap(view_icon)
-
-            # button_icon = QtGui.QIcon(':/icons/refresh_icon')
-            # _data_sheet_ui.button_refresh.setIcon(button_icon)
-            # _data_sheet_ui.button_refresh.clicked.connect(sh.refresh_data)
-
-            model = DataSheetModel(sh)
-            sh.notifier.add_watcher('appended_entry', model.update_after_append)
-            sh.notifier.add_watcher('entry_set', model.update_after_set)
-            sh.notifier.add_watcher('pre_delete_entry', model.update_before_delete)
-            sh.notifier.add_watcher('deleted_entry', model.update_after_delete)
-            sh.notifier.add_watcher('clear_data', model.update_after_clear)
-
-            _data_sheet_ui.tableView.setModel(model)
-            hHeader = _data_sheet_ui.tableView.horizontalHeader()
-            hHeader.setMaximumSectionSize(400) # TODO expose param
-            #hHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-
-            vHeader = _data_sheet_ui.tableView.verticalHeader()
-            #vHeader.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-
-            def resize_table_view(*args, **kwargs):
-                _data_sheet_ui.tableView.resizeRowsToContents()
-                _data_sheet_ui.tableView.resizeColumnsToContents()
-
-            for notification in ['appended_entry', 'entry_set', 'pre_delete_entry',
-                                 'deleted_entry', 'clear_data']:
-                sh.notifier.add_watcher(notification, resize_table_view)
-
-            resize_table_view()
-
-            def f_cell_action(idx):
-                row_df = model.entry_df(idx)
-                column = row_df.columns[idx.column()-(row_df.index.name is not None)]
-                action_ouput = sh.action(row_df, column)
-                if action_ouput is None:
-                    return
-                action_result, action_label = action_ouput
-                if isinstance(action_result, Form):
-                    self.make_form_tab(action_label, model, _data_sheet_ui,
-                                       self._workbook_ui.tabWidget,
-                                       tab_idx=max(1,self.tab_indexes[sh_name]-1),
-                                       form=action_result)
-                else:
-                    print('action result:', action_result)
-
-            _data_sheet_ui.tableView.doubleClicked.connect(f_cell_action)
-
-            def show_details(idx):
-                _data_sheet_ui.cell_value.setText(model.data(idx))
-                _data_sheet_ui.cell_value_frame.show()
-
-            _data_sheet_ui.tableView.clicked.connect(show_details)
-
-            def f_edit_entry():
-                idx = _data_sheet_ui.tableView.currentIndex()
-                entry_id = model.entry_id(idx)
-                logger.debug('set_entry: idx.row=%s, entry_id=%s',
-                             idx.row(), entry_id)
-                self.make_form_tab(sh_name, model, _data_sheet_ui,
-                                   self._workbook_ui.tabWidget,
-                                   tab_idx=self.tab_indexes[sh_name]+1,
-                                   form=sh.form_set_entry(entry_id))
-
-            def f_delete_entry():
-                idx = _data_sheet_ui.tableView.currentIndex()
-                entry_id = model.entry_id(idx)
-                logger.debug('delete_entry: idx.row=%s, entry_id=%s',
-                             idx.row(), entry_id)
-                sh.delete_entry(entry_id)
-
-            if sh.form_master is not None: #TODO: and user is admin
-                _data_sheet_ui.button_edit_entry.clicked.connect(f_edit_entry)
-            else:
-                _data_sheet_ui.button_edit_entry.hide()
-
-            f_new_entry = lambda : \
-                self.make_form_tab(sh_name, model, _data_sheet_ui,
-                                   self._workbook_ui.tabWidget,
-                                   tab_idx=self.tab_indexes[sh_name]+1,
-                                   form=sh.form_new_entry())
-
-            if sh.form_master is not None and \
-               self.logic.workbook.has_write_access: #TODO: and user is admin
-                _data_sheet_ui.button_new_entry.clicked.connect(f_new_entry)
-                (_data_sheet_ui.button_delete_entry
-                 .clicked.connect(f_delete_entry))
-                # new_entry_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("N"),
-                #                                      sheet_widget)
-                # new_entry_shortcut.activated.connect(f_new_entry)
-            else:
-                _data_sheet_ui.button_new_entry.hide()
-
-
-            _data_sheet_ui.comboBox_view.addItems(list(sh.views.keys()))
-            _data_sheet_ui.comboBox_view.setCurrentText(sh.default_view)
-            f = SheetViewChanger(_data_sheet_ui.comboBox_view, model)
-            _data_sheet_ui.comboBox_view.currentIndexChanged.connect(f)
-
-            if sh_name.startswith('__'):
-                tab_idx = (self._workbook_ui.tabWidget
-                           .addTab(sheet_widget, sh_name))
-            else:
-                #TODO: better handle sheet order. This only works if
-                # there is only one sheet starting with "__"
-                insert_idx = max(1, self._workbook_ui.tabWidget.count()-1)
-                tab_idx = (self._workbook_ui.tabWidget
-                           .insertTab(insert_idx, sheet_widget, sh_name))
-            self.tab_indexes[sh_name] = tab_idx
-
-            def make_form_editor(tab_widget, sheet, check_on_close):
-                tab_closer = EditorTabCloser(tab_widget, check_on_close)
-                try:
-                    editor_widget = FormSheetEditor(sheet,
-                                                    close_callback=tab_closer,
-                                                    parent=tab_widget)
-                except FormEditionNotAvailable:
-                    return
-                tab_label = '%s | Form edit' % sh_name
-                tab_idx = tab_widget.addTab(editor_widget, tab_label)
-                tab_closer.set_editor_tab(editor_widget)
-                icon_style = QtWidgets.QStyle.SP_FileDialogListView
-                tab_icon = QtGui.QIcon(':/icons/editor_icon')
-                tab_widget.setTabIcon(tab_idx, tab_icon)
-                tab_widget.setCurrentIndex(tab_idx)
-
-            f_form_editor = partial(make_form_editor, self._workbook_ui.tabWidget,
-                                    sh, self.workbook_screen.check_on_close)
-            _data_sheet_ui.button_edit_form.clicked.connect(f_form_editor)
-
-            _data_sheet_ui.button_edit_plugin.clicked.connect(
-                lambda: self.make_text_editor(self._workbook_ui.tabWidget,
-                                              sh_name,
-                                              sh.get_plugin_code(),
-                                              'python',
-                                              lambda s : sh.set_plugin_from_code(s)))
-
-            if self.logic.workbook.user_role < UserRole.ADMIN:
-                _data_sheet_ui.button_edit_plugin.hide()
-            if self.logic.workbook.user_role < UserRole.MANAGER or \
-               sh.form_master is None:
-                _data_sheet_ui.button_edit_form.hide()
-            if self.logic.workbook.user_role < UserRole.ADMIN or \
-               sh.form_master is None:
-                _data_sheet_ui.button_delete_entry.hide()
-
-            for form_id, form in sh.live_forms.items():
-                logger.info('Load pending form "%s" (%s)',
-                            form.tr['title'], form_id)
-                self.make_form_tab(sh_name, model, _data_sheet_ui,
-                                   self._workbook_ui.tabWidget,
-                                   self.tab_indexes[sh_name]+1, form)
-
-            return tab_idx
-        tab_icon = QtGui.QIcon(':/icons/workbook_tab_menu_icon')
-        tab_menu_idx = (self._workbook_ui.tabWidget
-                        .addTab(QtWidgets.QWidget(), tab_icon, ''))
-
-        first_tab_idx = tab_menu_idx
         if len(self.logic.workbook.sheets) > 0:
-            # TODO: handle tab order
-            # TODO: load pending forms
-            # TODO: attach file change watcher to datasheet -> trigger refresh when change
             for isheet, (sheet_name, sheet) \
                 in enumerate(self.logic.workbook.sheets.items()):
                 if self.logic.workbook.user_role >= sheet.access_level:
                     logger.info('Load sheet %s in UI', sheet_name)
-                    tab_idx = make_tab_sheet(sheet_name, sheet)
-                    if isheet == 0:
-                        first_tab_idx = tab_idx
+                    self.tab_sorter.show_tab_sheet(sheet,
+                                                   self.logic.workbook.user_role)
+                    for form_id, form in sheet.live_forms.items():
+                        logger.info('Load pending form "%s" (%s)',
+                                    form.tr['title'], form_id)
+                        (self.tab_sorter
+                         .add_tab_live_form(form, sheet.label,
+                                            origin_sheet_label=sheet.label))
                 else:
-                    logger.info('Sheet %s not loaded in UI because user role %s < %s',
+                    logger.info('Sheet %s not loaded in UI because '\
+                                'user role %s < %s',
                                 sheet_name, self.logic.workbook.user_role,
                                 sheet.access_level)
-            self._workbook_ui.tabWidget.setCurrentIndex(first_tab_idx)
+            self.tab_sorter.to_first()
 
-        def on_add_sheet():
-            existing_sheet_labels = list(self.logic.workbook.sheets.keys())
+        # def on_tab_idx_change(tab_idx):
+        #     if tab_idx == tab_menu_idx:
+        #         self._workbook_ui.tabWidget.setCurrentIndex(self.previous_tab_idx)
 
-            new_sheet = (SheetCreationDialog
-                         .new_sheet(existing_sheet_labels=existing_sheet_labels,
-                                    parent=self._workbook_ui.tabWidget))
-            if new_sheet is not None:
-                # TODO:
-                edited_sheet = DataSheetSetupDialog.edit_sheet(new_sheet)
-                if edited_sheet is not None:
-                    self.logic.workbook.add_sheet(edited_sheet)
-                    make_tab_sheet(edited_sheet.label, edited_sheet)
-
-        self.previous_tab_idx = first_tab_idx
-        def on_tab_clicked(tab_idx):
-            if tab_idx < 0:
-                return
-            self.previous_tab_idx = self._workbook_ui.tabWidget.currentIndex()
-            if tab_idx == tab_menu_idx:
-                print('wb menu clicked!!')
-                menu = QtWidgets.QMenu(self._workbook_ui.tabWidget)
-                add_sheet_action = QtWidgets.QAction('Add sheet',
-                                                     self._workbook_ui.tabWidget)
-                add_sheet_action.triggered.connect(on_add_sheet)
-                actions = [
-                    add_sheet_action
-                ]
-                for action in actions:
-                    menu.addAction(action)
-                menu.exec_(QtGui.QCursor.pos(), actions[-1])
-            #     self._workbook_ui.tabWidget.setCurrentIndex(current_idx)
-            # else:
-            #     self._workbook_ui.tabWidget.setCurrentIndex(tab_idx)
-
-        self._workbook_ui.tabWidget.tabBarClicked.connect(on_tab_clicked)
-
-        def on_tab_idx_change(tab_idx):
-            if tab_idx == tab_menu_idx:
-                self._workbook_ui.tabWidget.setCurrentIndex(self.previous_tab_idx)
-
-        self._workbook_ui.tabWidget.currentChanged.connect(on_tab_idx_change)
+        # self._workbook_ui.tabWidget.currentChanged.connect(on_tab_idx_change)
 
         self.workbook_screen.setWindowTitle(self.logic.workbook.label)
         self.workbook_screen.show()

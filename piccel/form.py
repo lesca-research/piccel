@@ -19,16 +19,13 @@ import numpy as np
 import pandas as pd
 
 from .logging import logger
-from .core import UserRole, Notifier, LazyFunc, nexts, if_none
+from .core import (UserRole, Notifier, LazyFunc, nexts, if_none, refresh_text,
+                   text_connect, get_set_connect, language_abbrev)
 from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
                    FormEditionNotOpen, FormEditionLockedType,
                    FormEditionOrphanError, FormEditionNotAvailable)
 
-
-from .ui import (form_editor_widget_ui, form_editor_file_ui,
-                 form_editor_sheet_ui, form_edit_ui, section_edit_ui,
-                 item_edit_ui, choice_edit_ui, variable_edit_ui,
-                 section_transition_edit_ui)
+from . import ui
 from .ui.widgets import ListSelectDialog, show_critical_message_box
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -400,7 +397,7 @@ function snakeCaseToCamelCase(s) {
                 raise InconsistentForms('Differing section names: %s / %s' %\
                                         section_name, other_section_name)
             try:
-                section.add_translations(other_form.sections)
+                section.add_translations(other_section)
             except InconsistentSections:
                 raise InconsistentForms('Content of sections differ: %s / %s'%\
                                         section_name, other_section_name)
@@ -501,7 +498,10 @@ function snakeCaseToCamelCase(s) {
                     title = label
 
             if protect:
-                label = protect_label(label)
+                try:
+                    label = protect_label(label)
+                except BadLabelFormat:
+                    label = None
 
             return label, title
 
@@ -516,10 +516,14 @@ function snakeCaseToCamelCase(s) {
                         'default_language' : language,
                         'supported_languages' : {language}}
         sections = {section_label : section_dict}
+        var_count, sec_count = 1, 1
         for item_gdict in gform_dict['items']:
             # print('Convert gform item %s' % pformat(item_gdict))
             if item_gdict['type'] == 'PAGE_BREAK':
                 slabel, stitle = get_label(item_gdict['title'], section_gen_label)
+                if slabel is None:
+                    slabel = '_section_%d' % sec_count
+                    sec_count += 1
                 section_dict = {'title' : {language: stitle},
                                 'default_language' : language,
                                 'supported_languages' : {language},
@@ -534,11 +538,15 @@ function snakeCaseToCamelCase(s) {
                 elif item_gdict['type'] != 'CHECKBOX':
                     key_label, item_title = get_label(item_gdict['title'],
                                                       var_gen_label)
+                    if key_label is None:
+                        key_label = 'Var_%s' % var_count
+                        var_count += 1
                     item_keys = {key_label : {language : item_title}}
                     if item_gdict['type'] in ['MULTIPLE_CHOICE', 'LIST']:
                         item_choices = {}
-                        for c in item_gdict['choices']:
+                        for ichoice, c in enumerate(item_gdict['choices']):
                             clabel, ctitle = get_label(c, protect=False)
+                            clabel = if_none(clabel, 'choice_%d' % ichoice)
                             item_choices[clabel] = {language : ctitle}
                         if item_gdict.get('allow_other_choice', False):
                             other_label = {'English' : 'Other',
@@ -547,8 +555,9 @@ function snakeCaseToCamelCase(s) {
                             other_choice_label = {language : other_label}
                 else:
                     item_keys = {}
-                    for c in item_gdict['choices']:
+                    for ichoice, c in enumerate(item_gdict['choices']):
                         clabel, ctitle = get_label(c)
+                        clabel = if_none(clabel, 'choice_%d' % ichoice)
                         item_keys[clabel] = {language : ctitle}
                 item_type = GTYPES[item_gdict['type']]
                 item_description = {language : item_gdict.get('description', '')}
@@ -1011,7 +1020,7 @@ class FormSection:
 
     def add_translations(self, other_section):
         self.tr.add_translations(other_section.tr)
-        if len(self.items) != len(other_section.item):
+        if len(self.items) != len(other_section.items):
             raise InconsistentSections()
         for item, other_item in zip(self.items, other_section.items):
             if len(item.keys) != len(other_item.keys) or \
@@ -1530,6 +1539,8 @@ class FormItem:
         return True
 
     def to_dict(self):
+        def _tr(k):
+            return {language : k for language in self.tr.supported_languages}
         return {'keys' : copy(self.keys),
                 'label' : self.label,
                 'default_language' : self.tr.language,
@@ -1540,7 +1551,8 @@ class FormItem:
                 'regexp' : self.regexp.pattern,
                 'regexp_invalid_message' : self.regexp_invalid_message,
                 'allow_empty' : self.allow_None,
-                'choices' : ({k:copy(v) for k,v in self.choices.items()}
+                'choices' : ({k : if_none(copy(v), _tr(k))
+                              for k,v in self.choices.items()}
                              if self.choices is not None else None),
                 'other_choice_label' : copy(self.tr.trs.get('other_choice', None)),
                 'init_values' : copy(self.init_values),
@@ -3178,7 +3190,14 @@ def link_text_edit(text_edit, dest_dict, dest_key):
                        partial(dest_dict.__setitem__, dest_key))
     text_edit.editingFinished.connect(callback)
 
-def link_combo_box(combox_box, dest_dict, dest_key, choices=None, editable=True):
+
+def dict_set_none_if_empty(d, k, s):
+    if v == '':
+        v = None
+    d[k] = v
+
+def link_combo_box(combox_box, dest_dict, dest_key, choices=None, editable=True,
+                   empty_str_is_None=False):
     try:
         combox_box.currentTextChanged.disconnect()
     except TypeError:
@@ -3186,11 +3205,17 @@ def link_combo_box(combox_box, dest_dict, dest_key, choices=None, editable=True)
     if choices is not None:
         combox_box.clear()
         combox_box.addItems(choices)
-    combox_box.setCurrentText(dest_dict[dest_key])
+
+    text = dest_dict[dest_key]
+    combox_box.setCurrentText(if_none(text, ''))
+
     if editable:
         combox_box.setEnabled(True)
-        (combox_box.currentTextChanged
-         .connect(partial(dest_dict.__setitem__, dest_key)))
+        if empty_str_is_None:
+            f_store_in_dict = partial(dict_set_none_if_empty, dest_dict, dest_key)
+        else:
+            f_store_in_dict = partial(dest_dict.__setitem__, dest_key)
+        combox_box.currentTextChanged.connect(f_store_in_dict)
     else:
         combox_box.setEnabled(False)
 
@@ -3213,7 +3238,7 @@ def link_spin_box(spin_box, dest_dict, dest_key):
     spin_box.valueChanged.connect(partial(dest_dict.__setitem__, dest_key))
 
 class FormPropertyEditor(QtWidgets.QWidget,
-                         form_edit_ui.Ui_FormPropertyEditor):
+                         ui.form_edit_ui.Ui_FormPropertyEditor):
     def __init__(self, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
@@ -3224,7 +3249,7 @@ class FormPropertyEditor(QtWidgets.QWidget,
             link_line_edit(field, form_node.form_dict['title'], language)
 
 class SectionPropertyEditor(QtWidgets.QWidget,
-                            section_edit_ui.Ui_SectionPropertyEditor):
+                            ui.section_edit_ui.Ui_SectionPropertyEditor):
     def __init__(self, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
@@ -3234,10 +3259,15 @@ class SectionPropertyEditor(QtWidgets.QWidget,
                                 (self.title_field_english, 'English')]:
             link_line_edit(field, section_node.section_dict['title'], language)
 
-class ItemPropertyEditor(QtWidgets.QWidget, item_edit_ui.Ui_ItemPropertyEditor):
+class ItemPropertyEditor(QtWidgets.QWidget,
+                         ui.item_edit_ui.Ui_ItemPropertyEditor):
     def __init__(self, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
+        self.typeComboBox.addItems(list(sorted(FormItem.VTYPES.keys())))
+        generators = [''] + sorted([g for g in FormItem.GENERATORS
+                                    if g is not None])
+        self.generatorComboBox.addItems(generators)
 
     def attach(self, item_node):
         for field, dest_dict, key in [(self.title_field_french,
@@ -3267,6 +3297,8 @@ class ItemPropertyEditor(QtWidgets.QWidget, item_edit_ui.Ui_ItemPropertyEditor):
         link_combo_box(self.accessLevelComboBox, item_node.item_dict, 'access_level')
         link_spin_box(self.textNbLinesSpinBox, item_node.item_dict, 'nb_lines')
 
+        link_combo_box(self.generatorComboBox, item_node.item_dict, 'generator')
+
         if item_node.variables_node() is None and not item_node.text_only:
             self.initialValueLineEdit.show()
             self.initialValueLabel.show()
@@ -3284,7 +3316,7 @@ class ItemPropertyEditor(QtWidgets.QWidget, item_edit_ui.Ui_ItemPropertyEditor):
             self.initialValueLineEdit.hide()
             self.initialValueLabel.hide()
 
-class ChoicePropertyEditor(QtWidgets.QWidget, choice_edit_ui.Ui_ChoicePropertyEditor):
+class ChoicePropertyEditor(QtWidgets.QWidget, ui.choice_edit_ui.Ui_ChoicePropertyEditor):
     def __init__(self, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
@@ -3296,7 +3328,7 @@ class ChoicePropertyEditor(QtWidgets.QWidget, choice_edit_ui.Ui_ChoicePropertyEd
 
 
 class VariablePropertyEditor(QtWidgets.QWidget,
-                             variable_edit_ui.Ui_VariablePropertyEditor):
+                             ui.variable_edit_ui.Ui_VariablePropertyEditor):
     def __init__(self, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
@@ -3311,7 +3343,7 @@ class VariablePropertyEditor(QtWidgets.QWidget,
             link_line_edit(field, dest_dict, key)
 
 class SectionTransitionPropertyEditor(QtWidgets.QWidget,
-                                      section_transition_edit_ui.Ui_SectionTransitionPropertyEditor):
+                                      ui.section_transition_edit_ui.Ui_SectionTransitionPropertyEditor):
     def __init__(self, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
@@ -3370,7 +3402,7 @@ class PendingChangesTracker:
                 return False
         return True
 
-class FormSheetEditor(QtWidgets.QWidget, form_editor_sheet_ui.Ui_Form):
+class FormSheetEditor(QtWidgets.QWidget, ui.form_editor_sheet_ui.Ui_Form):
     def __init__(self, sheet, close_callback=None, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
@@ -3378,8 +3410,10 @@ class FormSheetEditor(QtWidgets.QWidget, form_editor_sheet_ui.Ui_Form):
         self.button_load.clicked.connect(self.on_load)
         self.button_save.clicked.connect(self.on_save)
         self.button_export.clicked.connect(self.on_export)
+        self.button_close.clicked.connect(self.on_close)
+        self.button_close.setIcon(QtGui.QIcon(':/icons/close_icon'))
 
-        self.unsaved_icon = QtGui.QIcon(':/icons/form_unsaved_icon')
+        self.unsaved_icon = QtGui.QIcon(':/icons/alter_icon')
 
         self.sheet = sheet
         self.current_tmp_form_fn = None
@@ -3401,15 +3435,25 @@ class FormSheetEditor(QtWidgets.QWidget, form_editor_sheet_ui.Ui_Form):
             logger.error(traceback.format_exception(*sys.exc_info()))
             self.sheet.close_form_edition()
 
+        self.read_only = False
         if error_message is not None:
-            show_critical_message_box(error_message)
-            raise FormEditionNotAvailable(error_message)
+            show_critical_message_box('The form is read-only. Reason:\n%s' %\
+                                      error_message)
+            self.button_save.setEnabled(False)
+            form = self.sheet.form_master.new()
+            self.read_only = True
+            # raise FormEditionNotAvailable(error_message)
+
 
         on_pending = partial(self.button_save.setIcon, self.unsaved_icon)
         on_not_pending = partial(self.button_save.setIcon, QtGui.QIcon())
+        if not self.read_only:
+            on_save = self.save_current
+        else:
+            on_save = self.on_export
+
         self.pending_changes_tracker = \
-            PendingChangesTracker(self.save_current,
-                                  callback_pending=on_pending,
+            PendingChangesTracker(on_save, callback_pending=on_pending,
                                   callback_not_pending=on_not_pending)
 
         # Form widget
@@ -3432,7 +3476,7 @@ class FormSheetEditor(QtWidgets.QWidget, form_editor_sheet_ui.Ui_Form):
             if form_to_load is not None:
                 self.form_editor.set_form(form_to_load,
                                           self._locked_variable_types())
-                self.pending_changes_tracker.set_pending_change_state(True)
+                self.pending_changes_tracker.set_pending_change_state(False)
 
     def on_save(self):
         if self.save_current():
@@ -3440,7 +3484,7 @@ class FormSheetEditor(QtWidgets.QWidget, form_editor_sheet_ui.Ui_Form):
 
     def save_current(self):
         try:
-            self.sheet.set_form_master(self.sheet_editor.get_form(),
+            self.sheet.set_form_master(self.form_editor.get_form(),
                                        save=True, overwrite=True)
         except Exception as e:
             show_critical_message_box('Error while saving form of sheet '\
@@ -3449,9 +3493,11 @@ class FormSheetEditor(QtWidgets.QWidget, form_editor_sheet_ui.Ui_Form):
         return True
 
     def on_export(self):
-        form_fn, _ = (QtWidgets.QFileDialog
-                      .getSaveFileName(parent_widget, "Save Form", '',
-                                       "Piccel Form Files (*.form)"))
+        proposed_fn = '%s.form' % self.sheet.label
+        form_fn, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Form",
+                                                           proposed_fn,
+                                                           "Piccel Form Files "\
+                                                           "(*.form)")
         if form_fn is not None and form_fn != '':
             self.form_editor.get_form().save_to_json_file(form_fn)
 
@@ -3476,17 +3522,350 @@ class FormSheetEditor(QtWidgets.QWidget, form_editor_sheet_ui.Ui_Form):
         return None
 
     def save_temporary_form(self, form):
-        if self.current_tmp_form_fn is not None:
+        if not self.read_only and self.current_tmp_form_fn is not None:
             self.sheet.save_alternate_master_form(self.current_tmp_form_fn, form)
 
-    def close_form_edition(self):
-        self.sheet.close_form_edition()
-        self.close_callback()
+    def on_close(self):
+        if self.pending_changes_tracker.process_pending():
+            if not self.read_only:
+                self.sheet.close_form_edition()
+            self.close_callback()
 
 import os
 
-class FormFileEditor(QtWidgets.QWidget, form_editor_file_ui.Ui_Form):
-    def __init__(self, form_fn=None, parent=None):
+def make_item_input_widget(item_widget, item, key, key_label,
+                           item_is_single=False):
+    input_widget = QtWidgets.QWidget(item_widget)
+    init_value = item.values_str[key]
+    _input_ui = None
+    if (item.vtype == 'text' and item.choices is None and \
+        item.nb_lines<=1) or item.vtype == 'int' or \
+        item.vtype == 'number' or item.vtype == 'int64':
+        # Single line input field
+        _input_ui = ui.item_single_line_ui.Ui_Form()
+        _input_ui.setupUi(input_widget)
+        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
+        refresh_label_key()
+        if not item_is_single:
+            item.notifier.add_watcher('language_changed', refresh_label_key)
+        #_input_ui.label_key.setText(item.tr[key])
+        _input_ui.value_field.setText(init_value)
+        callback = text_connect(_input_ui.value_field.text, item.set_input_str)
+        _input_ui.value_field.editingFinished.connect(callback)
+    elif item.vtype == 'text' and item.choices is None and \
+         item.nb_lines>1:
+        # Multi line input field
+        _input_ui = ui.item_text_multi_line_ui.Ui_Form()
+        _input_ui.setupUi(input_widget)
+        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
+        refresh_label_key()
+        item.notifier.add_watcher('language_changed', refresh_label_key)
+        _input_ui.value_field.setPlainText(init_value)
+        callback = text_connect(_input_ui.value_field.toPlainText,
+                                item.set_input_str)
+        _input_ui.value_field.editingFinished.connect(callback)
+    elif (item.vtype == 'boolean' and not item_is_single):
+        _input_ui = ui.item_boolean_checkboxes_ui.Ui_Form()
+        _input_ui.setupUi(input_widget)
+        refresh_label_key = refresh_text(item, key, _input_ui.check_box)
+        refresh_label_key()
+        item.notifier.add_watcher('language_changed', refresh_label_key)
+        _input_ui.check_box.toggled.connect(lambda b: item.set_input_str('%s'%b))
+        if init_value != '':
+            _input_ui.check_box.setChecked(item.get_value())
+    elif (item.vtype == 'text' and item.choices is not None) or\
+         (item.vtype == 'boolean' and item_is_single):
+        # Radio buttons
+        _input_ui = ui.item_choice_radio_ui.Ui_Form()
+        _input_ui.setupUi(input_widget)
+        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
+        refresh_label_key()
+        if not item_is_single:
+            item.notifier.add_watcher('language_changed', refresh_label_key)
+
+        radio_group = QtWidgets.QButtonGroup(input_widget)
+        for idx, choice in enumerate(item.choices.keys()):
+            frame = _input_ui.radio_frame
+            radio_button = QtWidgets.QRadioButton(frame)
+            refresh_radio_text = refresh_text(item, choice, radio_button)
+            refresh_radio_text()
+            item.notifier.add_watcher('language_changed', refresh_radio_text)
+            radio_button.setObjectName("radio_button_"+choice)
+            _input_ui.radio_layout.addWidget(radio_button, idx)
+            radio_group.addButton(radio_button, idx)
+            class ChoiceProcess:
+                def __init__(self, item, choice_button):
+                    self.item = item
+                    self.choice_button = choice_button
+                def __call__(self, state):
+                    if state:
+                        self.item.set_input_str(self.choice_button.text())
+            radio_button.toggled.connect(ChoiceProcess(item, radio_button))
+            # if item.vtype == 'boolean':
+            #     from IPython import embed; embed()
+            if item.is_valid() and item.value_to_str() == choice:
+                radio_group.button(idx).setChecked(True)
+        if item.allow_other_choice:
+            radio_group.addButton(_input_ui.radio_button_other, idx+1)
+
+            def toggle_other_field(flag):
+                # flag = _input_ui.radio_button_other.ischecked()
+                _input_ui.other_field.setEnabled(flag)
+            _input_ui.radio_button_other.toggled.connect(toggle_other_field)
+
+            callback = text_connect(_input_ui.other_field.text, item.set_input_str)
+            _input_ui.other_field.editingFinished.connect(callback)
+        else:
+            _input_ui.radio_button_other_frame.hide()
+
+    elif item.vtype == 'date' or item.vtype == 'datetime':
+        # Date/Time input
+        _input_ui = ui.item_datetime_ui.Ui_Form()
+        _input_ui.setupUi(input_widget)
+        refresh_label_key = refresh_text(item, key, _input_ui.label_key)
+        refresh_label_key()
+        item.notifier.add_watcher('language_changed', refresh_label_key)
+        date_str, date_fmt, hour, mins = item.split_qdatetime_str(key)
+
+        if date_str is not None:
+            qdate = QtCore.QDate.fromString(date_str, date_fmt)
+        else:
+            qdate = QtCore.QDate()
+        logger.debug2("Init date field with %s -> qdate=%s", date_str, qdate)
+        date_collector = DateTimeCollector(item.set_input_str, qdate, hour, mins)
+
+        _input_ui.datetime_field.setDate(qdate)
+        _input_ui.datetime_field.dateChanged.connect(date_collector.set_date)
+        if hour is not None:
+            _input_ui.hour_field.setValue(hour)
+        else:
+            _input_ui.hour_field.clear()
+        callback = get_set_connect(_input_ui.hour_field.value,
+                                   date_collector.set_hours)
+        _input_ui.hour_field.editingFinished.connect(callback)
+
+        if mins is not None:
+            _input_ui.minute_field.setValue(mins)
+        else:
+            _input_ui.minute_field.clear()
+        callback = get_set_connect(_input_ui.minute_field.value,
+                                   date_collector.set_minutes)
+        _input_ui.minute_field.editingFinished.connect(callback)
+
+        if item.vtype == 'date':
+            _input_ui.frame_hour.hide()
+    else:
+        logger.error('Cannot make UI for item %s (vtype: %s)', item, item.vtype)
+
+    if _input_ui is not None and item_is_single:
+        _input_ui.label_key.hide()
+
+    return input_widget
+
+def make_item_widget(section_widget, item):
+    item_widget = QtWidgets.QWidget(section_widget)
+    _item_ui = ui.form_item_ui.Ui_Form()
+    _item_ui.setupUi(item_widget)
+
+    refresh_title = refresh_text(item, 'title', _item_ui.title)
+    refresh_title()
+    item.notifier.add_watcher('language_changed', refresh_title)
+
+    refresh_description = refresh_text(item, 'description',
+                                       _item_ui.description,
+                                       hide_on_empty=True)
+    refresh_description()
+    item.notifier.add_watcher('language_changed', refresh_description)
+
+    _item_ui.label_invalid_message.hide()
+    if isinstance(item, FormItem):
+        invalidity_callback = text_connect(item.get_validity_message,
+                                           _item_ui.label_invalid_message.setText)
+        item.notifier.add_watcher('item_invalid', invalidity_callback)
+        item.notifier.add_watcher('item_invalid',
+                                  _item_ui.label_invalid_message.show)
+        item.notifier.add_watcher('item_valid', _item_ui.label_invalid_message.hide)
+        if item.allow_None:
+            _item_ui.required_label.hide()
+        for key, key_label in item.keys.items():
+            input_widget = make_item_input_widget(item_widget, item, key,
+                                                  key_label,
+                                                  item_is_single=len(item.keys)==1)
+            _item_ui.input_layout.addWidget(input_widget)
+            if not item.editable:
+                input_widget.setEnabled(False)
+    return item_widget
+
+class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
+    def __init__(self, form, origin_sheet_label=None, close_callback=None,
+                 user_role=UserRole.EDITOR, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.setupUi(self)
+        self.origin_sheet_label = origin_sheet_label
+
+        close_callback = if_none(close_callback, lambda w: None)
+
+        # Enable form buttons based on form notifications
+        watchers = {
+            'previous_section_available':
+            [lambda: self.button_previous.setEnabled(True)],
+            'previous_section_not_available' :
+            [lambda: self.button_previous.setEnabled(False)],
+            'next_section_available' :
+            [lambda: self.button_next.setEnabled(True)],
+            'next_section_not_available' :
+            [lambda: self.button_next.setEnabled(False)],
+            'ready_to_submit' :
+            [lambda: self.button_submit.setEnabled(True)],
+            'not_ready_to_submit' :
+            [lambda: self.button_submit.setEnabled(False)],
+        }
+        logger.info('Make UI of live form "%s"', form.label)
+        form.notifier.add_watchers(watchers)
+        form.validate()
+
+        section_widgets = {}
+        self.item_labels = []
+        def make_section_widget(section_label, section):
+            section_widget = QtWidgets.QWidget(self)
+            section_widget.setObjectName("section_widget_" + section_label + \
+                                         section.tr.language)
+            _section_ui = ui.section_ui.Ui_Form()
+            _section_ui.setupUi(section_widget)
+            refresh_title = refresh_text(section, 'title',
+                                         _section_ui.title_label,
+                                         hide_on_empty=True)
+            refresh_title()
+            section.notifier.add_watcher('language_changed', refresh_title)
+
+            for item in section.items:
+                if user_role >= item.access_level:
+                    item_widget = make_item_widget(section_widget, item)
+                    _section_ui.verticalLayout.addWidget(item_widget)
+            return section_widget
+
+        def set_section_ui(section_label, section):
+            #if self.current_section_widget is not None:
+            #    self.current_section_widget.hide()
+            logger.debug2('Set section widget for %s, language: %s',
+                          section_label, section.tr.language)
+            if section_label not in section_widgets:
+                section_widget = make_section_widget(section_label, section)
+                section_widgets[section_label] = section_widget
+                self.scroll_section_content_layout.addWidget(section_widget,
+                                                             0,
+                                                             QtCore.Qt.AlignTop)
+            else:
+                section_widget = section_widgets[section_label]
+            logger.debug('set_section_ui, show widget of %s, ',
+                         section_label)
+            section_widget.show()
+            # End of def set_section_ui
+
+        set_section_ui(form.current_section_name, form.current_section)
+        self.title_label.setText(form.tr['title'])
+
+        radio_language_group = QtWidgets.QButtonGroup(self)
+        frame = self.frame_language_select
+        for idx,language in enumerate(sorted(form.tr.supported_languages)):
+            radio_button = QtWidgets.QRadioButton(language_abbrev(language),
+                                                  frame)
+            radio_button.setObjectName("radio_button_" + language)
+            self.language_select_layout.addWidget(radio_button, idx)
+            radio_language_group.addButton(radio_button, idx)
+            logger.debug('Set radio button for switching language '\
+                         'of section %s to %s', form.current_section_name,
+                         language)
+            class ChoiceProcess:
+                def __init__(self, language):
+                    self.language = language
+                def __call__(self, state):
+                    if state:
+                        logger.debug('Process language toggle to %s, '\
+                                     'current section: %s ', self.language,
+                                     form.current_section_name)
+                        form.set_language(self.language)
+            radio_button.toggled.connect(ChoiceProcess(language))
+            if language == form.current_section.tr.language:
+                radio_language_group.button(idx).setChecked(True)
+        # Set button actions
+        def prev_sec():
+            # gen_section = lambda : set_section_ui(form.previous_section(),
+            #                                       form.to_previous_section())
+            # self.section_widget = \
+            #     dict_lazy_setdefault(sections, form.previous_section(),
+            #                          gen_section)
+            logger.debug('Prev_sec, hide widget of %s, ',
+                         form.current_section_name)
+            section_widgets[form.current_section_name].hide()
+            set_section_ui(form.previous_section(),
+                           form.to_previous_section())
+            self.scroll_section.ensureVisible(0, 0)
+        self.button_previous.clicked.connect(prev_sec)
+
+        def next_sec():
+            # def gen_section():
+            #     gen_section = lambda : set_section_ui(form.next_section(),
+            #                                       form.to_next_section())
+            # self.section_widget = \
+            #     dict_lazy_setdefault(sections, form.next_section(),
+            #                          gen_section)
+            logger.debug('Next_sec, hide widget of %s',
+                         form.current_section_name)
+            section_widgets[form.current_section_name].hide()
+            set_section_ui(form.next_section(),
+                           form.to_next_section())
+            self.scroll_section.ensureVisible(0, 0)
+
+        self.button_next.clicked.connect(next_sec)
+
+        def cancel():
+            # TODO: adapt question if form is empty
+            # TODO: see if init value are actually saved or only user-input?
+            message_box = QtWidgets.QMessageBox()
+            message_box.setIcon(QtWidgets.QMessageBox.Question)
+            message_box.setText('The current form entries can be saved '\
+                                'for later or discarded. Click on "Cancel" '\
+                                'to resume filling the form.')
+            message_box.addButton(QtWidgets.QMessageBox.Discard)
+            message_box.addButton(QtWidgets.QMessageBox.Cancel)
+            message_box.addButton(QtWidgets.QMessageBox.Save)
+            result = message_box.exec_()
+            if result == QtWidgets.QMessageBox.Discard:
+                form.cancel()
+            if result != QtWidgets.QMessageBox.Cancel:
+                close_callback(self)
+
+        self.button_cancel.clicked.connect(cancel)
+        cancel_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Escape"),
+                                              self)
+        cancel_shortcut.activated.connect(cancel)
+
+        def submit():
+            #.setEnabled(False)
+            self.button_submit.setFocus()
+            try:
+                form.submit()
+            except Exception as e:
+                msg = 'Error occured while submitting:\n%s' % repr(e)
+                logger.error(msg)
+                show_critical_message_box(msg)
+                # from IPython import embed; embed()
+            close_callback(self)
+
+        self.button_submit.clicked.connect(submit)
+
+# class FormTester(QtWidgets.QDialog):
+#     def __init__(self, form, parent=None):
+#         super(QtWidgets.QDialog, self).__init__(parent)
+
+#         self.form_widget = FormWidget(form, parent=self)
+#         self.layout = QtWidgets.QVBoxLayout()
+#         self.layout.addWidget(self.form_widget)
+#         self.setLayout(self.layout)
+
+class FormFileEditor(QtWidgets.QWidget, ui.form_editor_file_ui.Ui_Form):
+    def __init__(self, form_fn=None, selection_mode=False, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
 
@@ -3514,6 +3893,9 @@ class FormFileEditor(QtWidgets.QWidget, form_editor_file_ui.Ui_Form):
             self.load_form(form_fn)
 
         self.verticalLayout_2.addWidget(self.form_editor)
+
+    def test_form(self):
+        self.form_editor.test_form()
 
     def load_form(self, form_fn):
         if form_fn is None:
@@ -3590,7 +3972,7 @@ class FormFileEditor(QtWidgets.QWidget, form_editor_file_ui.Ui_Form):
 
 from PyQt5.QtCore import pyqtSignal
 
-class FormEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
+class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
 
     formChanged = pyqtSignal()
 
@@ -3632,6 +4014,14 @@ class FormEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
         def on_preview_mode_change(state):
             pass
         self.button_preview_mode.toggled.connect(on_preview_mode_change)
+        button_preview_mode_icon = QtGui.QIcon()
+        button_preview_mode_icon.addPixmap(QtGui.QPixmap(':/icons/on_icon'),
+                                           QtGui.QIcon.Normal,
+                                           QtGui.QIcon.Off);
+        button_preview_mode_icon.addPixmap(QtGui.QPixmap(':/icons/off_icon'),
+                                           QtGui.QIcon.Normal,
+                                           QtGui.QIcon.On);
+        self.button_preview_mode.setIcon(button_preview_mode_icon)
 
         self.hide_property_editors()
 
@@ -3667,7 +4057,7 @@ class FormEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
             self.show_section_editor(model_item)
         elif isinstance(model_item, ItemNode):
             self.show_item_editor(model_item)
-        elif isinstance(model_item, ChoiceNode):
+        elif isinstance(model_item, (ChoiceNode, OtherChoiceNode)):
             self.show_choice_editor(model_item)
         elif isinstance(model_item, VarNode):
             self.show_variable_editor(model_item)
@@ -3725,6 +4115,10 @@ class FormEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
         self.model.add_choices_node_to_item_node(item_model_index)
         self.tree_view.expandRecursively(item_model_index)
 
+    def add_other_choice_node_to_choices_node(self, item_model_index):
+        self.model.add_other_choice_node_to_choices_node(item_model_index)
+        self.tree_view.expandRecursively(item_model_index)
+
     def get_form(self):
         return Form.from_dict(self.model.root.childItems[0].to_dict())
 
@@ -3737,6 +4131,19 @@ class FormEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
     #         event.ignore()
     #         return False
 
+    def test_form(self):
+        FormWidget(self.get_form(), parent=None).show()
+
+    def ask_import_in_form(self, form_node):
+
+        fn_format = 'Piccel form file (*.form)'
+        form_fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open file',
+                                                           '', fn_format)
+        if form_fn is not None and form_fn != '':
+            content_selector = FormEditor(Form.from_file(form_fn),
+                                          selection_mode=True)
+            
+
     def open_menu(self, position):
         # indexes = self.sender().selectedIndexes()
         model_index = self.tree_view.indexAt(position)
@@ -3746,14 +4153,22 @@ class FormEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
 
         right_click_menu = QtWidgets.QMenu()
 
-        if isinstance(model_item, ItemNode) and model_item.variables_node() is None:
+        if isinstance(model_item, ItemNode) and \
+           model_item.variables_node() is None:
             action = right_click_menu.addAction(self.tr("To group of variables"))
             f = partial(self.add_variables_node_to_item_node, model_index)
             action.triggered.connect(f)
 
-        if isinstance(model_item, ItemNode) and not model_item.choices_node():
+        if isinstance(model_item, ItemNode) and \
+           model_item.choices_node() is None:
             action = right_click_menu.addAction(self.tr("Add choices"))
             f = partial(self.add_choices_node_to_item_node, model_index)
+            action.triggered.connect(f)
+
+        if isinstance(model_item, ChoicesNode) and \
+           model_item.other_choice_node() is None:
+            action = right_click_menu.addAction(self.tr("Add Other choice"))
+            f = partial(self.add_other_choice_node_to_choices_node, model_index)
             action.triggered.connect(f)
 
         if not isinstance(model_item,  (FormNode, SectionTransitionsNode)):
@@ -3761,6 +4176,14 @@ class FormEditor(QtWidgets.QWidget, form_editor_widget_ui.Ui_FormEditor):
             act_del.triggered.connect(partial(self.model.removeRow,
                                               model_index.row(),
                                               model_index.parent()))
+
+        if isinstance(model_item, FormNode):
+            act_test = right_click_menu.addAction(self.tr('Test'))
+            act_test.triggered.connect(self.test_form)
+
+            act_test = right_click_menu.addAction(self.tr('Import'))
+            act_test.triggered.connect(partial(self.ask_import_in_form,
+                                               model_item))
 
         right_click_menu.exec_(self.sender().viewport().mapToGlobal(position))
 
@@ -3922,7 +4345,7 @@ class FormNode(MotherNode):
     def __init__(self, form_dict, lock_variable_types, parent=None):
         super(FormNode, self).__init__(form_dict.pop('label'), parent)
         self.form_dict = form_dict.copy()
-
+        self.lock_variable_types = lock_variable_types
         sections = self.form_dict.pop('sections')
 
         # children are sections
@@ -3958,7 +4381,8 @@ class FormNode(MotherNode):
         new_section_cfg = (FormSection([], self.form_dict['default_language'],
                                        self.form_dict['supported_languages'])
                            .to_dict())
-        return SectionNode(section_name, new_section_cfg, parent=self)
+        return SectionNode(section_name, new_section_cfg,
+                           self.lock_variable_types, parent=self)
 
     def to_dict(self):
         return {
@@ -4030,13 +4454,14 @@ class SectionNode(MotherNode):
 class SectionTransitionsNode(MotherNode):
     def __init__(self, transitions_cfg, parent=None):
         super(SectionTransitionsNode, self).__init__('next section', parent)
-        if isinstance(transitions_cfg, str):
-            self.childItems.append(SectionTransitionNode('transition rule 1',
-                                                         transitions_cfg, parent=self))
-        else:
-            self.childItems = [SectionTransitionNode('transition rule %d' % it,
-                                                     transition_def, parent=self)
-                               for it, transition_def in enumerate(transitions_cfg)]
+        if transitions_cfg is not None:
+            if isinstance(transitions_cfg, str):
+                self.childItems.append(SectionTransitionNode('transition rule 1',
+                                                             transitions_cfg, parent=self))
+            else:
+                self.childItems = [SectionTransitionNode('transition rule %d' % it,
+                                                         transition_def, parent=self)
+                                   for it, transition_def in enumerate(transitions_cfg)]
 
         self.childItems.append(AddSectionTransitionNode(self))
 
@@ -4195,11 +4620,18 @@ class ItemNode(MotherNode):
             var_dict = variables_node.to_dict()
 
         choices_node = self.choices_node()
+        if choices_node is not None:
+            other_choice_node = choices_node.other_choice_node()
+        else:
+            other_choice_node = None
         return {
             **self.item_dict,
             **var_dict,
             **{'choices' : (choices_node.to_dict()
-                            if choices_node is not None else None)}
+                            if choices_node is not None else None),
+               'other_choice_label' : (other_choice_node.choice_tr.copy()
+                                       if other_choice_node is not None
+                                       else None)}
         }
 
     def add_choices_node(self):
@@ -4237,7 +4669,8 @@ class ChoicesNode(MotherNode):
         self.childItems.append(AddChoiceNode(self))
 
     def to_dict(self):
-        return {child.label : child.choice_tr for child in self.childItems[:-1]}
+        return {child.label : child.choice_tr for child in self.childItems[:-1]
+                if isinstance(child, ChoiceNode)}
 
     def insertChildren(self, position, nb_childs):
         if position < 0 or position > len(self.childItems):
@@ -4247,6 +4680,21 @@ class ChoicesNode(MotherNode):
                                               for i in range(nb_childs)]
 
         return True
+
+    def other_choice_node(self):
+        for child in self.childItems:
+            if isinstance(child, OtherChoiceNode):
+                return child
+        return None
+
+    def add_other_choice_node(self):
+        if self.other_choice_node() is None:
+            other_choice_node = OtherChoiceNode({'French': 'Autre :',
+                                                 'English' : 'Other'},
+                                                parent=self)
+            self.childItems.insert(0, other_choice_node)
+            return True
+        return False
 
     def _new_choice_node(self):
         i_choice = len(self.childItems) - 1
@@ -4326,6 +4774,11 @@ class VarNode(Node):
 class ChoiceNode(Node):
     def __init__(self, label, choice_tr, parent=None):
         super(ChoiceNode, self).__init__(label, parent)
+        self.choice_tr = choice_tr
+
+class OtherChoiceNode(Node):
+    def __init__(self, choice_tr, parent=None):
+        super(OtherChoiceNode, self).__init__('[Other]', parent)
         self.choice_tr = choice_tr
 
 class AddSectionNode(Node):
@@ -4413,7 +4866,7 @@ class TreeModel(QAbstractItemModel):
         if isinstance(item, (AddItemNode, AddSectionNode, AddChoiceNode,
                              AddVarNode, AddSectionTransitionNode,
                              ChoicesNode, VariablesNode, SectionTransitionsNode,
-                             SectionTransitionNode)):
+                             SectionTransitionNode, OtherChoiceNode)):
             return super(TreeModel, self).flags(index)
         else:
             return Qt.ItemIsEditable | super(TreeModel, self).flags(index)
@@ -4468,6 +4921,14 @@ class TreeModel(QAbstractItemModel):
         self.beginInsertRows(item_model_index, 0, 0)
         print('Add choices_node to %s' % item_node.label)
         success = item_node.add_choices_node()
+        self.endInsertRows()
+        return success
+
+    def add_other_choice_node_to_choices_node(self, item_model_index):
+        choices_node = self.getItem(item_model_index)
+        self.beginInsertRows(item_model_index, 0, 0)
+        print('Add other_choice to %s' % choices_node.label)
+        success = choices_node.add_other_choice_node()
         self.endInsertRows()
         return success
 

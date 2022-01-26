@@ -61,6 +61,7 @@ setup(name='piccel', version=version['__version__'],
           'console_scripts': [
               'piccel = piccel.commands.piccel:main',
               'piccel_extract_logic = piccel.commands.piccel_extract_logic:main',
+              'piccel_convert_gform = piccel.commands.piccel_convert_gform:main',
               'piccel_import_logic = piccel.commands.piccel_import_logic:main',
               'piccel_form_edit = piccel.commands.piccel_form_edit:main',
               'piccel_decrypt = piccel.commands.piccel_crypt:decrypt_cmd',

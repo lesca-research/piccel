@@ -29,6 +29,8 @@ def main():
                            '20 (INFO), '\
                            '10 (DEBUG)')
 
+    parser.add_option('-t', '--test', action='store_true', default=False)
+
     (options, args) = parser.parse_args()
     logger.setLevel(options.verbose)
 
@@ -41,4 +43,6 @@ def main():
     app = QApplication(sys.argv)
     form_editor = FormFileEditor(form_fn)
     form_editor.show()
+    if options.test:
+        form_editor.test_form()
     sys.exit(app.exec_())

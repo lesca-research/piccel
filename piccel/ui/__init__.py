@@ -1,4 +1,4 @@
-from .generated import access_ui
+from .generated import access_widget_ui
 from .generated import data_sheet_ui
 from .generated import form_item_ui
 from .generated import form_ui
@@ -11,7 +11,8 @@ from .generated import login_ui
 from .generated import progress_bar_ui
 from .generated import resources
 from .generated import section_ui
-from .generated import selector_ui
+from .generated import main_single_centered_widget_ui
+from .generated import selector_widget_ui
 from .generated import text_editor_ui
 from .generated import workbook_ui
 from .generated import workbook_creation_ui

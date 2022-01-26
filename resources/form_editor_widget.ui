@@ -120,8 +120,26 @@
           </item>
           <item>
            <widget class="QPushButton" name="button_preview_mode">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="styleSheet">
+             <string notr="true">background-color: rgba(255, 255, 255, 0);
+border: none;
+margin: 0px;
+padding: 0px;</string>
+            </property>
             <property name="text">
              <string/>
+            </property>
+            <property name="iconSize">
+             <size>
+              <width>63</width>
+              <height>30</height>
+             </size>
             </property>
             <property name="checkable">
              <bool>true</bool>

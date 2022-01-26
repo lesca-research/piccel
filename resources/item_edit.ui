@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>797</width>
-    <height>549</height>
+    <height>639</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -253,43 +253,7 @@
        </widget>
       </item>
       <item row="3" column="1">
-       <widget class="QComboBox" name="typeComboBox">
-        <item>
-         <property name="text">
-          <string>text</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>number</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>int</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>boolean</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>date</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>datetime</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>html</string>
-         </property>
-        </item>
-       </widget>
+       <widget class="QComboBox" name="typeComboBox"/>
       </item>
       <item row="4" column="0">
        <widget class="QLabel" name="allowEmptyLabel">
@@ -324,6 +288,16 @@
       </item>
       <item row="6" column="1">
        <widget class="QLineEdit" name="initialValueLineEdit"/>
+      </item>
+      <item row="9" column="0">
+       <widget class="QLabel" name="regExprLabel">
+        <property name="text">
+         <string>Reg. Expr.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="9" column="1">
+       <widget class="QLineEdit" name="regExprLineEdit"/>
       </item>
       <item row="10" column="0">
        <widget class="QLabel" name="regExprInvalidHintLabel">
@@ -380,15 +354,15 @@
         </property>
        </widget>
       </item>
-      <item row="9" column="1">
-       <widget class="QLineEdit" name="regExprLineEdit"/>
-      </item>
-      <item row="9" column="0">
-       <widget class="QLabel" name="regExprLabel">
+      <item row="16" column="0">
+       <widget class="QLabel" name="generatorLabel">
         <property name="text">
-         <string>Reg. Expr.</string>
+         <string>generator</string>
         </property>
        </widget>
+      </item>
+      <item row="16" column="1">
+       <widget class="QComboBox" name="generatorComboBox"/>
       </item>
      </layout>
     </widget>

@@ -56,5 +56,5 @@ class CustomSheetPlugin(SheetPlugin):
         """
         return super(CustomSheetPlugin, self).view_validity(df, view)
 
-    def hint(self, value):
-        return super(CustomSheetPlugin, self).hint(value)
+    def hint(self, column, value):
+        return super(CustomSheetPlugin, self).hint(column, value)

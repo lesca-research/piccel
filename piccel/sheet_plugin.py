@@ -163,7 +163,7 @@ class SheetPlugin:
 
         Return: None | Form | html str | Plotter | svg str
         """
-        label = '%s | update' % self.sheet
+        label = '%s | update' % self.sheet.label
         return self.sheet.form_update_entry(entry_df.index.values[0]), label
 
     def hint(self, column, value):

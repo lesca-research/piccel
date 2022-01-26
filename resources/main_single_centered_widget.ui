@@ -70,7 +70,7 @@
          <property name="frameShadow">
           <enum>QFrame::Raised</enum>
          </property>
-         <layout class="QVBoxLayout" name="verticalLayout">
+         <layout class="QVBoxLayout" name="vlayout_main">
           <property name="leftMargin">
            <number>0</number>
           </property>

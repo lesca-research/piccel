@@ -41,6 +41,42 @@ def df_index_from_value(df, value_dict):
 def df_filter_from_dict(df, value_dict):
     return df.loc[(df[list(value_dict)] == pd.Series(value_dict)).all(axis=1)]
 
+def language_abbrev(language):
+    # https://www.loc.gov/standards/iso639-2/php/code_list.php
+    return {'French' : 'Fre',
+            'English' : 'Eng'}[language]
+
+class get_set_connect:
+    def __init__(self, f_get, f_set):
+        self.get = f_get
+        self.set = f_set
+    def __call__(self):
+        self.set(self.get())
+
+class text_connect:
+    def __init__(self, text_get, text_set, ignore_empty=False):
+        self.text_get = text_get
+        self.text_set = text_set
+        self.ignore_empty = ignore_empty
+    def __call__(self):
+        txt = self.text_get()
+        if txt != '' or not self.ignore_empty:
+            self.text_set(txt)
+
+class refresh_text:
+    def __init__(self, item, item_tr_label, ui_label,
+                 hide_on_empty=True):
+        self.item = item
+        self.item_tr_label = item_tr_label
+        self.ui_label = ui_label
+        self.hide_on_empty = hide_on_empty
+    def __call__(self):
+        text = self.item.tr[self.item_tr_label]
+        self.ui_label.setText(text)
+        if self.hide_on_empty and (text is None or len(text)==0):
+            self.ui_label.hide()
+        else:
+            self.ui_label.show()
 
 class Notifier:
 

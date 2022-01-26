@@ -10,7 +10,7 @@ def main():
     min_args = 0
     max_args = 1
 
-    usage = 'usage: %prog [options] [WORKBOOK_FILE]'
+    usage = 'usage: %prog [options] [WORKBOOK_FILE | FORM_FILE]'
     description = 'Run piccel data input client.'
 
     parser = OptionParser(usage=usage, description=description)
@@ -43,9 +43,9 @@ def main():
         parser.print_help()
         return 1
 
-    cfg_fn = args[0] if nba > 0 else None
+    fn = args[0] if nba > 0 else None
 
-    app = piccel.PiccelApp(sys.argv, cfg_fn, options.user,
+    app = piccel.PiccelApp(sys.argv, fn, options.user,
                            options.access_password, options.role_password,
                            refresh_rate_ms=options.refresh_rate)
     app.show()
