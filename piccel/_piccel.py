@@ -3296,6 +3296,9 @@ class PiccelLogic:
         return last_user + [u for u in users if len(last_user)==0 or \
                             u != last_user[0]]
 
+    def get_user_role(self, user):
+        return self.workbook.get_user_role(user)
+
     def check_access_password(self, password_str):
         return self.workbook.access_password_is_valid(password_str)
 
@@ -3318,13 +3321,11 @@ class PiccelLogic:
         Load workbook using given user.
         """
 
-        self.workbook.user_login(user, role_pwd)
+        self.workbook.user_login(user, role_pwd,
+                                 progress_callback=progression_callback)
 
         logger.debug('Record that last user is %s', user)
         self.system_data.set_last_user(user)
-
-        if progression_callback is not None:
-            progression_callback(1)
 
         self.state = PiccelLogic.STATE_WORKBOOK
 
@@ -3898,6 +3899,8 @@ class WorkBook:
         self.filesystem.save(plugin_fn, plugin_code, overwrite=True)
 
     def reload(self, progress_callback=None):
+        progress_callback = if_none(progress_callback, lambda s: None)
+
         if not self.decrypted:
             logger.error('WorkBook %s: decryption not setup, cannot reload.')
             return
@@ -3914,21 +3917,13 @@ class WorkBook:
         self.load_plugin()
 
         # TODO: sort out sheet filtering
-        # Get number of element to load:
-        if progress_callback is not None:
-            progression = 1
-            progress_total = self.get_nb_sheets() + \
-                sum(lwb.get_nb_sheets(sh_regexp) \
-                    for lwb,sh_regexp in self.linked_books)
-            progress_increment = 100/progress_total
-            logger.debug('WorkBook %s: progress goal: %d, increment: %f',
-                         self.label, progress_total, progress_increment)
-
         # ASSUME all sheet labels are unique
         self.sheets = self.load_sheets(parent_workbook=self)
         logger.debug('WorkBook %s: Load linked workbooks: %s',
                      self.label, ','.join('"%s"'%l for l,b in self.linked_books))
         for linked_book, sheet_regexp in self.linked_books:
+            progress_callback('Load sheets from linked workbook %s' \
+                              % linked_book.label)
             self.sheets.update(linked_book.load_sheets(sheet_regexp,
                                                        progress_callback,
                                                        parent_workbook=self))
@@ -3957,13 +3952,9 @@ class WorkBook:
 
     def load_sheets(self, sheet_regexp=None, progress_callback=None,
                     parent_workbook=None):
+        progress_callback = if_none(progress_callback, lambda s: None)
+
         # TODO. improve progress callback to avoid handling logic of increment
-        if progress_callback is not None:
-            progression = 0
-            progress_total = self.get_nb_sheets()
-            progress_increment = 100/progress_total
-            logger.debug('WorkBook %s: progress goal: %d, increment: %f',
-                         self.label, progress_total, progress_increment)
         if self.filesystem.encrypter is None:
             logger.error('WorkBook %s: decryption not setup, cannot reload.')
             return
@@ -4023,15 +4014,10 @@ class WorkBook:
                 sh = DataSheet.from_files(self.user, sh_fs,
                                           workbook=parent_workbook)
                 sheets[sheet_label] = sh
-                if progress_callback is not None:
-                    progression += progress_increment
-                    progress_callback(int(progression))
+                progress_callback('Loaded sheet %s' % sh.label)
             else:
                 logger.debug('WorkBook %s: sheet %s not loaded (filtered)' % \
                              (self.label, sheet_label))
-            if progress_callback is not None:
-                progress_callback(100)
-
         return sheets
 
     def __eq__(self, other):
@@ -6582,9 +6568,13 @@ class AccessWindow(QtWidgets.QMainWindow,
         pwd_text = self._access_ui.access_password_field.text()
         self.access_password = pwd_text if pwd_text != '' else None
 
-    def disable_buttons(self):
+    def disable_inputs(self):
         self._access_ui.button_ok.setEnabled(False)
         self._access_ui.button_cancel.setEnabled(False)
+
+    def enable_inputs(self):
+        self._access_ui.button_ok.setEnabled(True)
+        self._access_ui.button_cancel.setEnabled(True)
 
     def access_password(self):
         pwd_text = self._access_ui.access_password_field.text()
@@ -6609,6 +6599,81 @@ class AccessWindow(QtWidgets.QMainWindow,
         self._access_ui.access_password_field.clear()
         if self.access_pwd is not None:
             self._access_ui.access_password_field.setText(self.access_pwd)
+
+
+class LoginWindow(QtWidgets.QMainWindow,
+                   ui.main_single_centered_widget_ui.Ui_MainWindow):
+    def __init__(self, get_user_role, login_process, login_cancel, parent=None):
+        super(QtWidgets.QMainWindow, self).__init__(parent)
+        self.setupUi(self)
+
+        self.get_user_role = get_user_role
+
+        self.login_widget = QtWidgets.QWidget()
+        self._login_ui = ui.login_widget_ui.Ui_Form()
+        self._login_ui.setupUi(self.login_widget)
+
+        (self._login_ui.user_list.currentTextChanged
+         .connect(self.login_preload_user))
+        self._login_ui.button_cancel.clicked.connect(login_cancel)
+        self._login_ui.button_ok.clicked.connect(login_process)
+        login_ok_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Return"),
+                                                self)
+        login_ok_shortcut.activated.connect(login_process)
+        login_cancel_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Escape"),
+                                                    self)
+        login_cancel_shortcut.activated.connect(login_cancel)
+
+        self.vlayout_main.addWidget(self.login_widget)
+
+    def login_preload_user(self, user):
+        self._login_ui.other_password_label.hide()
+        self._login_ui.other_password_field.hide()
+
+        if user is not None and user != '':
+            role = self.get_user_role(user)
+            logger.debug('Role of user %s: %s', user, role.name)
+            if role == UserRole.ADMIN or \
+               role == UserRole.MANAGER or \
+               role == UserRole.EDITOR:
+                self._login_ui.other_password_label.show()
+                self._login_ui.other_password_field.show()
+            if role == UserRole.ADMIN:
+                self._login_ui.other_password_label.setText('Admin password')
+            elif role == UserRole.EDITOR:
+                self._login_ui.other_password_label.setText('Editor password')
+            elif role == UserRole.MANAGER:
+                self._login_ui.other_password_label.setText('Manager password')
+
+    def disable_inputs(self):
+        self._login_ui.button_ok.setEnabled(False)
+        self._login_ui.button_cancel.setEnabled(False)
+
+    def enable_inputs(self):
+        self._login_ui.button_ok.setEnabled(True)
+        self._login_ui.button_cancel.setEnabled(True)
+
+    def set_users(self, user_names):
+        self._login_ui.user_list.clear()
+        self._login_ui.user_list.addItems(user_names)
+
+    def set_workbook_info(self, wb_label, wb_color):
+        self._login_ui.workbook_label.setText(wb_label)
+        if wb_color is not None:
+            ss = "QFrame { background-color : %s; }" % wb_color
+            self._login_ui.title_frame.setStyleSheet(ss)
+
+    def reset_role_pwd(self, role_pwd):
+        self._login_ui.other_password_field.clear()
+        if role_pwd is not None:
+            self._login_ui.other_password_field.setText(role_pwd)
+
+    def login_info(self):
+        user = self._login_ui.user_list.currentText()
+        role_pwd_input = self._login_ui.other_password_field.text()
+        role_pwd = role_pwd_input if role_pwd_input != '' else None
+
+        return user, role_pwd
 
 class PiccelApp(QtWidgets.QApplication):
 
@@ -6645,19 +6710,9 @@ class PiccelApp(QtWidgets.QApplication):
         self.access_screen = AccessWindow(self.access_process,
                                           self.access_cancel)
 
-        self.login_screen = QtWidgets.QWidget()
-        self._login_ui = ui.login_ui.Ui_Form()
-        self._login_ui.setupUi(self.login_screen)
-        (self._login_ui.user_list.currentTextChanged
-         .connect(self.login_preload_user))
-        self._login_ui.button_cancel.clicked.connect(self.login_cancel)
-        self._login_ui.button_ok.clicked.connect(self.login_process)
-        login_ok_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Return"),
-                                                self.login_screen)
-        login_ok_shortcut.activated.connect(self.login_process)
-        login_cancel_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Escape"),
-                                                    self.login_screen)
-        login_cancel_shortcut.activated.connect(self.login_cancel)
+        self.login_screen = LoginWindow(self.logic.get_user_role,
+                                        self.login_process,
+                                        self.login_cancel)
 
         self.workbook_screen = WorkBookWindow()
         self._workbook_ui = self.workbook_screen.workbook_ui
@@ -6781,33 +6836,16 @@ class PiccelApp(QtWidgets.QApplication):
             return screen
         return _show
 
-    def login_preload_user(self, user):
-        self._login_ui.other_password_label.hide()
-        self._login_ui.other_password_field.hide()
-        self._login_ui.progressBar.hide()
-
-        if user is not None and user != '':
-            role = self.logic.workbook.get_user_role(user)
-            logger.debug('Role of user %s: %s', user, role.name)
-            if role == UserRole.ADMIN or \
-               role == UserRole.MANAGER or \
-               role == UserRole.EDITOR:
-                self._login_ui.other_password_label.show()
-                self._login_ui.other_password_field.show()
-            if role == UserRole.ADMIN:
-                self._login_ui.other_password_label.setText('Admin password')
-            elif role == UserRole.EDITOR:
-                self._login_ui.other_password_label.setText('Editor password')
-            elif role == UserRole.MANAGER:
-                self._login_ui.other_password_label.setText('Manager password')
-
     def access_cancel(self):
         self.logic.cancel_access()
         self.refresh()
 
     def access_process(self):
         logger.debug('Start access process')
-        self.access_screen.disable_buttons()
+        self.access_screen.statusBar().showMessage('Preparing workbook login...')
+        self.access_screen.disable_inputs()
+        self.processEvents()
+
         self.access_password = self.access_screen.access_password()
 
         error_message = None
@@ -6832,35 +6870,33 @@ class PiccelApp(QtWidgets.QApplication):
 
     def login_process(self):
         logger.debug('Start login process')
-        self._login_ui.button_ok.setEnabled(False)
-        self._login_ui.button_cancel.setEnabled(False)
-        self._login_ui.progressBar.setValue(0)
-        self._login_ui.progressBar.show()
-        self.processEvents() # TODO: make it less ugly using signals and QThread
+        self.login_screen.disable_inputs()
 
-        def progress(value):
-            self._login_ui.progressBar.setValue(value)
+        self.login_screen.statusBar().showMessage("Loading workbook data...")
+        self.processEvents() # TODO: make it less ugly? (using signals/QThread)
+
+        def progress(msg):
+            self.login_screen.statusBar().showMessage(msg)
             self.processEvents()
 
-        user = self._login_ui.user_list.currentText()
-        role_pwd_input = self._login_ui.other_password_field.text()
-        if role_pwd_input == '' or role_pwd_input is None:
+        user, role_pwd = self.login_screen.login_info()
+
+        if role_pwd is None:
             error_message = 'Password required'
         else:
-            role_pwd = role_pwd_input
             error_message = None
             try:
                 self.logic.login(user, role_pwd, progression_callback=progress)
                 if self.refresh_rate_ms > 0:
                     self.timer = QtCore.QTimer(self)
-                    logger.debug('Start data refresh timer with an interval of %d ms',
-                                 self.refresh_rate_ms)
+                    logger.debug('Start data refresh timer with an interval '\
+                                 'of %d ms', self.refresh_rate_ms)
                     self.timer.setInterval(self.refresh_rate_ms)
                     self.timer.timeout.connect(self.logic.workbook
                                                .refresh_all_data)
                     self.timer.start()
             except UnknownUser:
-                error_message = 'Unknown user: %s' %user
+                error_message = 'Unknown user: %s' % user
             except InvalidPassword:
                 error_message = 'Invalid user password'
 
@@ -6876,6 +6912,8 @@ class PiccelApp(QtWidgets.QApplication):
         self.access_screen.set_wb_info(self.logic.workbook.label,
                                        self.logic.workbook.color_hex_str,
                                        self.access_pwd)
+        self.access_screen.enable_inputs()
+        self.access_screen.statusBar().clearMessage()
         self.access_screen.show()
         return self.access_screen
     #     self._access_ui.button_ok.setEnabled(True)
@@ -6890,22 +6928,19 @@ class PiccelApp(QtWidgets.QApplication):
 
     def show_login_screen(self):
         # TODO: Add option to save debug log output in workbook
-        self._login_ui.button_ok.setEnabled(True)
-        self._login_ui.button_cancel.setEnabled(True)
-
-        self._login_ui.user_list.clear()
         user_names = self.logic.get_user_names()
         if self.default_user in user_names:
             user_names = [self.default_user] + \
                 [u for u in user_names if u != self.default_user]
-        self._login_ui.user_list.addItems(user_names)
-        self._login_ui.workbook_label.setText(self.logic.workbook.label)
 
-        self._login_ui.other_password_field.clear()
-        if self.role_pwd is not None:
-            self._login_ui.other_password_field.setText(self.role_pwd)
-
+        self.login_screen.set_users(user_names)
+        self.login_screen.set_workbook_info(self.logic.workbook.label,
+                                            self.logic.workbook.color_hex_str)
+        self.login_screen.reset_role_pwd(self.role_pwd)
+        self.login_screen.enable_inputs()
+        self.login_screen.statusBar().clearMessage()
         self.login_screen.show()
+
         return self.login_screen
 
     def make_text_editor(self, tab_widget, tab_label, text,

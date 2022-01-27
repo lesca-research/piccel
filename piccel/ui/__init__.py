@@ -7,7 +7,7 @@ from .generated import item_choice_radio_ui
 from .generated import item_datetime_ui
 from .generated import item_single_line_ui
 from .generated import item_text_multi_line_ui
-from .generated import login_ui
+from .generated import login_widget_ui
 from .generated import progress_bar_ui
 from .generated import resources
 from .generated import section_ui
