@@ -7,12 +7,13 @@ import os
 import os.path as op
 import shutil
 import unittest
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, namedtuple
 import re
 from pprint import pformat, pprint
 from uuid import uuid1, uuid4
 from time import sleep
 from copy import copy
+from traceback import format_stack, format_exc
 
 import json
 import numpy as np
@@ -23,7 +24,7 @@ from .core import (UserRole, Notifier, LazyFunc, nexts, if_none, refresh_text,
                    text_connect, get_set_connect, language_abbrev)
 from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
                    FormEditionNotOpen, FormEditionLockedType,
-                   FormEditionOrphanError, FormEditionNotAvailable)
+                   FormEditionOrphanError, FormEditionCancelled)
 
 from . import ui
 from .ui.widgets import ListSelectDialog, show_critical_message_box
@@ -3413,7 +3414,7 @@ class FormSheetEditor(QtWidgets.QWidget, ui.form_editor_sheet_ui.Ui_Form):
         self.button_close.clicked.connect(self.on_close)
         self.button_close.setIcon(QtGui.QIcon(':/icons/close_icon'))
 
-        self.unsaved_icon = QtGui.QIcon(':/icons/alter_icon')
+        self.unsaved_icon = QtGui.QIcon(':/icons/alert_icon')
 
         self.sheet = sheet
         self.current_tmp_form_fn = None
@@ -3430,6 +3431,23 @@ class FormSheetEditor(QtWidgets.QWidget, ui.form_editor_sheet_ui.Ui_Form):
             self.sheet.close_form_edition()
         except FormEditionLocked as e:
             error_message = 'Form is being edited by %s' % e
+            if self.sheet.user_role >= UserRole.ADMIN:
+                message_box = QtWidgets.QMessageBox()
+                message_box.setIcon(QtWidgets.QMessageBox.Question)
+                message_box.setText('%s. Click discard to force unlock. ' \
+                                    'OK to keep lock and open in ' \
+                                    'read-only mode' % error_message)
+                message_box.addButton(QtWidgets.QMessageBox.Discard)
+                message_box.addButton(QtWidgets.QMessageBox.Cancel)
+                message_box.addButton(QtWidgets.QMessageBox.Ok)
+                result = message_box.exec_()
+                if result == QtWidgets.QMessageBox.Discard:
+                    self.sheet.close_form_edition()
+                    form = self.sheet.get_form_for_edition()
+                    error_message = None
+                elif result == QtWidgets.QMessageBox.Cancel:
+                    raise FormEditionCancelled()
+                # else Ok -> keep error and form will be open read-only
         except Exception as e:
             error_message = 'Error while requesting form edition: %s' % e
             logger.error(traceback.format_exception(*sys.exc_info()))
@@ -3442,8 +3460,6 @@ class FormSheetEditor(QtWidgets.QWidget, ui.form_editor_sheet_ui.Ui_Form):
             self.button_save.setEnabled(False)
             form = self.sheet.form_master.new()
             self.read_only = True
-            # raise FormEditionNotAvailable(error_message)
-
 
         on_pending = partial(self.button_save.setIcon, self.unsaved_icon)
         on_not_pending = partial(self.button_save.setIcon, QtGui.QIcon())
@@ -3906,6 +3922,7 @@ class FormFileEditor(QtWidgets.QWidget, ui.form_editor_file_ui.Ui_Form):
         except Exception as e:
             show_critical_message_box('Error while opening %s:\n%s' % \
                                       (form_fn, repr(e)))
+            logger.error(format_exc())
 
         self._end_tmp_form_session()
         self.current_form_fn = form_fn
@@ -3990,6 +4007,13 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         self.tree_view.doubleClicked.connect(self.on_view_double_click)
         self.tree_view.clicked.connect(self.on_view_click)
 
+        self.tree_view.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tree_view.setDragDropMode(QtWidgets.QAbstractItemView.DragDrop);
+
+        self.tree_view.setDragEnabled(True);
+        self.tree_view.setAcceptDrops(True);
+        self.tree_view.setDropIndicatorShown(True);
+
         self.form_property_editor = FormPropertyEditor()
         self.verticalLayout.addWidget(self.form_property_editor)
 
@@ -4051,7 +4075,8 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         self.hide_property_editors()
         model_item = self.model.getItem(model_index)
         print('Clicked: %s' % model_item.label)
-        if isinstance(model_item, FormNode):
+        return
+        if model_item.node_type == 'form':
             self.show_form_editor(model_item)
         elif isinstance(model_item, SectionNode):
             self.show_section_editor(model_item)
@@ -4090,14 +4115,10 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
 
     def on_view_double_click(self, model_index):
         self.hide_property_editors()
-        model_item = self.model.getItem(model_index)
+        node = self.model.getItem(model_index)
+        parent_index = model_index.parent()
         self.on_change()
-        if isinstance(model_item, (AddItemNode, AddSectionNode,
-                                   AddSectionTransitionNode, AddChoiceNode,
-                                   AddVarNode)):
-            self.insert_new_before(model_index)
-            # insert_position = model_item.childNumber()-1
-            #self.model.insertRows(insert_position, 1, model_index.parent())
+        if node.node_type == 'add_button' and self.model.new_child(parent_index):
             self.tree_view.expand(model_index.parent())
 
     def insert_new_before(self, model_index):
@@ -4107,12 +4128,12 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         #       %(current_item.label, current_row))
         self.model.insertRows(current_row, 1, model_index.parent())
 
-    def add_variables_node_to_item_node(self, item_model_index):
-        self.model.add_variables_node_to_item_node(item_model_index)
+    def ___add_sub_variables(self, item_model_index):
+        self.model.add_sub_variables(item_model_index)
         self.tree_view.expandRecursively(item_model_index)
 
-    def add_choices_node_to_item_node(self, item_model_index):
-        self.model.add_choices_node_to_item_node(item_model_index)
+    def add_choices_to_item(self, item_model_index):
+        self.model.new_child(self.model.add_choices_node(item_model_index))
         self.tree_view.expandRecursively(item_model_index)
 
     def add_other_choice_node_to_choices_node(self, item_model_index):
@@ -4134,36 +4155,41 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
     def test_form(self):
         FormWidget(self.get_form(), parent=None).show()
 
-    def ask_import_in_form(self, form_node):
+    def ask_import_in_form(self, form_index):
 
         fn_format = 'Piccel form file (*.form)'
         form_fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open file',
                                                            '', fn_format)
         if form_fn is not None and form_fn != '':
-            content_selector = FormEditor(Form.from_file(form_fn),
-                                          selection_mode=True)
-            
+            selector = FormSelector(Form.from_file(form_fn)) # TODO
+            if selector.exec_():
+                for section_label, section_dict in selector.selected_sections():
+                    self.insert_section(section_label, section_dict, form_index)
 
     def open_menu(self, position):
         # indexes = self.sender().selectedIndexes()
         model_index = self.tree_view.indexAt(position)
         if not model_index.isValid():
             return
-        model_item = self.model.getItem(model_index)
 
+        model_item = self.model.getItem(model_index)
         right_click_menu = QtWidgets.QMenu()
 
-        if isinstance(model_item, ItemNode) and \
-           model_item.variables_node() is None:
+        if model_item.node_type == 'item_single_var':
             action = right_click_menu.addAction(self.tr("To group of variables"))
-            f = partial(self.add_variables_node_to_item_node, model_index)
+            f = partial(self.model.convert_item_to_multi_var, model_index)
             action.triggered.connect(f)
 
-        if isinstance(model_item, ItemNode) and \
-           model_item.choices_node() is None:
-            action = right_click_menu.addAction(self.tr("Add choices"))
-            f = partial(self.add_choices_node_to_item_node, model_index)
+        if model_item.node_type in ['item_single_var', 'item']:
+            action = right_click_menu.addAction(self.tr("To text-only"))
+            f = partial(self.model.convert_item_to_text_only, model_index)
             action.triggered.connect(f)
+
+            if len(model_item.childItems) == 0 or \
+               model_item.childItems[0].node_type != 'choices':
+                action = right_click_menu.addAction(self.tr("Add choices"))
+                f = partial(self.add_choices_to_item, model_index)
+                action.triggered.connect(f)
 
         if isinstance(model_item, ChoicesNode) and \
            model_item.other_choice_node() is None:
@@ -4171,19 +4197,19 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
             f = partial(self.add_other_choice_node_to_choices_node, model_index)
             action.triggered.connect(f)
 
-        if not isinstance(model_item,  (FormNode, SectionTransitionsNode)):
+        if model_item.node_type not in ['add_button', 'form', 'transition_rules']:
             act_del = right_click_menu.addAction(self.tr("Delete"))
             act_del.triggered.connect(partial(self.model.removeRow,
                                               model_index.row(),
                                               model_index.parent()))
 
-        if isinstance(model_item, FormNode):
+        if model_item.node_type == 'form':
             act_test = right_click_menu.addAction(self.tr('Test'))
             act_test.triggered.connect(self.test_form)
 
             act_test = right_click_menu.addAction(self.tr('Import'))
             act_test.triggered.connect(partial(self.ask_import_in_form,
-                                               model_item))
+                                               model_index))
 
         right_click_menu.exec_(self.sender().viewport().mapToGlobal(position))
 
@@ -4261,16 +4287,105 @@ from PyQt5.QtCore import (QAbstractItemModel, QFile, QIODevice,
                           QItemSelectionModel, QModelIndex, Qt)
 
 class Node(object):
-    """ A node with no children """
-    def __init__(self, label, parent=None):
+
+    def __init__(self, label, node_type, pdict=None, is_container=False,
+                 parent=None):
         self.parentItem = parent
         self.label = label
+        self.node_type = node_type
+        self.is_container = is_container
+        self.childItems = []
+        self.state = 'base'
+        self.pdict = pdict
+
+    def to_json(self):
+        exported_dict = self.to_dict()
+        exported_dict['parent_label'] = self.parent().label
+        exported_dict['origin_node_type'] = self.node_type
+        return json.dumps(exported_dict)
+
+    def to_dict(self):
+        if self.node_type == 'form':
+            return {
+                **self.pdict.copy(),
+                **{'label' : self.label,
+                   'sections':{s.label:s.to_dict() for s in self.childItems[:-1]}
+                }
+            }
+
+        elif self.node_type == 'section':
+            return {
+                **self.pdict.copy(),
+                **self.childItems[0].to_dict(),
+                **{'label' : self.label,
+                   'items' : [i.to_dict() for i in self.childItems[1:-1]]}
+            }
+
+        elif self.node_type == 'transition_rules':
+            return {
+                'next_section_definition' : [
+                    (child.pdict['predicate'], child.pdict['next_section'])
+                    for child in self.childItems[:-1]
+                ]
+            }
+
+        elif self.node_type.startswith('item'):
+            var_dict = {'keys' : {}, 'init_values' : None}
+            if self.node_type == 'item':
+                init_values = {child.label : child.cfg['init_value']
+                               for child in self.childItems[:-1]
+                               if child.node_type == 'variable'}
+                if all(value is None for value in init_values):
+                    init_values = None
+                var_dict = {
+                    'keys' : {
+                        child.label : (child.cfg['key_tr']
+                                       for child in self.childItems[:-1]
+                                       if child.node_type == 'variable')
+                    },
+                    'init_values' : init_values
+                }
+            elif self.node_type == 'item_text':
+                var_dict['keys'] = None
+                var_dict['init_values'] = None
+            elif self.node_type == 'item_single_var':
+                var_dict['keys'][self.label] = self.pdict['key_tr']
+                if self.pdict['init_value'] is not None:
+                    var_dict['init_values'] = {self.label :
+                                               self.pdict['init_value']}
+                else:
+                    var_dict['init_values'] = None
+            else:
+                raise Exception('Unhandled node type %s' % self.node_type)
+
+            choices_node, other_choice_node = None, None
+            if len(self.childItems) > 0 and \
+               self.childItems[0].node_type == 'choices':
+                choices_node = self.childItems[0]
+                # TODO handle other choice
+            return {
+                **self.pdict.copy(),
+                **var_dict,
+                **{'label' : self.label,
+                   'choices' : (choices_node.to_dict()
+                                if choices_node is not None else None),
+                   'other_choice_label' : (other_choice_node.choice_tr.copy()
+                                           if other_choice_node is not None
+                                           else None)}
+            }
+
+        elif self.node_type == 'choices':
+            return {child.label : child.pdict.copy()
+                    for child in self.childItems[:-1]
+                    if isinstance(child, ChoiceNode)}
 
     def child(self, row):
-        return None
+        if row < 0 or row >= len(self.childItems):
+            return None
+        return self.childItems[row]
 
     def childCount(self):
-        return 0
+        return len(self.childItems)
 
     def childNumber(self):
         if self.parentItem != None:
@@ -4285,45 +4400,14 @@ class Node(object):
             return None
         return self.label
 
-    def insertChildren(self, position, count):
-        return False
+    # def __insertChildren(self, position, count):
+    #     return False
 
-    def insertColumns(self, position, columns):
-        return False
+    # def insertColumns(self, position, columns):
+    #     return False
 
     def parent(self):
         return self.parentItem
-
-    def removeChildren(self, position=0, count=None):
-        return False
-
-    def removeColumns(self, position, columns):
-        return False
-
-    def setData(self, column, value):
-        if column != 0:
-            return False
-
-        self.label = value
-        return True
-
-    def to_dict(self):
-        return {}
-
-class MotherNode(Node):
-
-    def __init__(self, label, parent=None):
-        self.parentItem = parent
-        self.label = label
-        self.childItems = []
-
-    def child(self, row):
-        if row < 0 or row >= len(self.childItems):
-            return None
-        return self.childItems[row]
-
-    def childCount(self):
-        return len(self.childItems)
 
     def removeChildren(self, position=0, count=None):
         count = count if count is not None else len(self.childItems) - position
@@ -4341,18 +4425,51 @@ class MotherNode(Node):
 
         return True
 
-class FormNode(MotherNode):
+    def removeColumns(self, position, columns):
+        return False
+
+    def setData(self, column, value):
+        if column != 0:
+            return False
+
+        self.label = value
+        return True
+
+class ___RootNode(Node):
+
+    def __init__(self, lock_variable_types, parent=None):
+        super(RootNode, self).__init__('', parent)
+        self.lock_variable_types = lock_variable_types
+
+    def insertChildren(self, position, nb_children):
+        if position < 0 or position > len(self.childItems) or \
+           len(self.childItems) > 0: # allow only one child
+            return False
+
+        self.childItems[position:position+nb_children-1] = \
+            [self._new_form_node() for i in range(nb_children)]
+
+        return True
+
+    def _new_form_node(self):
+        return FormNode(Form({}, 'English', ['English', 'French']).to_dict(),
+                        self.lock_variable_types, parent=self)
+
+class FormNode(Node):
     def __init__(self, form_dict, lock_variable_types, parent=None):
         super(FormNode, self).__init__(form_dict.pop('label'), parent)
         self.form_dict = form_dict.copy()
         self.lock_variable_types = lock_variable_types
-        sections = self.form_dict.pop('sections')
+        # sections = self.form_dict.pop('sections')
 
         # children are sections
-        self.childItems = [SectionNode(section_name, section, lock_variable_types,
-                                       parent=self)
-                           for section_name, section in sections.items()]
-        self.childItems.append(AddSectionNode(self))
+        # self.childItems = [SectionNode(section_name, section, lock_variable_types,
+        #                               parent=self)
+        #                   for section_name, section in sections.items()]
+        # self.childItems.append(AddSectionNode(self))
+
+    def set_pdict(self, pdict):
+        self.pdict = pdict.copy()
 
     def section_labels(self):
         return [s.label for s in self.childItems[:-1]]
@@ -4362,22 +4479,31 @@ class FormNode(MotherNode):
         return (self.childItems[i_section+1].label if i_section < self.childCount()-1
                 else None)
 
-    def insertChildren(self, position, nb_childs):
+    def insertChildren(self, position, nb_children):
         if position < 0 or position > len(self.childItems):
             return False
 
-        self.childItems[position:position] = [self._new_section_node()
-                                              for i in range(nb_childs)]
+        self.childItems[position:(position+nb_children-1)] = \
+            [self._new_section_node() for i in range(nb_children)]
 
         return True
 
-    def _new_section_node(self):
-        i_section = len(self.childItems)
-        set_names = set(s.label for s in self.childItems)
-        while 'section_%d' % i_section in set_names:
-            i_section += 1
-        section_name = 'section_%d' % i_section
+    def section_labels(self):
+        return set(s.label for s in self.childItems)
 
+    def new_child_label(self, label_pat='section_%d', label=None):
+        set_names = self.section_labels()
+
+        if label is not None and label not in set_names:
+            return label
+
+        i_section = len(self.childItems)
+        while label_pat % i_section in set_names:
+            i_section += 1
+        section_name = label_pat % i_section
+
+    def _new_section_node(self):
+        section_name = self.new_child_label()
         new_section_cfg = (FormSection([], self.form_dict['default_language'],
                                        self.form_dict['supported_languages'])
                            .to_dict())
@@ -4393,29 +4519,33 @@ class FormNode(MotherNode):
         }
 
 
-class SectionNode(MotherNode):
-    def __init__(self, section_name, section_dict, lock_variable_types, parent=None):
+class ___SectionNode(Node):
+    def __init__(self, section_name, section_dict, lock_variable_types,
+                 parent=None):
         super(SectionNode, self).__init__(section_name, parent)
         self.section_dict = section_dict
-        self.section_name = section_name
+        #self.section_name = section_name
         self.lock_variable_types = lock_variable_types
         self.state = 'base'
 
-        transitions_cfg = self.section_dict.pop('next_section_definition')
-        transitions_node = SectionTransitionsNode(transitions_cfg, parent=self)
-        self.childItems.append(transitions_node)
+        #transitions_cfg = self.section_dict.pop('next_section_definition')
+        #transitions_node = SectionTransitionsNode(transitions_cfg, parent=self)
+        #self.childItems.append(transitions_node)
 
-        self.childItems.extend(ItemNode(item['label'], item, lock_variable_types,
-                                        parent=self) for item in
-                               self.section_dict.pop('items'))
-        self.childItems.append(AddItemNode(self))
+        #self.childItems.extend(ItemNode(item['label'], item, lock_variable_types,
+        #                                parent=self) for item in
+        #                      self.section_dict.pop('items'))
+        #self.childItems.append(AddItemNode(self))
 
-    def insertChildren(self, position, nb_nodes):
+    def set_pdict(self, pdict):
+        self.section_dict = pdict
+
+    def insertChildren(self, position, nb_children):
         if position < 0 or position > len(self.childItems):
             return False
 
-        self.childItems[position:position] = [self._new_item()
-                                              for i_item in range(nb_nodes)]
+        self.childItems[position:(position+nb_children-1)] = \
+            [self._new_item() for i_item in range(nb_children)]
         return True
 
     def all_keys(self):
@@ -4424,6 +4554,19 @@ class SectionNode(MotherNode):
             if not isinstance(item, (AddItemNode, SectionTransitionsNode)):
                 set_keys.update(item.all_keys())
         return set_keys
+
+
+    def new_child_label(self, label_pat='Var_%d', label=None):
+        used_keys = self.all_keys()
+
+        if label is not None and label not in used_keys:
+            return label
+
+        label_idx = len(used_keys)
+        while  label_pat % label_idx in used_keys:
+            label_idx += 1
+
+        return label_pat % label_idx
 
     def _new_item(self):
         used_keys = self.all_keys()
@@ -4440,8 +4583,10 @@ class SectionNode(MotherNode):
                                  self.section_dict['supported_languages'],
                                  label=item_label).to_dict()
 
-        return ItemNode(new_item_dict.pop('label'), new_item_dict,
-                        self.lock_variable_types, parent=self)
+        new_node = ItemNode(new_item_dict.pop('label'), self.lock_variable_types,
+                            parent=self)
+        new_node.set_pdict(new_item_dict)
+        return new_node
 
     def to_dict(self):
         return {
@@ -4450,27 +4595,31 @@ class SectionNode(MotherNode):
             **{'items' : [i.to_dict() for i in self.childItems[1:-1]]}
         }
 
+    def to_json(self):
+        return json.dumps({**{'label':self.label,
+                              'parent_label':self.parent().label},
+                           **self.to_dict()})
 
-class SectionTransitionsNode(MotherNode):
-    def __init__(self, transitions_cfg, parent=None):
+class SectionTransitionsNode(Node):
+    def __init__(self, parent=None):
         super(SectionTransitionsNode, self).__init__('next section', parent)
-        if transitions_cfg is not None:
-            if isinstance(transitions_cfg, str):
-                self.childItems.append(SectionTransitionNode('transition rule 1',
-                                                             transitions_cfg, parent=self))
-            else:
-                self.childItems = [SectionTransitionNode('transition rule %d' % it,
-                                                         transition_def, parent=self)
-                                   for it, transition_def in enumerate(transitions_cfg)]
+        # if transitions_cfg is not None:
+        #     if isinstance(transitions_cfg, str):
+        #         self.childItems.append(SectionTransitionNode('transition rule 1',
+        #                                                      transitions_cfg, parent=self))
+        #     else:
+        #         self.childItems = [SectionTransitionNode('transition rule %d' % it,
+        #                                                  transition_def, parent=self)
+        #                            for it, transition_def in enumerate(transitions_cfg)]
 
-        self.childItems.append(AddSectionTransitionNode(self))
+        # self.childItems.append(AddSectionTransitionNode(self))
 
-    def insertChildren(self, position, nb_nodes):
+    def insertChildren(self, position, nb_children):
         if position < 0 or position > len(self.childItems):
             return False
 
-        self.childItems[position:position] = [self._new_transition()
-                                              for i_item in range(nb_nodes)]
+        self.childItems[position:(position+nb_children-1)] = \
+            [self._new_transition() for i_item in range(nb_children)]
         return True
 
     def _new_transition(self):
@@ -4490,8 +4639,8 @@ class SectionTransitionsNode(MotherNode):
 class SectionTransitionNode(Node):
     def __init__(self, label, transition_cfg, parent=None):
 
-        if isinstance(transition_cfg, str):
-            transition_cfg = ('True', transition_cfg)
+        #if isinstance(transition_cfg, str):
+        #    transition_cfg = ('True', transition_cfg)
 
         # label = ('submit' if transition_cfg[1] == '__submit__'
         #          else 'to %s' % transition_cfg[1])
@@ -4505,35 +4654,26 @@ class SectionTransitionNode(Node):
     def transition_rule(self):
         return (self.cfg['predicate'], self.cfg['next_section'])
 
-class ItemNode(MotherNode):
-    def __init__(self, label, item_dict, locked_variable_types=None, parent=None):
+class ItemNode(Node):
+    def __init__(self, label, locked_variable_types=None, parent=None):
         self.locked_variable_types = (locked_variable_types
                                       if locked_variable_types is not None
                                       else {})
-        if len(item_dict['keys']) == 1:
-            label = next(iter(item_dict['keys']))
-        elif label == '':
-            if len(item_dict['keys']) == 0:
-                label = 'text only'
-            else: # len(len(item_dict['keys']) > 1:
-                label = 'Variable Group'
         super(ItemNode, self).__init__(label, parent)
-        self.item_dict = item_dict
-
         self.state = 'base'
+
+    def set_pdict(self, item_dict):
+
+        self.key_tr = None
+        self.init_values = None
 
         if len(item_dict['keys']) > 0:
             self.text_only = False
-            if item_dict['choices'] is not None:
-                choices_node = ChoicesNode(item_dict.pop('choices'), parent=self)
-                self.childItems.append(choices_node)
-            if not len(item_dict['keys']) <= 1:
-                variables_node = VariablesNode(item_dict['keys'],
-                                               item_dict['init_values'],
-                                               parent=self)
-                self.childItems.append(variables_node)
-            else:
-                self.key_tr = item_dict['keys'][self.label]
+            if len(item_dict['keys']) == 1:
+                try:
+                    self.key_tr = item_dict['keys'][self.label]
+                except KeyError:
+                    from IPython import embed; embed()
                 init_values = item_dict.pop('init_values')
                 self.init_value = (init_values[self.label]
                                    if init_values is not None else None)
@@ -4541,6 +4681,7 @@ class ItemNode(MotherNode):
             self.text_only = True
         item_dict.pop('keys')
 
+        self.item_dict = item_dict
         self.check_locked_var_types()
 
     def check_locked_var_types(self):
@@ -4574,8 +4715,8 @@ class ItemNode(MotherNode):
                     saved_key_tr = child.childItems[0].cfg['key_tr'].copy()
                     saved_init_value = child.childItems[0].cfg['init_value']
                 elif nb_sub_children > 2:
-                    logger.warning('Cannot retrieve key translation and init value '\
-                                   'from several deleted variables')
+                    logger.warning('Cannot retrieve key translation and '\
+                                   'init value from several deleted variables')
                 break
         success = super(ItemNode, self).removeChildren(position, count)
         if success and saved_key_tr is not None:
@@ -4584,11 +4725,11 @@ class ItemNode(MotherNode):
 
         return success
 
-    def add_variables_node(self):
+    def add_variables_node(self, keys=None, init_values=None):
         if self.variables_node() is None:
-            variables_node = VariablesNode({self.label : self.key_tr},
-                                           {self.label : self.init_value},
-                                           parent=self)
+            keys = if_none(keys, {self.label : self.key_tr})
+            init_values = if_none(init_values, {self.label : self.init_value})
+            variables_node = VariablesNode(keys, init_values, parent=self)
             self.childItems.append(variables_node)
             return True
         return False
@@ -4598,6 +4739,9 @@ class ItemNode(MotherNode):
             if isinstance(child, VariablesNode):
                 return child
         return None
+
+    def new_label(self, label_pat='Var_%d'):
+        return self.parent().new_child_label(label_pat)
 
     def choices_node(self):
         for child in self.childItems:
@@ -4634,11 +4778,14 @@ class ItemNode(MotherNode):
                                        else None)}
         }
 
-    def add_choices_node(self):
-        if self.choices_node() is None:
-            choices_node = ChoicesNode({'choice_value1' :
-                                        {'French': 'Choix 1',
-                                         'English' : 'Choice 1'}}, parent=self)
+    def to_json(self):
+        return json.dumps({**{'label':self.label,
+                              'parent_label':self.parent().label},
+                           **self.to_dict()})
+
+    def __add_choices_node(self, force=False):
+        if force or self.choices_node() is None:
+            choices_node = ChoicesNode({}, parent=self)
             self.childItems.insert(0, choices_node)
             return True
         return False
@@ -4650,34 +4797,24 @@ class ItemNode(MotherNode):
         else:
             return variables_node.all_keys()
 
-    def new_var_name(self):
-        used_keys = self.parent().all_keys()
-        label_pat = 'Var_%d'
-        label_idx = len(used_keys)
-        while  label_pat % label_idx in used_keys:
-            label_idx += 1
 
-        return label_pat % label_idx
-
-
-class ChoicesNode(MotherNode):
+class ChoicesNode(Node):
     def __init__(self, choices, parent=None):
         super(ChoicesNode, self).__init__('choices', parent)
         for choice_value, choice_tr in choices.items():
             self.childItems.append(ChoiceNode(choice_value, choice_tr,
                                               parent=self))
-        self.childItems.append(AddChoiceNode(self))
 
     def to_dict(self):
         return {child.label : child.choice_tr for child in self.childItems[:-1]
                 if isinstance(child, ChoiceNode)}
 
-    def insertChildren(self, position, nb_childs):
+    def insertChildren(self, position, nb_children):
         if position < 0 or position > len(self.childItems):
             return False
 
-        self.childItems[position:position] = [self._new_choice_node()
-                                              for i in range(nb_childs)]
+        self.childItems[position:(position+nb_children-1)] = \
+            [self._new_choice_node() for i in range(nb_children)]
 
         return True
 
@@ -4696,18 +4833,27 @@ class ChoicesNode(MotherNode):
             return True
         return False
 
-    def _new_choice_node(self):
+    def children_labels(self):
+        return set(child.label for child in self.childItems
+                   if not isinstance(child, AddChoiceNode))
+
+    def new_child_label(self, label_pat='choice_%d', label=None):
+        used_choices = self.all_choice_labels
+        if label is not None and label not in used_choices:
+            return label
+
         i_choice = len(self.childItems) - 1
-        used_choices = set(child.label for child in self.childItems)
         while 'choice_%d' % i_choice in used_choices:
             i_choice += 1
         choice = 'choice_%d' % i_choice
 
-        return ChoiceNode(choice, {'French': 'Choix %d' % i_choice,
-                                   'English' : 'Choice %d' % i_choice},
+    def _new_choice_node(self):
+        return ChoiceNode(self.new_child_label(),
+                          {'French': 'Choix %d' % i_choice,
+                           'English' : 'Choice %d' % i_choice},
                           parent=self)
 
-class VariablesNode(MotherNode):
+class VariablesNode(Node):
     def __init__(self, keys_tr, init_values, parent=None):
         super(VariablesNode, self).__init__('variables', parent)
 
@@ -4734,22 +4880,18 @@ class VariablesNode(MotherNode):
             'init_values' : init_values
         }
 
-    def insertChildren(self, position, nb_childs):
+    def insertChildren(self, position, nb_children):
         if position < 0 or position > len(self.childItems):
             return False
 
-        self.childItems[position:position] = [self._new_var_node()
-                                              for i in range(nb_childs)]
+        self.childItems[position:position+nb_children-1] = \
+            [self._new_var_node() for i in range(nb_children)]
 
         self.parent().check_locked_var_types()
         return True
 
     def _new_var_node(self):
-        used_keys = self.parent().parent().all_keys()
-        i_var = len(self.childItems) - 1
-        while 'Var_%d' % i_var in used_keys:
-            i_var += 1
-        var_name = 'Var_%d' % i_var
+        var_name =  self.parent().new_label()
 
         return VarNode(var_name, {'French': 'Nom de variable %d' % i_var,
                                   'English' : 'Name of variable %d' % i_var},
@@ -4766,15 +4908,22 @@ class VarNode(Node):
 
         self.state = 'base'
 
-    def setData(self, column, value):
+    def setData(self, column, value, force=False):
         success = super(VariablesNode, self).setData(column, value)
         self.parent().parent().check_locked_var_types()
         return success
+
+    def new_label(self, label_pat='Var_%d'):
+        return self.parent().parent().new_child_label(label_pat)
+
 
 class ChoiceNode(Node):
     def __init__(self, label, choice_tr, parent=None):
         super(ChoiceNode, self).__init__(label, parent)
         self.choice_tr = choice_tr
+
+    def new_label(self, label_pat='choice_%d'):
+        return self.parent().new_child_label(label_pat)
 
 class OtherChoiceNode(Node):
     def __init__(self, choice_tr, parent=None):
@@ -4801,13 +4950,77 @@ class AddChoiceNode(Node):
     def __init__(self, parent=None):
         super(AddChoiceNode, self).__init__('+', parent)
 
+def make_unique_label(label, existing_labels):
+    idx = 0
+    label_origin = label
+    while label in existing_labels:
+        idx += 1
+        label = label_origin + '_%d' % idx
+    return label
+
+ChildDef = namedtuple('ChildDef', ['node_types', 'is_container',
+                                   'gen_label', 'gen_pdict'])
+DLG = 'English'
+SLG = ['English', 'French']
+
+def gen_unique_label(label, parent_node, tree_model):
+    return make_unique_label(label, tree_model.child_labels(parent_node))
+
+def gen_item_label(parent_node, tree_model):
+    if parent_node.node_type == 'section':
+        all_keys = tree_model.all_section_keys(parent_node)
+    elif parent_node.node_type == 'item':
+        all_keys = tree_model.all_section_keys(parent_node.parent())
+    return make_unique_label('Var', all_keys)
+
+def gen_new_item_single_var(label):
+    item_dict = FormItem({label : {'French': 'Nom de variable',
+                             'English': 'Variable name'}},
+                         DLG, SLG, label=label).to_dict()
+    item_dict['key_tr'] = item_dict.pop('keys')[label]
+    if item_dict['init_values'] is not None:
+        item_dict['init_value'] = (item_dict.pop('init_values').get(label, None))
+    else:
+        item_dict['init_value'] = None
+    return item_dict
+
 class TreeModel(QAbstractItemModel):
+    CHILD_DEF = {
+        'form' : ChildDef(['section'], True,
+                          partial(gen_unique_label, 'section'),
+                          lambda l: FormSection([], DLG, SLG).to_dict()),
+        'section' : ChildDef(['item_single_var', 'item_text', 'item'],
+                             False, gen_item_label, gen_new_item_single_var),
+        'item' : ChildDef(['variable'], False, gen_item_label,
+                          lambda l: FormItem({l:{'French': 'Nom de variable',
+                                                 'English': 'Variable name'}},
+                                             DLG, SLG, label=l).to_dict()),
+        'choices' : ChildDef(['choice'], False,
+                             partial(gen_unique_label, 'choice'),
+                             lambda l: {'French': 'Choix',
+                                        'English': 'Choices'}),
+        'transition_rules' : ChildDef(['transition_rule'], False,
+                                      partial(gen_unique_label,'transition_rule'),
+                                      lambda l: {'predicate' : 'True',
+                                                 'next_section' : '__submit__'}),
+    }
+
     def __init__(self, form_dict, locked_variable_types=None, parent=None):
         super(TreeModel, self).__init__(parent)
 
-        self.root = MotherNode('')
-        self.root.childItems.append(FormNode(form_dict, locked_variable_types,
-                                             parent=self.root))
+        self.locked_variable_types = locked_variable_types
+        #self.root = MotherNode('')
+        #self.root.childItems.append(FormNode(form_dict, locked_variable_types,
+        #                                     parent=self.root))
+
+        self.root = Node('root', 'root')
+        # self.insert_node('', 'root', QModelIndex(),
+        #                  is_container=True)
+        self.insert_form(form_dict)
+
+        self.text_item_icon = {
+            'base' : QtGui.QIcon(':/icons/text_icon')
+        }
 
         self.multi_variable_icon = {
             'base' : QtGui.QIcon(':/icons/form_multi_variable_icon')
@@ -4822,6 +5035,222 @@ class TreeModel(QAbstractItemModel):
         self.next_section_icon = QtGui.QIcon(':/icons/form_next_section_icon')
         self.choices_icon = QtGui.QIcon(':/icons/form_choices_icon')
 
+    def new_child(self, parent_index):
+        parent_node = self.getItem(parent_index)
+        if parent_node.is_container:
+            child_def = TreeModel.CHILD_DEF[parent_node.node_type]
+            label = child_def.gen_label(parent_node, self)
+            new_index = self.insert_node(label, child_def.node_types[0],
+                                         parent_index,
+                                         pdict=child_def.gen_pdict(label),
+                                         is_container=child_def.is_container)
+            if child_def.node_types[0] == 'section':
+                transitions_index = self.insert_node('next section',
+                                                     'transition_rules',
+                                                     new_index, irow=0,
+                                                     is_container=True)
+                self.new_child(transitions_index)
+            return True
+        else:
+            return False
+
+    def insert_node(self, label, node_type, parent_index, irow=None,
+                    pdict=None, is_container=False):
+        """
+        ASSUME: given label is valid wrt underlying logic (eg uniqueness)
+        """
+        parent_node = self.getItem(parent_index)
+
+        # Insert node in parent node before button to add new section
+        default_irow = max(0, (self.rowCount(parent_index)
+                               - int(parent_node.is_container)))
+        irow = if_none(irow, default_irow)
+        logger.debug('Add node %s of type %s to %s at irow=%d', label, node_type,
+                     parent_node.label, irow)
+        new_node = Node(label, node_type, is_container=is_container, pdict=pdict,
+                        parent=parent_node)
+        self.beginInsertRows(parent_index, irow, irow)
+        parent_node.childItems.insert(irow, new_node)
+        self.endInsertRows()
+
+        new_node_index = self.index(irow, 0, parent_index)
+        if is_container:
+            # Insert button to add new item
+            self.beginInsertRows(new_node_index, 0, 0)
+            new_node.childItems.append(Node('+', 'add_button', parent=new_node))
+            self.endInsertRows()
+
+        return new_node_index
+
+    def child_labels(self, node):
+        child_type = TreeModel.CHILD_DEF[node.node_type].node_types[0]
+        return [c.label for c in node.childItems if c.node_type == child_type]
+
+    def all_section_keys(self, section_node):
+        all_keys = []
+        for child in section_node.childItems:
+            if child.node_type in ['item', 'item_single_var']:
+                all_keys.extend(self.all_item_keys(child))
+        return all_keys
+
+    def all_item_keys(self, item_node):
+        if item_node.node_type == 'item':
+            return self.child_labels(item_node)
+        elif item_node.node_type == 'item_single_var':
+            return [item_node.label]
+
+    def insert_form(self, form_dict):
+
+        sections_dict = form_dict.pop('sections')
+        form_label = form_dict.pop('label')
+        form_index = self.insert_node(form_label, 'form', QModelIndex(),
+                                      pdict=form_dict, is_container=True)
+
+        # Insert sections
+        for section_label, section_dict in sections_dict.items():
+            self.insert_section(section_label, section_dict, form_index)
+
+    def insert_section(self, label, section_dict, form_index, irow=None,
+                       fix_duplicate_label=True):
+
+        items = section_dict.pop('items')
+        transitions_def = section_dict.pop('next_section_definition')
+
+        # Insert section in form node before button to add new section
+        if fix_duplicate_label:
+            form_node = self.getItem(form_index)
+            label = make_unique_label(label, self.child_labels(form_node))
+        section_index = self.insert_node(label, 'section', form_index,
+                                         pdict=section_dict, is_container=True,
+                                         irow=irow)
+
+        # Insert transitions node as 1st child of section node
+        transitions_index = self.insert_node('next section', 'transition_rules',
+                                             section_index, irow=0,
+                                             is_container=True)
+        # Insert Transition rules
+        if transitions_def is not None:
+            if isinstance(transitions_def, str):
+                transitions_def = [('True', transitions_def)]
+            for it, transition_def in enumerate(transitions_def):
+                self.insert_node('transition rule %d' % it, 'transition_rule',
+                                 transitions_index,
+                                 pdict={'predicate' : transition_def[0],
+                                        'next_section' : transition_def[1]
+                                 })
+
+        for item_dict in items:
+            self.insert_item(item_dict, section_index)
+
+    def insert_item(self, item_dict, section_index, irow=None,
+                    fix_duplicate_label=True):
+        """
+        IMPORTANT: item_dict can be altered in this function to fix
+        duplicate variable names
+        """
+        section_node = self.getItem(section_index)
+        irow = if_none(irow, self.rowCount(section_index) - 1)
+        if fix_duplicate_label:
+            self.make_item_var_names_unique(section_node, item_dict)
+
+        logger.debug('Add item %s to section %s at irow=%d', item_dict['label'],
+                     section_node.label, irow)
+
+        item_label = item_dict.pop('label')
+        choices = item_dict.pop('choices')
+
+        def _if_empty(l, d):
+            if l is None or l == '':
+                return d
+            return l
+
+        keys = item_dict.pop('keys')
+        init_values = item_dict.pop('init_values')
+
+        if keys == 0:
+            item_label = _if_empty(item_label, 'Text Only')
+            node_type = 'item_text'
+            is_container = False
+        elif len(keys) == 1:
+            item_label = next(iter(keys))
+            node_type = 'item_single_var'
+            item_dict['key_tr'] = keys[item_label]
+            if init_values is not None:
+                item_dict['init_value'] = init_values[item_label]
+            else:
+                item_dict['init_value'] = None
+            is_container = False
+        else: # len(keys) > 1:
+            item_label = _if_empty(item_label, 'Variable Group')
+            node_type = 'item'
+            is_container = True
+
+        item_index = self.insert_node(item_label, node_type, section_index,
+                                      pdict=item_dict, is_container=is_container,
+                                      irow=irow)
+
+        if node_type != 'item_text':
+            if choices is not None and len(choices) > 0:
+                choices_index = self.add_choices_node(item_index)
+
+                for choice_label, choice_dict in choices.items():
+                    self.insert_node(choice_label, 'choice', choices_index,
+                                     pdict=choice_dict)
+
+        if node_type == 'item':
+            init_values = if_none(init_values, [None] * len(keys))
+            for (key, key_tr), init_value in zip(keys.items(), init_values):
+                self.insert_sub_variable(item_index, key, init_value)
+
+    def insert_sub_variable(self, item_index, var_label, var_tr, init_value,
+                            irow=None):
+        return self.insert_node(var_label, 'variable', item_index,
+                                pdict={'key_tr' : var_tr,
+                                       'init_value' : init_value},
+                                irow=irow)
+
+
+    def make_item_var_names_unique(self, section_node, item_dict):
+        if item_dict['keys'] is None or len(item_dict['keys']) == 0:
+            return
+
+        all_keys = self.all_section_keys(section_node)
+        given_keys = list(item_dict['keys'])
+        for ikey, key in enumerate(given_keys):
+            idx = 0
+            key_origin = key
+            while key in all_keys or (idx>0 and key in given_keys):
+                idx += 1
+                key = key_origin + '_%d' % idx
+            if key != key_origin:
+                if len(item_dict['keys']) == 1:
+                    item_dict['label'] = key
+                for k in ('keys', 'init_values'):
+                    item_dict[k][key] = item_dict[k].pop(key_origin)
+                given_keys[ikey] = key
+
+    def add_choices_node(self, item_index):
+        item_node = self.getItem(item_index)
+
+        for ichild, child in enumerate(item_node.childItems):
+            if child.node_type == 'choices':
+                return self.index(ichild, 0, item_index)
+
+        choices_index = self.insert_node('choices', 'choices', item_index,
+                                         irow=0, is_container=True)
+
+        return choices_index
+
+    def ___insert_choice(self, label, choice_dict, choices_index, irow=None):
+        item_index = None
+
+        irow = if_none(irow, self.rowCount(choices_index) - 1)
+        # TODO: use this pattern everywhere instead of adding default child
+        #       and then changing its data
+        self.beginInsertRows(choices_index, irow, irow)
+        choices_node.childItems.insert(irow, ChoiceNode(label, choice_dict))
+        self.endInsertRows()
+
     def columnCount(self, parent=QModelIndex()):
         return 1
 
@@ -4833,56 +5262,211 @@ class TreeModel(QAbstractItemModel):
            and role != QtCore.Qt.DecorationRole:
             return None
 
-        item = self.getItem(index)
+        node = self.getItem(index)
 
         if role == Qt.DisplayRole or role == Qt.EditRole:
-            return item.data(0)
+            return node.data(0)
 
-        if role == Qt.FontRole and isinstance(item, (VariablesNode, ChoicesNode,
-                                                     SectionTransitionsNode)):
+        if role == Qt.FontRole and node.node_type in ['variables', 'choices',
+                                                      'section_transitions']:
             font = QtGui.QFont()
             font.setItalic(True)
             return font
         elif role == QtCore.Qt.DecorationRole and \
-             ( (isinstance(item, ItemNode) and item.variables_node() is None) or \
-               isinstance(item, VarNode) ):
-            return self.variable_icon[item.state]
-        elif role == QtCore.Qt.DecorationRole and \
-             isinstance(item, ItemNode) and item.variables_node() is not None:
-            return self.multi_variable_icon[item.state]
-        elif role == QtCore.Qt.DecorationRole and isinstance(item, SectionNode):
-            return self.section_icon[item.state]
-        elif role == QtCore.Qt.DecorationRole and isinstance(item, ChoicesNode):
+             node.node_type in ['item_single_var', 'variable']:
+            return self.variable_icon[node.state]
+        elif role == QtCore.Qt.DecorationRole and node.node_type == 'item':
+            return self.multi_variable_icon[node.state]
+        elif role == QtCore.Qt.DecorationRole and node.node_type == 'item_text':
+            return self.text_item_icon[node.state]
+        elif role == QtCore.Qt.DecorationRole and node.node_type == 'section':
+            return self.section_icon[node.state]
+        elif role == QtCore.Qt.DecorationRole and node.node_type == 'choices':
             return self.choices_icon
         elif role == QtCore.Qt.DecorationRole and \
-             isinstance(item, SectionTransitionsNode):
+             node.node_type == 'section_transitions':
             return self.next_section_icon
 
     def flags(self, index):
         if not index.isValid():
-            return 0
+            return Qt.NoItemFlags
+
+        default_flags = super(TreeModel, self).flags(index)
 
         item = self.getItem(index)
-        if isinstance(item, (AddItemNode, AddSectionNode, AddChoiceNode,
-                             AddVarNode, AddSectionTransitionNode,
-                             ChoicesNode, VariablesNode, SectionTransitionsNode,
-                             SectionTransitionNode, OtherChoiceNode)):
-            return super(TreeModel, self).flags(index)
+        if item.node_type in ['add_button', 'choices', 'variables',
+                              'transition_rules', 'transition_rule',
+                              'other_choice']:
+            return default_flags
+        elif item.node_type in ['item', 'item_single_var', 'item_text']:
+            return Qt.ItemIsDragEnabled | Qt.ItemIsEditable | default_flags
+        elif item.node_type == 'section':
+            return Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled | \
+                Qt.ItemIsEditable | default_flags
+        elif item.node_type == 'form':
+            return Qt.ItemIsDropEnabled | Qt.ItemIsEditable | default_flags
         else:
-            return Qt.ItemIsEditable | super(TreeModel, self).flags(index)
+            return Qt.ItemIsEditable | default_flags
+
+    def supportedDropActions(self):
+        return Qt.MoveAction
+
+    def mimeTypes(self):
+        return ["text/json"]
+
+    # QMimeData *DragDropListModel::
+    def mimeData(self, indexes):
+        mimeData = QtCore.QMimeData()
+        encodedData = QtCore.QByteArray()
+        stream = QtCore.QDataStream(encodedData, QtCore.QIODevice.WriteOnly)
+
+        for index in indexes:
+            if index.isValid():
+                node = self.getItem(index)
+                stream.writeQString(node.to_json());
+
+        mimeData.setData("text/json", encodedData);
+        return mimeData
+
+    def canDropMimeData(self, mime_data, drop_action, irow, icolumn,
+                        parent_index):
+        # TODO adapt with new node API
+        logger.debug2('Can drop on irow %d, icolumn %d, parent %s?',
+                      irow, icolumn, self.getItem(parent_index))
+        # default canDropMimeData: can drop if data has proper format and
+        #                          action is in supportedDropActions
+        #                          (here moveAction only)
+        # Additional criterions:
+        #     - only insertion is supported (irow != -1,
+        #        cannot drop onto an existing element)
+        #     - item can only be dropped in a section
+        #     - section can only be dropped in a form
+        #     - cannot drop below the node used as button to add new child
+        if (icolumn > self.columnCount() - 1):
+            logger.debug2('can NOT drop!')
+            return False
+
+        if super().canDropMimeData(mime_data, drop_action, irow, icolumn,
+                                   parent_index) and \
+            irow != -1 and \
+            irow < self.rowCount(parent_index) - 1:
+
+            mime_dict, dropped_type, _ = self.unpack_mime_data(mime_data)
+            if mime_dict is None:
+                return False
+
+            parent_node = self.getItem(parent_index)
+            child_def = TreeModel.CHILD_DEF[parent_node.node_type]
+            logger.debug2('dropped type: %s, parent_type: %s, '\
+                          'child types: %s', dropped_type,
+                          parent_node.node_type, child_def.node_types)
+            if dropped_type in child_def.node_types:
+                logger.debug2('can drop!')
+                return True
+            else:
+                logger.debug2('can NOT drop!')
+                return False
+        else:
+            logger.debug2('can NOT drop!')
+            return False
+
+    def unpack_mime_data(self, mime_data):
+        stream = QtCore.QDataStream(mime_data.data('text/json'))
+        try:
+            mime_dict = json.loads(stream.readQString())
+            logger.debug2('Dict from mime data:\n%s', pformat(mime_dict))
+            parent_label = mime_dict.pop('parent_label', None)
+            dropped_type = mime_dict.pop('origin_node_type', None)
+            return mime_dict, dropped_type, parent_label
+        except Exception as e:
+            logger.error('Error while reading mime data:\n%s' % repr(e))
+            logger.error(format_exc())
+            return None, None, None
+
+    def dropMimeData(self, mime_data, drop_action, irow, icolumn, parent_index):
+        parent_node = self.getItem(parent_index)
+        logger.debug2('process drop on irow %d, icolumn %d, parent %s (%s)',
+                      irow, icolumn, parent_node.label,
+                      parent_node.node_type)
+
+        node_dict, dropped_type, parent_label = \
+            self.unpack_mime_data(mime_data)
+        if node_dict is None:
+            return False
+
+        # label = node_dict.pop('label')
+        # if parent_label != parent_node.label:
+        #     label = parent_node.new_child_label(label=label)
+
+
+        fix_duplicate_label = (parent_label is not None and
+                               parent_label != parent_node.label)
+        if dropped_type == 'section':
+            section_label = node_dict.pop('label')
+            self.insert_section(section_label, node_dict, parent_index, irow,
+                                fix_duplicate_label=fix_duplicate_label)
+            return True
+        elif dropped_type.startswith('item'):
+            self.insert_item(node_dict, parent_index, irow,
+                             fix_duplicate_label=fix_duplicate_label)
+            return True
+        return False
+
+        # parent_node = self.getItem(parent_index)
+
+        # logger.debug2('Drop data of type %s on row %d, col %d', dropped_type,
+        #               irow, icolumn)
+        # # logger.debug2('Dict to drop: %s', pformat(node_dict))
+        # logger.debug2('Parent node: %s %s', parent_node, parent_node.label)
+
+
+        # logger.debug2('Label for inserted item: %s', label)
+        # if 1:
+        #     #persistent_parent_index = QtCore.QPersistentModelIndex(parent_index)
+        #     self.layoutAboutToBeChanged.emit()#[persistent_parent_index])
+        #     if dropped_type == 'item': # parent_type is section node
+        #         new_node = ItemNode(label, node_dict,
+        #                             self.locked_variable_types)
+        #     elif dropped_type == 'section': # parent_type is section node
+        #         new_node = SectionNode(label, node_dict,
+        #                                self.locked_variable_types)
+        #     parent_node.childItems.insert(irow, new_node)
+        #     #self.changePersistentIndexList()
+        #     self.layoutChanged.emit() #[persistent_parent_index])
+        #     # self.dataChanged.emit(parent_index, parent_index)
+        # else:
+        #     if dropped_type == 'item': # parent_type is section node
+        #         new_node = ItemNode(label, node_dict,
+        #                             self.locked_variable_types)
+        #     elif dropped_type == 'section': # parent_type is section node
+        #         new_node = SectionNode(label, node_dict,
+        #                                self.locked_variable_types)
+
+        #     if self.insertRows(irow, 1, parent_index):
+        #         inserted_index = self.index(irow, 0, parent_index)
+        #         self.setData(inserted_index, label,
+        #                      force=parent_label==parent_node.label)
+        #         inserted_node = self.getItem(inserted_index)
+        #         if dropped_type == 'item':
+        #             inserted_node.item_dict = node_dict
+        #         elif dropped_type == 'section':
+        #             inserted_node.section_dict = node_dict
+        #     else:
+        #         return False
+        #     #parent_node.childItems[irow:irow] =  [new_node]
+        #     #self.endInsertRows()
+        # return True
 
     def getItem(self, index):
         if index.isValid():
             item = index.internalPointer()
             if item:
                 return item
-
         return self.root
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if orientation == Qt.Horizontal and role == Qt.DisplayRole:
-            return '' # self.root.data(section)
-
+            return '' 
         return None
 
     def index(self, row, column, parent=QModelIndex()):
@@ -4896,31 +5480,58 @@ class TreeModel(QAbstractItemModel):
         else:
             return QModelIndex()
 
-    def insertRows(self, position, rows, parent=QModelIndex()):
+    def ___insertRows(self, position, rows, parent=QModelIndex()):
         parentItem = self.getItem(parent)
 
         self.beginInsertRows(parent, position, position + rows - 1)
-        print('Add %d row(s) at position %d to %s' % \
-              (rows, position, parentItem.label))
+        logger.debug('Add %d row(s) at position %d to %s',
+                     rows, position, parentItem.label)
+        for i in range(position, rows):
+           pass
         success = parentItem.insertChildren(position, rows)
+        child_def = TreeModel.CHILD_DEF[parent_node.node_type]
+        def make_child(i):
+            pass
+        parent_node.children[p:p] = [make_child(i) for i in range(rows)]
         self.endInsertRows()
         return success
 
-    def add_variables_node_to_item_node(self, item_model_index):
+    def convert_item_to_multi_var(self, item_index):
+        """ ASSUME node_type is item_single_var """
+        item_node = self.getItem(item_index)
+        item_node.node_type = 'item'
+        item_node.is_container = True
+        key_tr = item_node.pdict.pop('key_tr')
+        init_value = item_node.pdict.pop('init_value')
+
+        self.beginInsertRows(item_index, 0, 1)
+        item_node.childItems.append(Node(item_node.label, 'variable',
+                                         pdict={'key_tr' : key_tr,
+                                                'init_value' : init_value},
+                                         parent=item_node))
+        item_node.childItems.append(Node('+', 'add_button', parent=item_node))
+        self.endInsertRows()
+
+        self.dataChanged.emit(item_index, item_index)
+
+    def convert_item_to_text_only(self, item_index):
+        item_node = self.getItem(item_index)
+        item_node.node_type = 'item_text'
+        self.removeRows(0, self.rowCount(item_index), item_index)
+        item_node.is_container = False
+        item_node.pdict['keys'] = None
+        item_node.pdict['init_values'] = None
+
+        self.dataChanged.emit(item_index, item_index)
+
+    def __add_sub_variables(self, item_model_index,
+                          keys=None, init_values=None):
         item_node = self.getItem(item_model_index)
         position = 0 + int(item_node.choices_node is not None)
         self.beginInsertRows(item_model_index, position, position)
         print('Add variables_node at position %d to %s' % \
               (position, item_node.label))
         success = item_node.add_variables_node()
-        self.endInsertRows()
-        return success
-
-    def add_choices_node_to_item_node(self, item_model_index):
-        item_node = self.getItem(item_model_index)
-        self.beginInsertRows(item_model_index, 0, 0)
-        print('Add choices_node to %s' % item_node.label)
-        success = item_node.add_choices_node()
         self.endInsertRows()
         return success
 
@@ -4939,7 +5550,7 @@ class TreeModel(QAbstractItemModel):
         childItem = self.getItem(index)
         parentItem = childItem.parent()
 
-        if parentItem == self.root:
+        if parentItem is None or parentItem == self.root:
             return QModelIndex()
 
         return self.createIndex(parentItem.childNumber(), 0, parentItem)
@@ -4957,12 +5568,12 @@ class TreeModel(QAbstractItemModel):
         parentItem = self.getItem(parent)
         return parentItem.childCount()
 
-    def setData(self, index, value, role=Qt.EditRole):
+    def setData(self, index, value, role=Qt.EditRole, force=False):
         if role != Qt.EditRole:
             return False
 
-        item = self.getItem(index)
-        result = item.setData(index.column(), value)
+        node = self.getItem(index)
+        result = node.setData(index.column(), value)
 
         if result:
             self.dataChanged.emit(index, index)

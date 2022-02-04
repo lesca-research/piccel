@@ -663,7 +663,7 @@ class NonUniqueIndexFromValues(Exception) : pass
 
 from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
                    FormEditionNotOpen, FormEditionLockedType,
-                   FormEditionOrphanError, FormEditionNotAvailable, SheetNotFound)
+                   FormEditionOrphanError, FormEditionCancelled, SheetNotFound)
 
 class DataSheetSetupDialog(QtWidgets.QDialog):
     def __init__(self, sheet, parent=None):
@@ -712,8 +712,9 @@ class DataSheet:
     SHEET_LABEL_RE = re.compile('^[A-Za-z._-]+$')
 
     def __init__(self, label, form_master=None, df=None, user=None,
-                 filesystem=None, live_forms=None, watchers=None,
-                 workbook=None, properties=None, plugin_code_str=None):
+                 filesystem=None, live_forms=None,
+                 watchers=None, workbook=None, properties=None,
+                 plugin_code_str=None, user_role=None):
         """
         filesystem.root is the sheet-specific folder where to save all data
         and pending forms.
@@ -726,6 +727,8 @@ class DataSheet:
         Tracking of file changes is reset here.
         """
 
+        # TODO: check consistency between access level and given user role
+
         self.label = DataSheet.validate_sheet_label(label)
         self.properties = {}
         self.access_level = UserRole.VIEWER
@@ -737,6 +740,7 @@ class DataSheet:
         self.form_master = form_master
         self.live_forms = live_forms if live_forms is not None else {}
         self.user = user
+        self.user_role = if_none(user_role, UserRole.VIEWER)
 
         self.filesystem = None
         if filesystem is not None:
@@ -779,9 +783,9 @@ class DataSheet:
                            else inspect.getsource(sheet_plugin_template))
         self.set_plugin_from_code(plugin_code_str)
 
-        
-    def set_user(self, user):
+    def set_user(self, user, user_role):
         self.user = user
+        self.user_role = user_role
         self.live_forms.clear()
         self.load_live_forms()
 
@@ -818,7 +822,7 @@ class DataSheet:
         self.plugin.set_workbook(workbook)
 
     @staticmethod
-    def from_files(user, filesystem, watchers=None, workbook=None):
+    def from_files(user, filesystem, user_role=None, watchers=None, workbook=None):
         filesystem = filesystem.clone()
         filesystem.enable_track_changes()
 
@@ -830,8 +834,9 @@ class DataSheet:
         sheet_properties = DataSheet.load_properties_from_file(filesystem)
         plugin_code = DataSheet.load_plugin_code_from_file(filesystem)
         sheet = DataSheet(label, form_master=form_master, df=None, user=user,
-                          filesystem=filesystem, watchers=watchers,
-                          workbook=workbook, properties=sheet_properties,
+                          user_role=user_role, filesystem=filesystem,
+                          watchers=watchers, workbook=workbook,
+                          properties=sheet_properties,
                           plugin_code_str=plugin_code)
         sheet.reload_all_data()
         sheet.load_live_forms()
@@ -2329,7 +2334,8 @@ def foo():
         self.sheet_ts.update_properties({'lesca_participant_sheet' : True})
         self.sheet_ts.save_properties(overwrite=True)
 
-        sheet_ts2 = DataSheet.from_files(self.user, self.sheet_ts.filesystem.clone())
+        sheet_ts2 = DataSheet.from_files(self.user,
+                                         self.sheet_ts.filesystem.clone(), None)
         self.assertEqual(sheet_ts2.access_level, UserRole.MANAGER)
         self.assertTrue(sheet_ts2.get_property('lesca_participant_sheet'))
 
@@ -3843,7 +3849,7 @@ class WorkBook:
             sheet_folder = op.join(self.data_folder, WorkBook.SHEET_FOLDER)
             sh_fs = self.filesystem.change_dir(op.join(sheet_folder,
                                                        sheet_label))
-            sheet = DataSheet.from_files(None, sh_fs, workbook=self)
+            sheet = DataSheet.from_files(None, sh_fs, None, workbook=self)
         else:
             sheet = self[sheet_label]
 
@@ -4012,6 +4018,7 @@ class WorkBook:
                                                            sheet_label))
 
                 sh = DataSheet.from_files(self.user, sh_fs,
+                                          user_role=self.user_role,
                                           workbook=parent_workbook)
                 sheets[sheet_label] = sh
                 progress_callback('Loaded sheet %s' % sh.label)
@@ -4048,7 +4055,7 @@ class WorkBook:
         sheet.set_workbook(self)
 
         if self.user is not None:
-            sheet.set_user(self.user)
+            sheet.set_user(self.user, self.user_role)
 
         self.sheets[sheet.label] = sheet
 
@@ -5820,7 +5827,6 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
 
         self.form_ui.open_button.clicked.connect(self.on_select_root_dir)
 
-
         self.colors = ['#eddcd2', '#fff1e6', '#fde2e4', '#fad2e1', '#c5dedd',
                        '#dbe7e4', '#f0efeb', '#d6e2e9', '#bcd4e6', '#99c1de']
         self.form_ui.colorComboBox.addItems([''] * len(self.colors))
@@ -6136,7 +6142,6 @@ class TabSorter:
         self.tab_widget = tab_widget
 
         self.editor_icon = QtGui.QIcon(':/icons/editor_icon')
-        self.unsaved_editor_icon = QtGui.QIcon(':/icons/editor_unsaved_icon')
         self.warning_icon = QtGui.QIcon(':/icons/alert_icon')
         self.null_icon = QtGui.QIcon()
 
@@ -6230,7 +6235,7 @@ class TabSorter:
             try:
                 editor_widget = FormSheetEditor(sheet, on_close,
                                                 parent=self.tab_widget)
-            except FormEditionNotAvailable:
+            except FormEditionCancelled:
                 return
             tab_label = '%s | Form edit' % sheet.label
             self.form_editors_widgets[sheet.label] = editor_widget
