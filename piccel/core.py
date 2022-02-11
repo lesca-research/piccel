@@ -7,6 +7,9 @@ from .logging import logger
 def if_none(value, default_value):
     return value if value is not None else default_value
 
+def if_none_or_empty(value, default_value):
+    return value if (value is not None and len(value) > 0) else default_value
+
 def nexts(l):
     """
     ASSUME: l has unique elements
@@ -65,7 +68,7 @@ class text_connect:
 
 class refresh_text:
     def __init__(self, item, item_tr_label, ui_label,
-                 hide_on_empty=True):
+                 hide_on_empty=False):
         self.item = item
         self.item_tr_label = item_tr_label
         self.ui_label = ui_label

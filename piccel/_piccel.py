@@ -737,6 +737,10 @@ class DataSheet:
         if df is not None and form_master is None:
             raise Exception('Form master cannot be None if df is given')
 
+        if form_master is not None and form_master.is_empty():
+            logger.info('Form master associated to sheet %s is empty. '\
+                        'It will be ignored.', self.label)
+            form_master = None
         self.form_master = form_master
         self.live_forms = live_forms if live_forms is not None else {}
         self.user = user
@@ -990,6 +994,7 @@ class DataSheet:
                              self.label, '\n'.join(data_bfns))
             if len(data_bfns) > 0:
                 if self.df.shape[0] > 0:
+                    self.notifier.notify('pre_clear_data')
                     self.df.drop(self.df.index, inplace=True)
                     self.notifier.notify('cleared_data')
                 # Associated view will be cleared
@@ -1061,7 +1066,11 @@ class DataSheet:
             raise FormEditionLocked(lock_user)
 
         self.lock_form_master_edition()
-        return self.form_master.new()
+        if self.form_master is None:
+            return Form(default_language='English',
+                        supported_languages=['English', 'French'])
+        else:
+            return self.form_master.new()
 
     def get_alternate_master_forms(self):
         return self.filesystem.listdir('master_form_alternates')
@@ -1093,29 +1102,37 @@ class DataSheet:
 
     def save_edited_form(self, edited_form):
         if not self.filesystem.exists('master.form.lock'):
-            raise FormEditionNotOpen()
+            raise  FormEditionNotOpen()
 
-        # Check that existing variables keep the same vtype in the edited form
-        current_vtypes = self.form_master.get_vtypes()
-        edited_vtypes = edited_form.get_vtypes()
-        invalid_vars = []
-        for key, vtype in edited_vtypes.items():
-            if (key in current_vtypes) and (current_vtypes[key] != vtype):
-                invalid_vars.append((key,vtype,current_vtypes[key]))
-        if len(invalid_vars) > 0:
-            msg = '\n'.join('%s has type %s but must be %s' % iv
-                            for iv in invalid_vars)
-            raise FormEditionLockedType(msg)
+        if self.df is not None and self.df.shape[0] > 0:
 
-        # Check that the edited form does not have orphan variables
-        # (that are in df but not in current form master)
-        orphan_variables = self.get_orphan_variables(current_vtypes=current_vtypes)
-        if len(orphan_variables.intersection(edited_vtypes.keys())) > 0:
-            raise FormEditionOrphanError(list(sorted(orphan_variables)))
+            # Check that existing variables keep the same vtype
+            # in the edited form
+            current_vtypes = self.form_master.get_vtypes()
+            edited_vtypes = edited_form.get_vtypes()
+            invalid_vars = []
+            for key, vtype in edited_vtypes.items():
+                if (key in current_vtypes) and (current_vtypes[key] != vtype):
+                    invalid_vars.append((key,vtype,current_vtypes[key]))
+            if len(invalid_vars) > 0:
+                msg = '\n'.join('%s has type %s but must be %s' % iv
+                                for iv in invalid_vars)
+                raise FormEditionLockedType(msg)
+
+            # Check that the edited form does not create orphan variables
+            # (that in current form master but not in new one)
+            logger.debug('Variables in current form: %s',
+                         list(sorted(current_vtypes)))
+            logger.debug('Variables in edited form: %s',
+                         list(sorted(edited_vtypes)))
+            orphan_variables = set(current_vtypes).difference(edited_vtypes)
+            logger.debug('Orphan variables: %s', list(sorted(orphan_variables)))
+            if len(orphan_variables) > 0:
+                raise FormEditionOrphanError(list(sorted(orphan_variables)))
 
         self.set_form_master(edited_form, save=True, overwrite=True)
 
-    def get_orphan_variables(self, current_vtypes=None):
+    def ___get_orphan_variables(self, current_vtypes=None):
         if self.df is None:
             return set()
         current_vtypes = (current_vtypes if current_vtypes is not None
@@ -1132,7 +1149,10 @@ class DataSheet:
             self.save_form_master(overwrite=overwrite)
             logger.info('Set and save form master of sheet %s set (form label: %s)',
                         self.label, form.label)
-
+            self.notifier.notify('pre_header_change')
+            self.df = self.empty_df_from_master()
+            self.notifier.notify('header_changed')
+            self.reload_all_data()
 
     ## End of methods used for FormEditor IO
     def _remove_from_value_to_index(self, entry_df):
@@ -2620,22 +2640,48 @@ def foo():
         self.assertRaises(FormEditionNotOpen,
                           self.sheet_ts.save_edited_form, Form({}, 'fr', {'fr'}))
 
-    def test_form_edition_locked_types(self):
+    def test_form_edition_locked_types_no_data(self):
+        sheet_id = 'Empty_Sheet'
+        sheet_folder = op.join(self.tmp_dir, sheet_id)
+        os.makedirs(sheet_folder)
+        filesystem = LocalFileSystem(sheet_folder, track_changes=True)
+        sheet = DataSheet(sheet_id, Form.from_dict(self.form_def_ts_data),
+                          None, self.user, filesystem)
+
+        form_master = sheet.get_form_for_edition()
+        form_master['section1'].items[1].vtype = 'text'
+        sheet.save_edited_form(form_master)
+
+    def test_form_edition_locked_types_with_existing_data(self):
         form_master = self.sheet_ts.get_form_for_edition()
         form_master['section1'].items[1].vtype = 'text'
         self.assertRaises(FormEditionLockedType, self.sheet_ts.save_edited_form,
                           form_master)
 
-    def test_form_edition_orphan_variables(self):
+    def test_form_edition_orphan_variable_with_no_data(self):
+        sheet_id = 'Empty_Sheet'
+        sheet_folder = op.join(self.tmp_dir, sheet_id)
+        os.makedirs(sheet_folder)
+        filesystem = LocalFileSystem(sheet_folder, track_changes=True)
+        sheet = DataSheet(sheet_id, Form.from_dict(self.form_def_ts_data),
+                          None, self.user, filesystem)
+
+        form_master = sheet.get_form_for_edition()
+        age_item = form_master['section1'].items[1]
+        save_age_item = FormItem(**age_item.to_dict())
+        form_master.remove_item('section1', age_item)
+        sheet.save_edited_form(form_master)
+        sheet.close_form_edition()
+
+        form_master = sheet.get_form_for_edition()
+        form_master.add_item('section1', age_item)
+        sheet.save_edited_form(form_master)
+
+    def test_form_edition_orphan_variable_with_existing_data(self):
         form_master = self.sheet_ts.get_form_for_edition()
         age_item = form_master['section1'].items[1]
         save_age_item = FormItem(**age_item.to_dict())
         form_master.remove_item('section1', age_item)
-        self.sheet_ts.save_edited_form(form_master)
-        self.sheet_ts.close_form_edition()
-
-        form_master = self.sheet_ts.get_form_for_edition()
-        form_master.add_item('section1', age_item)
         self.assertRaises(FormEditionOrphanError, self.sheet_ts.save_edited_form,
                           form_master)
 
@@ -5585,6 +5631,19 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.refresh_view()
 
         self.sheet.notifier.add_watcher('views_refreshed', self.refresh_view)
+        self.sheet.notifier.add_watcher('appended_entry', self.update_after_append)
+        self.sheet.notifier.add_watcher('entry_set', self.update_after_set)
+        self.sheet.notifier.add_watcher('pre_delete_entry',
+                                        self.update_before_delete)
+        self.sheet.notifier.add_watcher('deleted_entry', self.update_after_delete)
+        self.sheet.notifier.add_watcher('pre_clear_data', self.update_before_clear)
+        self.sheet.notifier.add_watcher('cleared_data', self.update_after_clear)
+        self.sheet.notifier.add_watcher('pre_header_change',
+                                        self.update_before_clear)
+        self.sheet.notifier.add_watcher('header_changed', self.update_after_clear)
+
+    def on_header_changed(self):
+        self.headerDataChanged.emit(QtCore.Qt.Horizontal, O, 1)
 
     def refresh_view(self):
         self.view_df = self.sheet.get_df_view()
@@ -5694,6 +5753,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
                      entry_id, tree_view_irow)
         self.layoutAboutToBeChanged.emit()
         self.beginRemoveRows(QtCore.QModelIndex(), tree_view_irow, tree_view_irow)
+        return True
 
     @QtCore.pyqtSlot()
     def update_after_delete(self, entry_df):
@@ -5703,11 +5763,15 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         return True
 
     @QtCore.pyqtSlot()
+    def update_before_clear(self):
+        self.layoutAboutToBeChanged.emit()
+        self.beginResetModel()
+        return True
+
+    @QtCore.pyqtSlot()
     def update_after_clear(self):
         logger.debug('ItemModel of %s: Update_after_full_clear',
                      self.sheet.label)
-        self.layoutAboutToBeChanged.emit()
-        self.beginResetModel()
         self.endResetModel()
         self.layoutChanged.emit()
         return True
@@ -5957,10 +6021,6 @@ class WorkBookWindow(QtWidgets.QMainWindow):
                 break
 
 # Helper function: single_section_form()
-# Embedd user update @Workbook class
-    # user_add, user_set_status
-# Build a workbook with only one sheet
-# Add user with a form
 # When sheet data change -> send
 
 class SheetNameValidator(QtGui.QValidator):
@@ -6174,7 +6234,15 @@ class TabSorter:
             sheet_widget = SheetWidget(sheet, user_role, self,
                                        parent=self.tab_widget)
             self.sheet_widgets[sheet.label] = sheet_widget
-            tab_idx = self.tab_widget.addTab(sheet_widget, sheet.label)
+
+            nb_tabs = self.tab_widget.count()
+            if not sheet.label.startswith('__'):
+                tab_idx = next((i for i in range(nb_tabs)
+                                if self.tab_widget.tabText(i).startswith('__')),
+                               nb_tabs)
+            else:
+                tab_idx = nb_tabs
+            tab_idx = self.tab_widget.insertTab(tab_idx, sheet_widget, sheet.label)
         if not sheet.plugin_is_valid():
             self.show_tab_sheet_warning(sheet.label, sheet.plugin_error_reporting)
         self.tab_widget.setCurrentIndex(tab_idx)
@@ -6279,8 +6347,8 @@ class TabSorter:
             self.plugin_editors_widgets[sheet.label] = text_editor
 
             tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet.label])+1
-            self.tab_widget.insertTab(tab_idx, text_editor,
-                                      self.editor_icon, sheet.label)
+            tab_idx = self.tab_widget.insertTab(tab_idx, text_editor,
+                                                self.editor_icon, sheet.label)
             self.tab_widget.setCurrentIndex(tab_idx)
 
     def close_tab_plugin_editor(self, sheet_name):
@@ -6335,21 +6403,11 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
         if user_role < UserRole.MANAGER:
             self.button_edit_entry.hide()
 
-        view_icon = (QtGui.QIcon(':/icons/view_icon')
-                     .pixmap(QtCore.QSize(24,24)))
-        self.label_view.setPixmap(view_icon)
-
         # button_icon = QtGui.QIcon(':/icons/refresh_icon')
         # self.button_refresh.setIcon(button_icon)
         # self.button_refresh.clicked.connect(sh.refresh_data)
 
         model = DataSheetModel(sheet)
-        sheet.notifier.add_watcher('appended_entry', model.update_after_append)
-        sheet.notifier.add_watcher('entry_set', model.update_after_set)
-        sheet.notifier.add_watcher('pre_delete_entry',
-                                model.update_before_delete)
-        sheet.notifier.add_watcher('deleted_entry', model.update_after_delete)
-        sheet.notifier.add_watcher('clear_data', model.update_after_clear)
 
         self.tableView.setModel(model)
         hHeader = self.tableView.horizontalHeader()
@@ -6363,7 +6421,7 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
             self.tableView.resizeRowsToContents()
             self.tableView.resizeColumnsToContents()
 
-        for notification in ['appended_entry', 'entry_set', 'pre_delete_entry',
+        for notification in ['appended_entry', 'entry_set',
                              'deleted_entry', 'clear_data']:
             sheet.notifier.add_watcher(notification, resize_table_view)
 
@@ -6463,11 +6521,11 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
                                   sheet)
         self.button_edit_plugin.clicked.connect(f_plugin_editor)
 
-        if user_role < UserRole.ADMIN:
-            self.button_edit_plugin.hide()
-        if user_role < UserRole.MANAGER or sheet.form_master is None:
-            self.button_edit_form.hide()
         if user_role < UserRole.ADMIN or sheet.form_master is None:
+            self.button_edit_plugin.hide()
+        if user_role < UserRole.MANAGER:
+            self.button_edit_form.hide()
+        if user_role < UserRole.ADMIN:
             self.button_delete_entry.hide()
 
         # for form_id, form in sheet.live_forms.items():
@@ -6542,6 +6600,7 @@ class SelectorWindow(QtWidgets.QMainWindow,
         fn_format = "Piccel file (*.psh *.form)"
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open file',
                                                       '', fn_format)
+        logger.debug('Open file %s', fn)
         self.open_file(fn)
 
 class AccessWindow(QtWidgets.QMainWindow,
@@ -6692,6 +6751,9 @@ class PiccelApp(QtWidgets.QApplication):
         self.setStyleSheet(ui.main_qss.main_style)
         Hints.preload(self)
 
+        self.sheet_icon = QtGui.QIcon(':/icons/sheet_icon')
+        self.sheet_add_icon = QtGui.QIcon(':/icons/sheet_add_icon')
+
         self.refresh_rate_ms = refresh_rate_ms
 
         # icon_style = QtWidgets.QStyle.SP_ComputerIcon
@@ -6705,8 +6767,7 @@ class PiccelApp(QtWidgets.QApplication):
             logger.debug('Available cfg fn: %s', cfg_fns)
             recent_files = cfg_fns
 
-        self.selector_screen = SelectorWindow(recent_files,
-                                              self.open_configuration_file,
+        self.selector_screen = SelectorWindow(recent_files, self.open_file,
                                               self.on_create)
         # self.selector_screen = QtWidgets.QWidget()
         # _selector_ui = ui.selector_ui.Ui_Form()
@@ -6729,7 +6790,8 @@ class PiccelApp(QtWidgets.QApplication):
             actions = []
 
             for sheet_label in self.logic.workbook.sheets:
-                go_to_action = QtWidgets.QAction(sheet_label,
+                go_to_action = QtWidgets.QAction(self.sheet_icon,
+                                                 sheet_label,
                                                  self._workbook_ui.tabWidget)
                 go_to_action.triggered.connect(partial(self.tab_sorter.to_sheet,
                                                        sheet_label))
@@ -6740,7 +6802,8 @@ class PiccelApp(QtWidgets.QApplication):
                 separator.setSeparator(True)
                 actions.append(separator)
 
-                add_sheet_action = QtWidgets.QAction('Add sheet',
+                add_sheet_action = QtWidgets.QAction(self.sheet_add_icon,
+                                                     'Add sheet',
                                                      self._workbook_ui.tabWidget)
                 add_sheet_action.triggered.connect(self.on_add_sheet)
                 actions.append(add_sheet_action)
@@ -6786,7 +6849,9 @@ class PiccelApp(QtWidgets.QApplication):
                      .new_sheet(existing_sheet_labels=existing_sheet_labels,
                                 parent=self._workbook_ui.tabWidget))
         if new_sheet is not None:
-            edited_sheet = DataSheetSetupDialog.edit_sheet(new_sheet)
+            #edited_sheet = DataSheetSetupDialog.edit_sheet(new_sheet)
+            # TODO add an additional setup step if necessary?
+            edited_sheet = new_sheet
             if edited_sheet is not None:
                 self.logic.workbook.add_sheet(edited_sheet)
                 self.tab_sorter.show_tab_sheet(edited_sheet,

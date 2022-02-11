@@ -21,7 +21,7 @@ import pandas as pd
 
 from .logging import logger
 from .core import (UserRole, Notifier, LazyFunc, nexts, if_none, refresh_text,
-                   text_connect, get_set_connect, language_abbrev)
+                   text_connect, get_set_connect, language_abbrev, if_none_or_empty)
 from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
                    FormEditionNotOpen, FormEditionLockedType,
                    FormEditionOrphanError, FormEditionCancelled)
@@ -46,6 +46,34 @@ class InvalidSection(Exception): pass
 class SectionNotFound(Exception): pass
 class InvalidSectionMove(Exception): pass
 class BadLabelFormat(Exception): pass
+
+
+class FormSelector(QtWidgets.QDialog):
+    def __init__(self, form, selection_mode, parent=None):
+        super(QtWidgets.QDialog, self).__init__(parent)
+
+        # assert(selection_mode in ['section', 'item'])
+        assert(selection_mode == 'section')
+
+        self.setWindowTitle('Import %s' % {'section' : 'Section(s)',
+                                           'item' : 'Item(s)'}[selection_mode])
+
+
+        QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
+        self.buttonBox.accepted.connect(self.accept)
+        self.buttonBox.rejected.connect(self.reject)
+
+        self.form_selector = FormEditor(form, selection_mode=selection_mode)
+
+        self.layout = QtWidgets.QVBoxLayout()
+        self.layout.addWidget(self.form_selector)
+        self.layout.addWidget(self.buttonBox)
+        self.setLayout(self.layout)
+
+    def get_selection(self):
+        return (self.form_selector.selection_mode,
+                self.form_selector.get_selection())
 
 class FormJsonHook:
     def __init__(self):
@@ -316,6 +344,9 @@ function snakeCaseToCamelCase(s) {
         self.set_language(default_language)
         self.to_next_section()
 
+    def is_empty(self):
+        return len(self.sections) == 0
+
     def add_item(self, section_name, item):
         self[section_name].add_item(item)
         self._register_item(item)
@@ -356,6 +387,7 @@ function snakeCaseToCamelCase(s) {
     def set_language(self, language):
         if language != self.tr.language:
             self.tr.set_language(language)
+            self.notifier.notify('language_changed')
             for section in self.sections.values():
                 section.set_language(language)
 
@@ -517,6 +549,19 @@ function snakeCaseToCamelCase(s) {
                         'default_language' : language,
                         'supported_languages' : {language}}
         sections = {section_label : section_dict}
+        if len(gform_dict.get('metadata', {}).get('description', '')) > 0:
+            description_tr = {language : gform_dict['metadata']['description']}
+            section_dict['items'].append({'keys' : None,
+                                          'vtype' : 'text',
+                                          'title' : {language :
+                                                     'Section description'},
+                                          'choices' : None,
+                                          'default_language' : language,
+                                          'supported_languages':{language},
+                                          'description': description_tr,
+                                          'allow_empty' : True,
+                                          'nb_lines' : 1,
+                                          'other_choice_label' : None})
         var_count, sec_count = 1, 1
         for item_gdict in gform_dict['items']:
             # print('Convert gform item %s' % pformat(item_gdict))
@@ -530,6 +575,19 @@ function snakeCaseToCamelCase(s) {
                                 'supported_languages' : {language},
                                 'items' : []}
                 sections[slabel] = section_dict
+                if len(item_gdict.get('description', '')) > 0:
+                    item_description = {language : item_gdict['description']}
+                    section_dict['items'].append({'keys' : None,
+                                                  'vtype' : 'text',
+                                                  'title' : {language :
+                                                             'Section description'},
+                                                  'choices' : None,
+                                                  'default_language' : language,
+                                                  'supported_languages':{language},
+                                                  'description': item_description,
+                                                  'allow_empty' : True,
+                                                  'nb_lines' : 1,
+                                                  'other_choice_label' : None})
             else:
                 item_title = item_gdict['title']
                 item_choices = None
@@ -2294,7 +2352,6 @@ class TestForm(unittest.TestCase):
         PARAGRAPH_NB_LINES = 10
         expected_form_def = {
             'title' : {dlg : 'Form title'},
-            'description' : {dlg : 'Form description'},
             'default_language' : dlg,
             'supported_languages' : slg,
             'sections' : {
@@ -2303,6 +2360,12 @@ class TestForm(unittest.TestCase):
                     'default_language' : dlg,
                     'supported_languages' : slg,
                     'items' : [
+                        {
+                            'keys' : None,
+                            'title' : {dlg : 'Section description'},
+                            'description' : {dlg : 'Form description'},
+                            'vtype' : 'text'
+                        },
                         {
                             'keys' : {'S1_Q1' :
                                       {dlg : 'section 1 question 1'}},
@@ -2317,12 +2380,15 @@ class TestForm(unittest.TestCase):
                     },
                 'section_2' : {
                     'title' : {dlg : 'This is section 2'},
-                    'description' : {
-                        dlg : 'description of section 2'
-                    },
                     'default_language' : dlg,
                     'supported_languages' : slg,
                     'items' : [
+                        {
+                            'keys' : None,
+                            'title' : {dlg : 'Section description'},
+                            'description' : {dlg : 'description of section 2'},
+                            'vtype' : 'text'
+                        },
                         {
                             'keys' : {'S2_Q1' :
                                       {dlg : 'section 2 question 1'}},
@@ -2333,12 +2399,15 @@ class TestForm(unittest.TestCase):
                 },
                 'section_3' : {
                     'title' : {dlg : 'This is section 3'},
-                    'description' : {
-                        dlg : 'description of section 3'
-                    },
                     'default_language' : dlg,
                     'supported_languages' : slg,
                     'items' : [
+                        {
+                            'keys' : None,
+                            'title' : {dlg : 'Section description'},
+                            'description' : {dlg : 'description of section 3'},
+                            'vtype' : 'text'
+                        },
                         {
                             'keys' : {'S3_Q1' :
                                       {dlg : 'section 3 question 1'}},
@@ -2386,7 +2455,6 @@ class TestForm(unittest.TestCase):
         PARAGRAPH_NB_LINES = 10
         expected_form_def = {
             'title' : {dlg : 'Form title'},
-            'description' : {dlg : 'Form description'},
             'default_language' : dlg,
             'supported_languages' : slg,
             'sections' : {
@@ -2395,6 +2463,12 @@ class TestForm(unittest.TestCase):
                     'default_language' : dlg,
                     'supported_languages' : slg,
                     'items' : [
+                        {
+                            'keys' : None,
+                            'title' : {dlg : 'Section description'},
+                            'description' : {dlg : 'Form description'},
+                            'vtype' : 'text'
+                        },
                         {
                             'keys' : {'required_short_answer' :
                                       {dlg : 'required short answer'}},
@@ -3170,27 +3244,47 @@ class TestCompose(unittest.TestCase):
         compose(get_txt_val, int, partial(d.__setitem__, 'res'))()
         self.assertEqual(d, {'res' : 4})
 
-def link_line_edit(line_edit, dest_dict, dest_key):
+def link_line_edit(line_edit, dest_dict, dest_key, empty_str_is_None=False,
+                   read_only=False):
     try:
         line_edit.editingFinished.disconnect()
     except TypeError:
         pass
 
-    line_edit.setText(dest_dict[dest_key])
-    callback = compose(line_edit.text, partial(dest_dict.__setitem__, dest_key))
-    line_edit.editingFinished.connect(callback)
+    text = dest_dict[dest_key]
+    line_edit.setText(if_none(text, ''))
 
-def link_text_edit(text_edit, dest_dict, dest_key):
+    if not read_only:
+        line_edit.setReadOnly(False)
+        if empty_str_is_None:
+            f_store_in_dict = partial(dict_set_none_if_empty, dest_dict, dest_key)
+        else:
+            f_store_in_dict = partial(dest_dict.__setitem__, dest_key)
+
+        line_edit.editingFinished.connect(compose(line_edit.text, f_store_in_dict))
+    else:
+        line_edit.setReadOnly(True)
+
+def link_text_edit(text_edit, dest_dict, dest_key, empty_str_is_None=False,
+                   read_only=False):
     try:
         text_edit.editingFinished.disconnect()
     except TypeError:
         pass
 
-    text_edit.setPlainText(dest_dict[dest_key])
-    callback = compose(text_edit.toPlainText,
-                       partial(dest_dict.__setitem__, dest_key))
-    text_edit.editingFinished.connect(callback)
+    text = dest_dict[dest_key]
+    text_edit.setPlainText(if_none(text, ''))
 
+    if not read_only:
+        text_edit.setReadOnly(False)
+        if empty_str_is_None:
+            f_store_in_dict = partial(dict_set_none_if_empty, dest_dict, dest_key)
+        else:
+            f_store_in_dict = partial(dest_dict.__setitem__, dest_key)
+        callback = compose(text_edit.toPlainText, f_store_in_dict)
+        text_edit.editingFinished.connect(callback)
+    else:
+        text_edit.setReadOnly(True)
 
 def dict_set_none_if_empty(d, k, s):
     if v == '':
@@ -3220,87 +3314,104 @@ def link_combo_box(combox_box, dest_dict, dest_key, choices=None, editable=True,
     else:
         combox_box.setEnabled(False)
 
-def link_check_box(check_box, dest_dict, dest_key):
+def link_check_box(check_box, dest_dict, dest_key, read_only=False):
     try:
         check_box.stateChanged.disconnect()
     except TypeError:
         pass
     check_box.setChecked(dest_dict[dest_key])
-    def store_state_to_dict(qstate):
-       dest_dict[dest_key] = (qstate == Qt.Checked)
-    check_box.stateChanged.connect(store_state_to_dict)
+    if not read_only:
+        check_box.setEnabled(True)
+        def store_state_to_dict(qstate):
+            dest_dict[dest_key] = (qstate == Qt.Checked)
+        check_box.stateChanged.connect(store_state_to_dict)
+    else:
+        check_box.setEnabled(False)
 
-def link_spin_box(spin_box, dest_dict, dest_key):
+def link_spin_box(spin_box, dest_dict, dest_key, read_only=False):
     try:
         spin_box.valueChanged.disconnect()
     except TypeError:
         pass
     spin_box.setValue(dest_dict[dest_key])
-    spin_box.valueChanged.connect(partial(dest_dict.__setitem__, dest_key))
+    if read_only:
+        spin_box.setEnabled(True)
+        spin_box.valueChanged.connect(partial(dest_dict.__setitem__, dest_key))
+    else:
+        spin_box.setEnabled(False)
 
 class FormPropertyEditor(QtWidgets.QWidget,
                          ui.form_edit_ui.Ui_FormPropertyEditor):
-    def __init__(self, parent=None):
+    def __init__(self, read_only=False, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
+        self.read_only = read_only
 
     def attach(self, form_node):
         for field, language in [(self.title_field_french, 'French'),
                                 (self.title_field_english, 'English')]:
-            link_line_edit(field, form_node.form_dict['title'], language)
+            link_line_edit(field, form_node.pdict['title'], language,
+                           read_only=self.read_only)
 
 class SectionPropertyEditor(QtWidgets.QWidget,
                             ui.section_edit_ui.Ui_SectionPropertyEditor):
-    def __init__(self, parent=None):
+    def __init__(self, read_only=False, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
+        self.read_only = read_only
 
     def attach(self, section_node):
         for field, language in [(self.title_field_french, 'French'),
                                 (self.title_field_english, 'English')]:
-            link_line_edit(field, section_node.section_dict['title'], language)
+            link_line_edit(field, section_node.pdict['title'], language,
+                           read_only=self.read_only)
 
 class ItemPropertyEditor(QtWidgets.QWidget,
                          ui.item_edit_ui.Ui_ItemPropertyEditor):
-    def __init__(self, parent=None):
+    def __init__(self, read_only=False, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
         self.typeComboBox.addItems(list(sorted(FormItem.VTYPES.keys())))
         generators = [''] + sorted([g for g in FormItem.GENERATORS
                                     if g is not None])
         self.generatorComboBox.addItems(generators)
+        self.read_only = read_only
 
     def attach(self, item_node):
         for field, dest_dict, key in [(self.title_field_french,
-                                       item_node.item_dict['title'], 'French'),
+                                       item_node.pdict['title'], 'French'),
                                       (self.title_field_english,
-                                       item_node.item_dict['title'], 'English'),
-                                      (self.regExprLineEdit, item_node.item_dict,
+                                       item_node.pdict['title'], 'English'),
+                                      (self.regExprLineEdit, item_node.pdict,
                                        'regexp'),
                                       (self.regExprInvalidHintLineEdit,
-                                       item_node.item_dict,
+                                       item_node.pdict,
                                        'regexp_invalid_message')]:
-            link_line_edit(field, dest_dict, key)
+            link_line_edit(field, dest_dict, key, read_only=self.read_only)
 
         for field, dest_dict, key in [(self.description_field_french,
-                                       item_node.item_dict['description'],
+                                       item_node.pdict['description'],
                                        'French'),
                                       (self.description_field_english,
-                                       item_node.item_dict['description'],
+                                       item_node.pdict['description'],
                                        'English')]:
-            link_text_edit(field, dest_dict, key)
+            link_text_edit(field, dest_dict, key, read_only=self.read_only)
 
+        link_combo_box(self.typeComboBox, item_node.pdict, 'vtype',
+                       editable=(not item_node.pdict['type_locked'] and
+                                 not self.read_only))
+        link_check_box(self.uniqueCheckBox, item_node.pdict, 'unique',
+                       read_only=self.read_only)
+        link_check_box(self.allowEmptyCheckBox, item_node.pdict, 'allow_empty',
+                       read_only=self.read_only)
+        link_combo_box(self.accessLevelComboBox, item_node.pdict, 'access_level',
+                       editable=not self.read_only)
+        link_spin_box(self.textNbLinesSpinBox, item_node.pdict, 'nb_lines',
+                      read_only=self.read_only)
+        link_combo_box(self.generatorComboBox, item_node.pdict, 'generator',
+                       editable=not self.read_only)
 
-        link_combo_box(self.typeComboBox, item_node.item_dict, 'vtype',
-                       editable=(not item_node.type_locked))
-        link_check_box(self.uniqueCheckBox, item_node.item_dict, 'unique')
-        link_check_box(self.allowEmptyCheckBox, item_node.item_dict, 'allow_empty')
-        link_combo_box(self.accessLevelComboBox, item_node.item_dict, 'access_level')
-        link_spin_box(self.textNbLinesSpinBox, item_node.item_dict, 'nb_lines')
-
-        link_combo_box(self.generatorComboBox, item_node.item_dict, 'generator')
-
-        if item_node.variables_node() is None and not item_node.text_only:
+        if item_node.node_type == 'item_single_var':
             self.initialValueLineEdit.show()
             self.initialValueLabel.show()
             try:
@@ -3308,55 +3419,72 @@ class ItemPropertyEditor(QtWidgets.QWidget,
             except TypeError:
                 pass
             #TODO: handle format/unformat
-            self.initialValueLineEdit.setText(str(item_node.init_value))
-            def store_init_value():
-                # TODO: handle format/unformat
-                item_node.init_value = self.initialValueLineEdit.text()
-            self.initialValueLineEdit.editingFinished.connect(store_init_value)
+            if item_node.pdict['init_value'] is None:
+                text = ''
+            else:
+                text = str(item_node.pdict['init_value'])
+            self.initialValueLineEdit.setText(text)
+
+            if not self.read_only:
+                self.initialValueLineEdit.setReadOnly(False)
+                def store_init_value():
+                    # TODO: handle format/unformat
+                    item_node.pdict['init_value'] = \
+                        if_none_or_empty(self.initialValueLineEdit.text(), None)
+                self.initialValueLineEdit.editingFinished.connect(store_init_value)
+            else:
+                self.initialValueLineEdit.setReadOnly(True)
         else:
             self.initialValueLineEdit.hide()
             self.initialValueLabel.hide()
 
-class ChoicePropertyEditor(QtWidgets.QWidget, ui.choice_edit_ui.Ui_ChoicePropertyEditor):
-    def __init__(self, parent=None):
+class ChoicePropertyEditor(QtWidgets.QWidget,
+                           ui.choice_edit_ui.Ui_ChoicePropertyEditor):
+    def __init__(self, read_only=False, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
+        self.read_only = read_only
 
     def attach(self, choice_node):
         for field, language in [(self.choice_field_french, 'French'),
                                 (self.choice_field_english, 'English')]:
-            link_line_edit(field, choice_node.choice_tr,language)
-
+            link_line_edit(field, choice_node.pdict, language,
+                           read_only=self.read_only)
 
 class VariablePropertyEditor(QtWidgets.QWidget,
                              ui.variable_edit_ui.Ui_VariablePropertyEditor):
-    def __init__(self, parent=None):
+    def __init__(self, read_only=False, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
+        self.read_only = read_only
 
     def attach(self, var_node):
         for field, dest_dict, key in [(self.variable_field_french,
-                                       var_node.cfg['key_tr'], 'French'),
+                                       var_node.pdict['key_tr'], 'French'),
                                       (self.variable_field_english,
-                                       var_node.cfg['key_tr'], 'English'),
+                                       var_node.pdict['key_tr'], 'English'),
                                       (self.initValueLineEdit,
-                                       var_node.cfg, 'init_value')]:
-            link_line_edit(field, dest_dict, key)
+                                       var_node.pdict, 'init_value')]:
+            logger.debug('link line edit for %s', key)
+            link_line_edit(field, dest_dict, key, read_only=self.read_only)
 
 class SectionTransitionPropertyEditor(QtWidgets.QWidget,
                                       ui.section_transition_edit_ui.Ui_SectionTransitionPropertyEditor):
-    def __init__(self, parent=None):
+    def __init__(self, read_only=False, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
+        self.read_only = read_only
 
     def attach(self, transition_node):
-        link_line_edit(self.criterionLineEdit, transition_node.cfg, 'predicate')
+        link_line_edit(self.criterionLineEdit, transition_node.pdict, 'predicate',
+                       read_only=self.read_only)
         next_section_choices = ['__submit__'] + \
                                 [s for s in (transition_node.parent().parent()
-                                             .parent().section_labels())
+                                             .parent().child_labels())
                                  if s != transition_node.parent().parent().label]
-        link_combo_box(self.nextSectionComboBox, transition_node.cfg, 'next_section',
-                       choices=next_section_choices)
+        link_combo_box(self.nextSectionComboBox, transition_node.pdict,
+                       'next_section', choices=next_section_choices,
+                       editable=not self.read_only)
 
 import traceback, sys
 
@@ -3481,9 +3609,11 @@ class FormSheetEditor(QtWidgets.QWidget, ui.form_editor_sheet_ui.Ui_Form):
         self.verticalLayout_2.addWidget(self.form_editor)
 
     def _locked_variable_types(self):
-        locked_vars = self.sheet.form_master.get_vtypes().copy()
-        for var in self.sheet.get_orphan_variables():
-            locked_vars[var] = None
+        if self.sheet.form_master is not None and \
+           self.sheet.df is not None and self.sheet.df.shape[0] > 0:
+            locked_vars = self.sheet.form_master.get_vtypes().copy()
+        else:
+            locked_vars = {}
         return locked_vars
 
     def on_load(self):
@@ -3505,6 +3635,7 @@ class FormSheetEditor(QtWidgets.QWidget, ui.form_editor_sheet_ui.Ui_Form):
         except Exception as e:
             show_critical_message_box('Error while saving form of sheet '\
                                       '%s:\n%s' % (self.sheet.label, repr(e)))
+            logger.error(format_exc())
             return False
         return True
 
@@ -3781,6 +3912,11 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
         set_section_ui(form.current_section_name, form.current_section)
         self.title_label.setText(form.tr['title'])
 
+        refresh_title = refresh_text(form, 'title', self.title_label,
+                                     hide_on_empty=True)
+        refresh_title()
+        form.notifier.add_watcher('language_changed', refresh_title)
+
         radio_language_group = QtWidgets.QButtonGroup(self)
         frame = self.frame_language_select
         for idx,language in enumerate(sorted(form.tr.supported_languages)):
@@ -3912,6 +4048,7 @@ class FormFileEditor(QtWidgets.QWidget, ui.form_editor_file_ui.Ui_Form):
 
     def test_form(self):
         self.form_editor.test_form()
+        self.show()
 
     def load_form(self, form_fn):
         if form_fn is None:
@@ -3993,13 +4130,16 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
 
     formChanged = pyqtSignal()
 
-    def __init__(self, form=None, locked_variable_types=None, parent=None):
+    def __init__(self, form=None, locked_variable_types=None,
+                 selection_mode=None, parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
 
-        locked_variable_types = (locked_variable_types
-                                 if locked_variable_types is not None
-                                 else {})
+        self.selection_mode = selection_mode
+
+        self.locked_variable_types = (locked_variable_types
+                                      if locked_variable_types is not None
+                                      else {})
 
         self.tree_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.tree_view.customContextMenuRequested.connect(self.open_menu)
@@ -4014,26 +4154,37 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         self.tree_view.setAcceptDrops(True);
         self.tree_view.setDropIndicatorShown(True);
 
-        self.form_property_editor = FormPropertyEditor()
+        read_only_props = self.selection_mode is not None
+        self.form_property_editor = FormPropertyEditor(read_only=read_only_props,
+                                                       parent=self)
         self.verticalLayout.addWidget(self.form_property_editor)
 
-        self.section_property_editor = SectionPropertyEditor()
+        self.section_property_editor = \
+            SectionPropertyEditor(read_only=read_only_props, parent=self)
         self.verticalLayout.addWidget(self.section_property_editor)
 
         self.section_transition_property_editor = \
-            SectionTransitionPropertyEditor()
+            SectionTransitionPropertyEditor(read_only=read_only_props,
+                                            parent=self)
         self.verticalLayout.addWidget(self.section_transition_property_editor)
 
-        self.item_property_editor = ItemPropertyEditor()
+        self.item_property_editor = ItemPropertyEditor(read_only=read_only_props,
+                                                       parent=self)
         self.verticalLayout.addWidget(self.item_property_editor)
 
-        self.choice_property_editor = ChoicePropertyEditor()
+        self.choice_property_editor = \
+            ChoicePropertyEditor(read_only=read_only_props)
         self.verticalLayout.addWidget(self.choice_property_editor)
 
-        self.variable_property_editor = VariablePropertyEditor()
+        self.variable_property_editor = \
+            VariablePropertyEditor(read_only=read_only_props)
         self.verticalLayout.addWidget(self.variable_property_editor)
 
-        self.set_form(if_none(form, Form()), locked_variable_types)
+        form = if_none(form, Form(default_language='French',
+                                  supported_languages=['English', 'French']))
+        logger.debug('Edit form %s in selection_mode: %s', form.label,
+                     self.selection_mode)
+        self.set_form(form, self.locked_variable_types)
 
         def on_preview_mode_change(state):
             pass
@@ -4049,6 +4200,32 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
 
         self.hide_property_editors()
 
+        self.import_icon = QtGui.QIcon(':/icons/form_import_icon')
+        self.delete_icon = QtGui.QIcon(':/icons/form_delete_icon')
+        self.choices_icon = QtGui.QIcon(':/icons/form_choices_icon')
+        self.multi_variable_icon = QtGui.QIcon(':/icons/form_multi_variable_icon')
+        self.text_item_icon = QtGui.QIcon(':/icons/text_icon')
+
+    def get_selection(self):
+        if self.selection_mode is None or len(self.model.root.childItems) == 0:
+            return []
+
+        form_node = self.model.root.childItems[0]
+        if self.selection_mode == 'section':
+            selection = {}
+            for section_node in form_node.childItems:
+                if section_node.state == 'sel_checked':
+                    selection[section_node.label] = \
+                        section_node.to_dict(selected_only=True)
+        elif self.selection_mode == 'item':
+            sub_form_dict = form_node.to_dict(selected_only=True)
+            selection = []
+            for section_dict in sub_form_dict['sections'].values():
+                for item in section_dict['items']:
+                    selection.append(item)
+
+        return selection
+
     def on_change(self):
         self.formChanged.emit()
 
@@ -4058,7 +4235,8 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
             form.set_supported_languages(['French', 'English'])
             print('set_form, lock_variable_types:')
             print(lock_variable_types)
-            self.model = TreeModel(form.to_dict(), lock_variable_types)
+            self.model = TreeModel(form.to_dict(), lock_variable_types,
+                                   selection_mode=self.selection_mode)
             self.tree_view.setModel(self.model)
             self.tree_view.expandAll()
             self.tree_view.resizeColumnToContents(1)
@@ -4074,19 +4252,24 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
     def on_view_click(self, model_index):
         self.hide_property_editors()
         model_item = self.model.getItem(model_index)
-        print('Clicked: %s' % model_item.label)
-        return
+        logger.debug('Clicked: %s (state: %s)',
+                     model_item.label, model_item.state)
+
+        self.model.toggle_node_selection(model_index)
+        if self.selection_mode is not None:
+            return
+
         if model_item.node_type == 'form':
             self.show_form_editor(model_item)
-        elif isinstance(model_item, SectionNode):
+        elif model_item.node_type == 'section':
             self.show_section_editor(model_item)
-        elif isinstance(model_item, ItemNode):
+        elif model_item.node_type.startswith('item'):
             self.show_item_editor(model_item)
-        elif isinstance(model_item, (ChoiceNode, OtherChoiceNode)):
+        elif model_item.node_type == 'choice':
             self.show_choice_editor(model_item)
-        elif isinstance(model_item, VarNode):
+        elif model_item.node_type == 'variable':
             self.show_variable_editor(model_item)
-        elif isinstance(model_item, SectionTransitionNode):
+        elif model_item.node_type == 'transition_rule':
             self.show_section_transition_editor(model_item)
 
     def show_variable_editor(self, var_node):
@@ -4118,7 +4301,8 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         node = self.model.getItem(model_index)
         parent_index = model_index.parent()
         self.on_change()
-        if node.node_type == 'add_button' and self.model.new_child(parent_index):
+        if node.node_type == 'add_button' and \
+           self.model.new_child(parent_index):
             self.tree_view.expand(model_index.parent())
 
     def insert_new_before(self, model_index):
@@ -4152,64 +4336,120 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
     #         event.ignore()
     #         return False
 
-    def test_form(self):
-        FormWidget(self.get_form(), parent=None).show()
+    def test_form(self, role=UserRole.VIEWER):
+        form = self.get_form()
+        logger.debug('Test form: %s', pformat(form.to_dict()))
+        FormWidget(form, user_role=role, parent=None).show()
 
-    def ask_import_in_form(self, form_index):
+    def ask_import_sections(self, form_index):
+        self._ask_import(form_index, 'section')
+
+    def ask_import_items(self, section_index):
+        self._ask_import(section_index, 'item')
+
+    def on_form_selector_finished(self, parent_index, selector, result):
+        logger.debug('Process form importation with result %s', result)
+        self.show()
+        if result:
+            selection_mode, selection = selector.get_selection()
+            logger.debug('Selected %d elements for importation (mode %s)',
+                         len(selection), selection_mode)
+            logger.debug2('Imported dict: %s', selection)
+            if selection_mode == 'section':
+                # ASSUME: parent_index is form
+                for section_label, section_dict in selection.items():
+                    self.model.insert_section(section_label, section_dict,
+                                              parent_index)
+            elif selection_mode == 'item':
+                # ASSUME: parent_index is section
+                for item_dict in selection:
+                    self.model.insert_item(section_label, section_dict,
+                                           parent_index)
+            self.tree_view.expandRecursively(parent_index, depth=2)
+        self.selector = None
+
+    def _ask_import(self, parent_index, selection_mode):
 
         fn_format = 'Piccel form file (*.form)'
         form_fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open file',
                                                            '', fn_format)
         if form_fn is not None and form_fn != '':
-            selector = FormSelector(Form.from_file(form_fn)) # TODO
-            if selector.exec_():
-                for section_label, section_dict in selector.selected_sections():
-                    self.insert_section(section_label, section_dict, form_index)
+            logger.debug('Import from %s, mode: %s', form_fn, selection_mode)
+            self.selector = FormSelector(Form.from_json_file(form_fn),
+                                         selection_mode)
+            self.selector.setWindowModality(QtCore.Qt.ApplicationModal)
+            self.finished_callback = partial(self.on_form_selector_finished,
+                                             parent_index, self.selector)
+            self.selector.finished.connect(self.finished_callback)
+            self.selector.open()
 
+    def variable_is_locked(self, node):
+        if node.node_type in ['item_single_var', 'variable']:
+            var_name = node.label
+        else:
+            return False
     def open_menu(self, position):
         # indexes = self.sender().selectedIndexes()
         model_index = self.tree_view.indexAt(position)
-        if not model_index.isValid():
+        if self.selection_mode is not None or not model_index.isValid():
             return
+
+        self.hide_property_editors()
 
         model_item = self.model.getItem(model_index)
         right_click_menu = QtWidgets.QMenu()
 
         if model_item.node_type == 'item_single_var':
-            action = right_click_menu.addAction(self.tr("To group of variables"))
+            action = right_click_menu.addAction(self.multi_variable_icon,
+                                                self.tr("To group of variables"))
             f = partial(self.model.convert_item_to_multi_var, model_index)
             action.triggered.connect(f)
 
         if model_item.node_type in ['item_single_var', 'item']:
-            action = right_click_menu.addAction(self.tr("To text-only"))
+            action = right_click_menu.addAction(self.text_item_icon,
+                                                self.tr("To text-only"))
             f = partial(self.model.convert_item_to_text_only, model_index)
             action.triggered.connect(f)
 
             if len(model_item.childItems) == 0 or \
                model_item.childItems[0].node_type != 'choices':
-                action = right_click_menu.addAction(self.tr("Add choices"))
+                action = right_click_menu.addAction(self.choices_icon,
+                                                    self.tr("Add choices"))
                 f = partial(self.add_choices_to_item, model_index)
                 action.triggered.connect(f)
 
         if isinstance(model_item, ChoicesNode) and \
            model_item.other_choice_node() is None:
-            action = right_click_menu.addAction(self.tr("Add Other choice"))
+            action = right_click_menu.addAction(self.choices_icon,
+                                                self.tr("Add Other choice"))
             f = partial(self.add_other_choice_node_to_choices_node, model_index)
             action.triggered.connect(f)
 
-        if model_item.node_type not in ['add_button', 'form', 'transition_rules']:
-            act_del = right_click_menu.addAction(self.tr("Delete"))
+        if model_item.node_type == 'form':
+
+            test_menu = right_click_menu.addMenu(self.tr('Test'))
+            for role in UserRole:
+                act_test = test_menu.addAction(self.tr('As %s') % role.name)
+                act_test.triggered.connect(partial(self.test_form, role))
+
+            act_test = right_click_menu.addAction(self.import_icon,
+                                                  self.tr('Import'))
+            act_test.triggered.connect(partial(self.ask_import_sections,
+                                               model_index))
+
+        # if model_item.node_type == 'section':
+        #     act_test = right_click_menu.addAction(self.tr('Import item(s)'))
+        #     act_test.triggered.connect(partial(self.ask_import_items,
+        #                                        model_index))
+
+        if model_item.node_type not in ['add_button', 'form', 'transition_rules']\
+            and (model_item.node_type not in ['item_single_var', 'variable'] or \
+                 model_item.label not in self.locked_variable_types):
+            act_del = right_click_menu.addAction(self.delete_icon,
+                                                 self.tr("Delete"))
             act_del.triggered.connect(partial(self.model.removeRow,
                                               model_index.row(),
                                               model_index.parent()))
-
-        if model_item.node_type == 'form':
-            act_test = right_click_menu.addAction(self.tr('Test'))
-            act_test.triggered.connect(self.test_form)
-
-            act_test = right_click_menu.addAction(self.tr('Import'))
-            act_test.triggered.connect(partial(self.ask_import_in_form,
-                                               model_index))
 
         right_click_menu.exec_(self.sender().viewport().mapToGlobal(position))
 
@@ -4288,15 +4528,19 @@ from PyQt5.QtCore import (QAbstractItemModel, QFile, QIODevice,
 
 class Node(object):
 
+    NEXT_SEL_STATE = {'sel_unchecked' : 'sel_checked',
+                      'sel_checked' : 'sel_unchecked'}
+
     def __init__(self, label, node_type, pdict=None, is_container=False,
-                 parent=None):
+                 parent=None, child_type=None, state='base'):
         self.parentItem = parent
         self.label = label
         self.node_type = node_type
         self.is_container = is_container
+        self.child_type = child_type
         self.childItems = []
-        self.state = 'base'
-        self.pdict = pdict
+        self.state = state
+        self.pdict = if_none(pdict, {})
 
     def to_json(self):
         exported_dict = self.to_dict()
@@ -4304,44 +4548,55 @@ class Node(object):
         exported_dict['origin_node_type'] = self.node_type
         return json.dumps(exported_dict)
 
-    def to_dict(self):
+    def child_labels(self):
+        return [c.label for c in self.childItems
+                if c.node_type == self.child_type]
+
+    def to_dict(self, selected_only=False):
+        pdict_copy = self.pdict.copy()
         if self.node_type == 'form':
             return {
-                **self.pdict.copy(),
+                **pdict_copy,
                 **{'label' : self.label,
-                   'sections':{s.label:s.to_dict() for s in self.childItems[:-1]}
+                   'sections':{s.label:s.to_dict() for s in self.childItems
+                               if (s.node_type == self.child_type and \
+                                   (not selected_only or s.state=='sel_checked'))}
                 }
             }
 
         elif self.node_type == 'section':
             return {
-                **self.pdict.copy(),
+                **pdict_copy,
                 **self.childItems[0].to_dict(),
                 **{'label' : self.label,
-                   'items' : [i.to_dict() for i in self.childItems[1:-1]]}
+                   'items' : [i.to_dict() for i in self.childItems
+                              if (i.node_type == self.child_type and \
+                                  (not selected_only or i.state=='sel_checked'))]}
             }
-
         elif self.node_type == 'transition_rules':
             return {
                 'next_section_definition' : [
                     (child.pdict['predicate'], child.pdict['next_section'])
-                    for child in self.childItems[:-1]
+                    for child in self.childItems
+                    if child.node_type == self.child_type
                 ]
             }
 
         elif self.node_type.startswith('item'):
             var_dict = {'keys' : {}, 'init_values' : None}
             if self.node_type == 'item':
-                init_values = {child.label : child.cfg['init_value']
-                               for child in self.childItems[:-1]
-                               if child.node_type == 'variable'}
+                init_values = {child.label : child.pdict['init_value']
+                               for child in self.childItems
+                               if (child.node_type == self.child_type and
+                                   child.node_type == 'variable')}
                 if all(value is None for value in init_values):
                     init_values = None
                 var_dict = {
                     'keys' : {
-                        child.label : (child.cfg['key_tr']
-                                       for child in self.childItems[:-1]
-                                       if child.node_type == 'variable')
+                        child.label : child.pdict['key_tr']
+                        for child in self.childItems
+                        if (child.node_type == self.child_type and
+                            (not selected_only or i.state=='sel_checked'))
                     },
                     'init_values' : init_values
                 }
@@ -4349,22 +4604,27 @@ class Node(object):
                 var_dict['keys'] = None
                 var_dict['init_values'] = None
             elif self.node_type == 'item_single_var':
-                var_dict['keys'][self.label] = self.pdict['key_tr']
-                if self.pdict['init_value'] is not None:
+                var_dict['keys'][self.label] = pdict_copy.pop('key_tr')
+                if pdict_copy['init_value'] is not None:
                     var_dict['init_values'] = {self.label :
-                                               self.pdict['init_value']}
+                                               pdict_copy.pop('init_value')}
                 else:
+                    pdict_copy.pop('init_value', None)
                     var_dict['init_values'] = None
             else:
-                raise Exception('Unhandled node type %s' % self.node_type)
+                raise Exception('Unhandled item node type %s' % self.node_type)
 
             choices_node, other_choice_node = None, None
             if len(self.childItems) > 0 and \
                self.childItems[0].node_type == 'choices':
                 choices_node = self.childItems[0]
                 # TODO handle other choice
+
+            pdict_copy.pop('type_locked')
+            logger.debug('Keys in pdict of %s before conversion to Form dict: %s',
+                         self.label, ", ".join(pdict_copy.keys()))
             return {
-                **self.pdict.copy(),
+                **pdict_copy,
                 **var_dict,
                 **{'label' : self.label,
                    'choices' : (choices_node.to_dict()
@@ -4376,8 +4636,18 @@ class Node(object):
 
         elif self.node_type == 'choices':
             return {child.label : child.pdict.copy()
-                    for child in self.childItems[:-1]
-                    if isinstance(child, ChoiceNode)}
+                    for child in self.childItems
+                    if child.node_type == self.child_type}
+        elif self.node_type == 'choice':
+            return {self.label : pdict_copy}
+        elif self.node_type == 'variable':
+            raise Exception('Should not be called?')
+            return {
+                'keys' : {self.label : pdict_copy['key_tr']},
+                'init_values' : {self.label : pdict_copy['init_value']}
+            }
+        else:
+            raise Exception('Unhandled node type %s' % self.node_type)
 
     def child(self, row):
         if row < 0 or row >= len(self.childItems):
@@ -4455,7 +4725,7 @@ class ___RootNode(Node):
         return FormNode(Form({}, 'English', ['English', 'French']).to_dict(),
                         self.lock_variable_types, parent=self)
 
-class FormNode(Node):
+class ___FormNode(Node):
     def __init__(self, form_dict, lock_variable_types, parent=None):
         super(FormNode, self).__init__(form_dict.pop('label'), parent)
         self.form_dict = form_dict.copy()
@@ -4472,7 +4742,8 @@ class FormNode(Node):
         self.pdict = pdict.copy()
 
     def section_labels(self):
-        return [s.label for s in self.childItems[:-1]]
+        return [s.label for s in self.childItems
+                if s.node_type == self.child_type]
 
     def section_after(self, section_node):
         i_section = section_node.childNumber()
@@ -4971,7 +5242,10 @@ def gen_item_label(parent_node, tree_model):
         all_keys = tree_model.all_section_keys(parent_node)
     elif parent_node.node_type == 'item':
         all_keys = tree_model.all_section_keys(parent_node.parent())
-    return make_unique_label('Var', all_keys)
+    all_keys.extend(tree_model.locked_variable_types.keys())
+    label = make_unique_label('Var', all_keys)
+    logger.debug('Generated variable label: %s', label)
+    return label
 
 def gen_new_item_single_var(label):
     item_dict = FormItem({label : {'French': 'Nom de variable',
@@ -4982,6 +5256,8 @@ def gen_new_item_single_var(label):
         item_dict['init_value'] = (item_dict.pop('init_values').get(label, None))
     else:
         item_dict['init_value'] = None
+    # Assume generated variable label is not associated with a locked type:
+    item_dict['type_locked'] = False
     return item_dict
 
 class TreeModel(QAbstractItemModel):
@@ -4992,9 +5268,9 @@ class TreeModel(QAbstractItemModel):
         'section' : ChildDef(['item_single_var', 'item_text', 'item'],
                              False, gen_item_label, gen_new_item_single_var),
         'item' : ChildDef(['variable'], False, gen_item_label,
-                          lambda l: FormItem({l:{'French': 'Nom de variable',
-                                                 'English': 'Variable name'}},
-                                             DLG, SLG, label=l).to_dict()),
+                          lambda l: {'key_tr' : {'French': 'Nom de variable',
+                                                 'English': 'Variable name'},
+                                     'init_value' : None}),
         'choices' : ChildDef(['choice'], False,
                              partial(gen_unique_label, 'choice'),
                              lambda l: {'French': 'Choix',
@@ -5005,8 +5281,10 @@ class TreeModel(QAbstractItemModel):
                                                  'next_section' : '__submit__'}),
     }
 
-    def __init__(self, form_dict, locked_variable_types=None, parent=None):
+    def __init__(self, form_dict, locked_variable_types=None, selection_mode=None,
+                 parent=None):
         super(TreeModel, self).__init__(parent)
+        self.selection_mode = selection_mode
 
         self.locked_variable_types = locked_variable_types
         #self.root = MotherNode('')
@@ -5019,26 +5297,92 @@ class TreeModel(QAbstractItemModel):
         self.insert_form(form_dict)
 
         self.text_item_icon = {
-            'base' : QtGui.QIcon(':/icons/text_icon')
+            'base' : QtGui.QIcon(':/icons/text_icon'),
+            'sel_checked' : QtGui.QIcon(':/icons/form_checked_text_icon'),
+            'sel_unchecked' : QtGui.QIcon(':/icons/form_unchecked_text_icon')
         }
 
         self.multi_variable_icon = {
-            'base' : QtGui.QIcon(':/icons/form_multi_variable_icon')
+            'base' : QtGui.QIcon(':/icons/form_multi_variable_icon'),
+            'sel_checked' : QtGui.QIcon(':/icons/form_checked_multi_variable_icon'),
+            'sel_unchecked' : QtGui.QIcon(':/icons/form_unchecked_multi_variable_icon')
         }
         self.variable_icon = {
-            'base' : QtGui.QIcon(':/icons/form_variable_icon')
+            'base' : QtGui.QIcon(':/icons/form_variable_icon'),
+            'sel_checked' : QtGui.QIcon(':/icons/form_checked_variable_icon'),
+            'sel_unchecked' : QtGui.QIcon(':/icons/form_unchecked_variable_icon')
         }
         self.section_icon = {
-            'base' : QtGui.QIcon(':/icons/form_section_icon')
+            'base' : QtGui.QIcon(':/icons/form_section_icon'),
+            'sel_checked' : QtGui.QIcon(':/icons/form_checked_section_icon'),
+            'sel_unchecked' : QtGui.QIcon(':/icons/form_unchecked_section_icon')
         }
         self.new_section_icon = QtGui.QIcon(':/icons/form_new_section_icon')
         self.next_section_icon = QtGui.QIcon(':/icons/form_next_section_icon')
         self.choices_icon = QtGui.QIcon(':/icons/form_choices_icon')
 
+    def toggle_node_selection(self, node_index):
+        if self.selection_mode is None:
+            return
+
+        node = self.getItem(node_index)
+
+        # if section selected: select all children
+        # if section unselected: unselect all children
+        # if item selected: select all children
+        # if item unselected: unselect all children and
+        #                     unselect parent if all siblings are unselected
+        # if var unselected: unselect parent if all siblings are unselected
+
+        new_state = None
+        if (self.selection_mode == 'section' and node.node_type == 'section') or\
+           node.node_type.startswith('item') or node.node_type == 'variable':
+            new_state = Node.NEXT_SEL_STATE[node.state]
+            state = self.set_node_selection(new_state, node_index)
+
+        if new_state == 'sel_checked' and self.selection_mode == 'section' and \
+           node.node_type.startswith('item') or node.node_type == 'variable':
+            self.set_node_selection(new_state, self.parent(node_index),
+                                    apply_to_children=False)
+
+        if new_state == 'sel_unchecked' and \
+           node.node_type.startswith('item') or node.node_type == 'variable' :
+            self.unselect_if_no_selected_child(self.parent(node_index))
+
+    def set_node_selection(self, state, node_index, apply_to_children=True):
+        node = self.getItem(node_index)
+        if node.state == state:
+            return
+        node.state = state
+        self.dataChanged.emit(node_index, node_index)
+
+        if apply_to_children and node.is_container:
+            for irow in range(self.rowCount(node_index)):
+                child_index = self.index(irow, 0, parent=node_index)
+                child_node = self.getItem(child_index)
+                if child_node.node_type == node.child_type:
+                    self.set_node_selection(state, child_index,
+                                            apply_to_children=apply_to_children)
+
+    def unselect_if_no_selected_child(self, node_index):
+        node = self.getItem(node_index)
+        nb_children, nb_unchecked_children = 0, 0
+        for irow in range(self.rowCount(node_index)):
+            child_index = self.index(irow, 0, parent=node_index)
+            child_node = self.getItem(child_index)
+            if child_node.node_type == node.child_type:
+                nb_children += 1
+                nb_unchecked_children += (child_node.state == 'sel_unchecked')
+
+        if nb_unchecked_children == nb_children:
+            node.state = 'sel_unchecked'
+            self.dataChanged.emit(node_index, node_index)
+
     def new_child(self, parent_index):
         parent_node = self.getItem(parent_index)
         if parent_node.is_container:
             child_def = TreeModel.CHILD_DEF[parent_node.node_type]
+            logger.debug('Generate label for new child of %s', parent_node.label)
             label = child_def.gen_label(parent_node, self)
             new_index = self.insert_node(label, child_def.node_types[0],
                                          parent_index,
@@ -5055,26 +5399,45 @@ class TreeModel(QAbstractItemModel):
             return False
 
     def insert_node(self, label, node_type, parent_index, irow=None,
-                    pdict=None, is_container=False):
+                    pdict=None, is_container=False, fix_duplicate_label=False):
         """
         ASSUME: given label is valid wrt underlying logic (eg uniqueness)
         """
         parent_node = self.getItem(parent_index)
 
+        if fix_duplicate_label:
+           label = make_unique_label(label, self.child_labels(parent_node))
+
         # Insert node in parent node before button to add new section
-        default_irow = max(0, (self.rowCount(parent_index)
-                               - int(parent_node.is_container)))
+        has_add_button = (len(parent_node.childItems) > 0 and
+                          parent_node.childItems[-1].node_type == 'add_button')
+        default_irow = self.rowCount(parent_index) - int(has_add_button)
         irow = if_none(irow, default_irow)
         logger.debug('Add node %s of type %s to %s at irow=%d', label, node_type,
                      parent_node.label, irow)
+
+        child_type = None
+        if is_container:
+            child_type = TreeModel.CHILD_DEF[node_type].node_types[0]
+
+        if (self.selection_mode == 'section' and \
+            node_type in ['section', 'item', 'variable',
+                          'item_single_var', 'item_text']) or\
+           (self.selection_mode == 'item' and \
+            node_type in ['item', 'variable', 'item_single_var', 'item_text']):
+            node_state = 'sel_unchecked'
+        else:
+            node_state = 'base'
+
         new_node = Node(label, node_type, is_container=is_container, pdict=pdict,
-                        parent=parent_node)
+                        parent=parent_node, child_type=child_type,
+                        state=node_state)
         self.beginInsertRows(parent_index, irow, irow)
         parent_node.childItems.insert(irow, new_node)
         self.endInsertRows()
 
         new_node_index = self.index(irow, 0, parent_index)
-        if is_container:
+        if self.selection_mode is None and is_container:
             # Insert button to add new item
             self.beginInsertRows(new_node_index, 0, 0)
             new_node.childItems.append(Node('+', 'add_button', parent=new_node))
@@ -5083,15 +5446,25 @@ class TreeModel(QAbstractItemModel):
         return new_node_index
 
     def child_labels(self, node):
-        child_type = TreeModel.CHILD_DEF[node.node_type].node_types[0]
-        return [c.label for c in node.childItems if c.node_type == child_type]
+        return node.child_labels()
+        #child_type = TreeModel.CHILD_DEF[node.node_type].node_types[0]
+        #return [c.label for c in node.childItems if c.node_type == child_type]
 
     def all_section_keys(self, section_node):
         all_keys = []
         for child in section_node.childItems:
             if child.node_type in ['item', 'item_single_var']:
                 all_keys.extend(self.all_item_keys(child))
+        logger.debug('All keys of section %s: %s', section_node.label,
+                     all_keys)
         return all_keys
+
+    def all_sibling_keys(self, node):
+        if node.node_type == 'variable':
+            section_node = node.parent().parent()
+        elif node.node_type == 'item_single_var':
+            section_node = node.parent()
+        return self.all_section_keys(section_node)
 
     def all_item_keys(self, item_node):
         if item_node.node_type == 'item':
@@ -5117,12 +5490,9 @@ class TreeModel(QAbstractItemModel):
         transitions_def = section_dict.pop('next_section_definition')
 
         # Insert section in form node before button to add new section
-        if fix_duplicate_label:
-            form_node = self.getItem(form_index)
-            label = make_unique_label(label, self.child_labels(form_node))
         section_index = self.insert_node(label, 'section', form_index,
                                          pdict=section_dict, is_container=True,
-                                         irow=irow)
+                                         irow=irow, fix_duplicate_label=True)
 
         # Insert transitions node as 1st child of section node
         transitions_index = self.insert_node('next section', 'transition_rules',
@@ -5149,7 +5519,9 @@ class TreeModel(QAbstractItemModel):
         duplicate variable names
         """
         section_node = self.getItem(section_index)
-        irow = if_none(irow, self.rowCount(section_index) - 1)
+        has_add_button = (len(section_node.childItems) > 0 and
+                          section_node.childItems[-1].node_type == 'add_button')
+        irow = if_none(irow, self.rowCount(section_index) - int(has_add_button))
         if fix_duplicate_label:
             self.make_item_var_names_unique(section_node, item_dict)
 
@@ -5174,7 +5546,8 @@ class TreeModel(QAbstractItemModel):
         elif len(keys) == 1:
             item_label = next(iter(keys))
             node_type = 'item_single_var'
-            item_dict['key_tr'] = keys[item_label]
+            item_dict['key_tr'] = if_none(keys[item_label],
+                                          {'English':'', 'French':''})
             if init_values is not None:
                 item_dict['init_value'] = init_values[item_label]
             else:
@@ -5185,6 +5558,12 @@ class TreeModel(QAbstractItemModel):
             node_type = 'item'
             is_container = True
 
+        item_dict['type_locked'] = False
+        for var_name in keys:
+            if var_name in self.locked_variable_types:
+                item_dict['vtype'] = self.locked_variable_types[var_name]
+                item_dict['type_locked'] = True
+                break
         item_index = self.insert_node(item_label, node_type, section_index,
                                       pdict=item_dict, is_container=is_container,
                                       irow=irow)
@@ -5268,7 +5647,7 @@ class TreeModel(QAbstractItemModel):
             return node.data(0)
 
         if role == Qt.FontRole and node.node_type in ['variables', 'choices',
-                                                      'section_transitions']:
+                                                      'transition_rules']:
             font = QtGui.QFont()
             font.setItalic(True)
             return font
@@ -5280,11 +5659,14 @@ class TreeModel(QAbstractItemModel):
         elif role == QtCore.Qt.DecorationRole and node.node_type == 'item_text':
             return self.text_item_icon[node.state]
         elif role == QtCore.Qt.DecorationRole and node.node_type == 'section':
-            return self.section_icon[node.state]
+            if self.selection_mode == 'section':
+                return self.section_icon[node.state]
+            else:
+                return self.section_icon['base']
         elif role == QtCore.Qt.DecorationRole and node.node_type == 'choices':
             return self.choices_icon
         elif role == QtCore.Qt.DecorationRole and \
-             node.node_type == 'section_transitions':
+             node.node_type == 'transition_rules':
             return self.next_section_icon
 
     def flags(self, index):
@@ -5294,17 +5676,17 @@ class TreeModel(QAbstractItemModel):
         default_flags = super(TreeModel, self).flags(index)
 
         item = self.getItem(index)
-        if item.node_type in ['add_button', 'choices', 'variables',
-                              'transition_rules', 'transition_rule',
+        if self.selection_mode is not None or \
+           item.node_type in ['add_button', 'transition_rule',
                               'other_choice']:
             return default_flags
-        elif item.node_type in ['item', 'item_single_var', 'item_text']:
-            return Qt.ItemIsDragEnabled | Qt.ItemIsEditable | default_flags
-        elif item.node_type == 'section':
+        elif item.node_type in ['choices', 'variables', 'transition_rules']:
+            return Qt.ItemIsDropEnabled | default_flags
+        elif item.node_type in ['choice', 'variable',
+                                'item', 'item_single_var', 'item_text',
+                                'section']:
             return Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled | \
                 Qt.ItemIsEditable | default_flags
-        elif item.node_type == 'form':
-            return Qt.ItemIsDropEnabled | Qt.ItemIsEditable | default_flags
         else:
             return Qt.ItemIsEditable | default_flags
 
@@ -5342,7 +5724,7 @@ class TreeModel(QAbstractItemModel):
         #     - item can only be dropped in a section
         #     - section can only be dropped in a form
         #     - cannot drop below the node used as button to add new child
-        if (icolumn > self.columnCount() - 1):
+        if self.selection_mode is not None or (icolumn > self.columnCount() - 1):
             logger.debug2('can NOT drop!')
             return False
 
@@ -5410,6 +5792,20 @@ class TreeModel(QAbstractItemModel):
             self.insert_item(node_dict, parent_index, irow,
                              fix_duplicate_label=fix_duplicate_label)
             return True
+        elif dropped_type == 'choice':
+            label, choice_tr = next(iter(node_dict.items()))
+            self.insert_node(label, 'choice', parent_index, irow=irow,
+                             pdict=choice_tr,
+                             fix_duplicate_label=fix_duplicate_label)
+            return True
+        elif dropped_type == 'variable':
+            label, var_tr = next(iter(node_dict['keys'].items()))
+            init_value = node_dict['init_values'][label]
+            self.insert_node(label, 'variable', parent_index, irow=irow,
+                             pdict={'key_tr' : var_tr, 'init_value' : init_value},
+                             fix_duplicate_label=fix_duplicate_label)
+            return True
+
         return False
 
         # parent_node = self.getItem(parent_index)
@@ -5466,7 +5862,7 @@ class TreeModel(QAbstractItemModel):
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if orientation == Qt.Horizontal and role == Qt.DisplayRole:
-            return '' 
+            return ''
         return None
 
     def index(self, row, column, parent=QModelIndex()):
@@ -5500,6 +5896,7 @@ class TreeModel(QAbstractItemModel):
         """ ASSUME node_type is item_single_var """
         item_node = self.getItem(item_index)
         item_node.node_type = 'item'
+        item_node.child_type = 'variable'
         item_node.is_container = True
         key_tr = item_node.pdict.pop('key_tr')
         init_value = item_node.pdict.pop('init_value')
@@ -5568,11 +5965,27 @@ class TreeModel(QAbstractItemModel):
         parentItem = self.getItem(parent)
         return parentItem.childCount()
 
+    def check_locked_type(self, label, node):
+        locked_type = self.locked_variable_types.get(label, None)
+        if locked_type is not None:
+            if node.node_type == 'item_single_var':
+                node.pdict['type_locked'] = True
+                node.pdict['vtype'] = locked_type
+            else: # variable
+                node.parent().pdict['type_locked'] = True
+                node.parent().pdict['vtype'] = locked_type
+
     def setData(self, index, value, role=Qt.EditRole, force=False):
         if role != Qt.EditRole:
             return False
 
         node = self.getItem(index)
+        if node.node_type in ['item_single_var', 'variable']:
+            if value in self.all_sibling_keys(node):
+                return False
+            self.check_locked_type(value, node)
+            locked_type = self.locked_variable_types.get(value, None)
+
         result = node.setData(index.column(), value)
 
         if result:
