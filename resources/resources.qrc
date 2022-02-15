@@ -31,5 +31,7 @@
         <file alias="workbook_tab_menu_icon">menu-2.svg</file>
         <file alias="sheet_add_icon">circle-plus.svg</file>
         <file alias="sheet_icon">data-sheet.svg</file>
+        <file alias="visible_icon">eye.svg</file>
+        <file alias="non_visible_icon">eye-off.svg</file>
     </qresource>
 </RCC>
