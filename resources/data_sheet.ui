@@ -115,18 +115,6 @@
        </widget>
       </item>
       <item>
-       <widget class="QPushButton" name="button_edit_plugin">
-        <property name="font">
-         <font>
-          <family>Verdana</family>
-         </font>
-        </property>
-        <property name="text">
-         <string>Plugin</string>
-        </property>
-       </widget>
-      </item>
-      <item>
        <spacer name="horizontalSpacer_2">
         <property name="orientation">
          <enum>Qt::Horizontal</enum>
@@ -169,7 +157,7 @@
          <property name="sizePolicy">
           <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
            <horstretch>0</horstretch>
-           <verstretch>3</verstretch>
+           <verstretch>9</verstretch>
           </sizepolicy>
          </property>
          <property name="font">
@@ -190,9 +178,9 @@
         </widget>
         <widget class="QFrame" name="cell_value_frame">
          <property name="sizePolicy">
-          <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
+          <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
            <horstretch>0</horstretch>
-           <verstretch>0</verstretch>
+           <verstretch>1</verstretch>
           </sizepolicy>
          </property>
          <property name="frameShape">
@@ -205,7 +193,7 @@
           <item>
            <widget class="QTextBrowser" name="cell_value">
             <property name="sizePolicy">
-             <sizepolicy hsizetype="MinimumExpanding" vsizetype="Expanding">
+             <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
               <horstretch>0</horstretch>
               <verstretch>0</verstretch>
              </sizepolicy>

@@ -28,10 +28,15 @@
         <file alias="text_icon">file-text.svg</file>
         <file alias="file_open_icon">file-download.svg</file>
         <file alias="file_create_icon">file-plus.svg</file>
+        <file alias="workbook_icon">book.svg</file>
+        <file alias="job_icon">math-function.svg</file>
+        <file alias="anonymize_export_icon">anonymize_export.svg</file>
+        <file alias="bolt_icon">bolt.svg</file>
         <file alias="workbook_tab_menu_icon">menu-2.svg</file>
-        <file alias="sheet_add_icon">circle-plus.svg</file>
+        <file alias="add_icon">circle-plus.svg</file>
         <file alias="sheet_icon">data-sheet.svg</file>
         <file alias="visible_icon">eye.svg</file>
         <file alias="non_visible_icon">eye-off.svg</file>
+        <file alias="plugin_icon">settings.svg</file>
     </qresource>
 </RCC>

@@ -12,6 +12,7 @@ from .generated import progress_bar_ui
 from .generated import resources
 from .generated import section_ui
 from .generated import main_single_centered_widget_ui
+from .generated import main_single_centered_dialog_ui
 from .generated import selector_widget_ui
 from .generated import text_editor_ui
 from .generated import workbook_ui
@@ -28,5 +29,6 @@ from .generated import item_edit_ui
 from .generated import choice_edit_ui
 from .generated import variable_edit_ui
 from .generated import section_transition_edit_ui
+from .generated import single_input_dialog_ui
 from . import widgets
 from . import main_qss

@@ -1,4 +1,5 @@
 from collections import defaultdict
+from traceback import format_exc
 
 import pandas as pd
 
@@ -104,15 +105,24 @@ class Notifier:
             except Exception as e:
                 logger.error('Error during notification of event %s, ' \
                              'while calling %s', event, watcher)
+                logger.error(format_exc())
                 raise e
+
+def strip_indent(code):
+    indent_size = 0
+    while code[indent_size] == ' ':
+        indent_size += 1
+    if indent_size == 0:
+        return code
+    return '\n'.join(line[indent_size:] for line in code.split('\n'))
 
 from enum import IntEnum
 
 class UserRole(IntEnum):
-    ADMIN = 3
-    MANAGER = 2
-    EDITOR = 1
     VIEWER = 0
+    EDITOR = 1
+    MANAGER = 2
+    ADMIN = 3
 
 class SheetNotFound(Exception): pass
 

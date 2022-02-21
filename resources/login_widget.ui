@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>432</width>
-    <height>228</height>
+    <height>258</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -134,7 +134,7 @@
             </font>
            </property>
            <property name="text">
-            <string>Other password:</string>
+            <string>Password:</string>
            </property>
           </widget>
          </item>
@@ -150,6 +150,16 @@
             <enum>QLineEdit::Password</enum>
            </property>
           </widget>
+         </item>
+         <item row="2" column="0">
+          <widget class="QLabel" name="roleLabel">
+           <property name="text">
+            <string>Role</string>
+           </property>
+          </widget>
+         </item>
+         <item row="2" column="1">
+          <widget class="QComboBox" name="roleComboBox"/>
          </item>
         </layout>
        </widget>

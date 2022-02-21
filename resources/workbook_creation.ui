@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>563</width>
-    <height>310</height>
+    <height>256</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -98,7 +98,7 @@
             </sizepolicy>
            </property>
            <property name="text">
-            <string>                                     </string>
+            <string/>
            </property>
           </widget>
          </item>
@@ -141,13 +141,6 @@
       <enum>QFrame::Raised</enum>
      </property>
      <layout class="QFormLayout" name="formLayout_2">
-      <item row="1" column="0">
-       <widget class="QLabel" name="label_4">
-        <property name="text">
-         <string>Editor password:</string>
-        </property>
-       </widget>
-      </item>
       <item row="0" column="0">
        <widget class="QLabel" name="label_access_pwd">
         <property name="text">
@@ -156,19 +149,9 @@
        </widget>
       </item>
       <item row="0" column="1">
-       <widget class="QLineEdit" name="access_pwd_field"/>
-      </item>
-      <item row="1" column="1">
-       <widget class="QLineEdit" name="editor_pwd_field"/>
+       <widget class="PasswordEdit" name="access_pwd_field"/>
       </item>
       <item row="2" column="0">
-       <widget class="QLabel" name="label_5">
-        <property name="text">
-         <string>Manager password:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="3" column="0">
        <widget class="QLabel" name="label_6">
         <property name="text">
          <string>Admin password:</string>
@@ -176,19 +159,16 @@
        </widget>
       </item>
       <item row="2" column="1">
-       <widget class="QLineEdit" name="manager_pwd_field"/>
+       <widget class="PasswordEdit" name="admin_pwd_field"/>
       </item>
-      <item row="3" column="1">
-       <widget class="QLineEdit" name="admin_pwd_field"/>
-      </item>
-      <item row="4" column="0">
+      <item row="1" column="0">
        <widget class="QLabel" name="adminNameLabel">
         <property name="text">
          <string>Admin name:</string>
         </property>
        </widget>
       </item>
-      <item row="4" column="1">
+      <item row="1" column="1">
        <widget class="QLineEdit" name="adminNameLineEdit"/>
       </item>
      </layout>
@@ -203,6 +183,13 @@
    </item>
   </layout>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>PasswordEdit</class>
+   <extends>QLineEdit</extends>
+   <header>..widgets</header>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

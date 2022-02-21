@@ -66,6 +66,7 @@ setup(name='piccel', version=version['__version__'],
               'piccel_form_edit = piccel.commands.piccel_form_edit:main',
               'piccel_decrypt = piccel.commands.piccel_crypt:decrypt_cmd',
               'piccel_encrypt = piccel.commands.piccel_crypt:encrypt_cmd',
+              'piccel_test_widget = piccel.commands.piccel_test_widget:main',
               'piccel_dump_access_key = piccel.commands.piccel_dump_access_key:main'
           ],
       })

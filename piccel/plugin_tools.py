@@ -14,7 +14,7 @@ class LescaDashboard(SheetPlugin):
 
     def after_workbook_load(self):
         super(LescaDashboard, self).after_workbook_load()
-        self.pp = self.workbook['Participants']
+        self.pp = self.workbook['Participants_Status']
         self.df = pd.DataFrame()
 
         for sheet_label in self.sheets_to_watch():
@@ -27,7 +27,7 @@ class LescaDashboard(SheetPlugin):
 
     def reset_data(self):
         if self.pp.df is not None and self.pp.df.shape[0] > 0:
-            self.df = (self.pp.latest_update_df()[['Participant_ID']]
+            self.df = (self.pp.get_df_view('latest_active')[['Participant_ID']]
                        .sort_values(by='Participant_ID')
                        .reset_index(drop=True))
             self.df.set_index('Participant_ID', inplace=True)
@@ -39,7 +39,7 @@ class LescaDashboard(SheetPlugin):
         self.sheet.invalidate_cached_views()
 
     def sheets_to_watch(self):
-        return ['Participants']
+        return ['Participants_Status']
 
     def show_index_in_ui(self):
         return True
@@ -307,7 +307,7 @@ class ParticipantStatusTracker:
     def check(self):
         expected_fields = {
             'Participant_ID' : 'text',
-            'Study_Status' : 'text',
+            'Study_Status' : Choice('text', ['inactive']),
             'User' : 'user_name',
             'Timestamp_Submission' : 'datetime'
         }
@@ -347,6 +347,7 @@ class ParticipantStatusTracker:
 
         status_df = latest_sheet_data(self.workbook,
                                       self.participant_sheet_label,
+                                      view='latest_active',
                                       index_column='Participant_ID')
         if dashboard_error_if_none(status_df, dashboard_df,
                                    self.dashboard_column_status,
@@ -393,12 +394,12 @@ class PollTracker:
 
         dashboard_df.loc[pids, self.dashboard_column] = self.default_status
         if poll_df.shape[0] > 0:
-            answered_df = poll_df[~pd.isna(poll_df[self.poll_answer_column])]
             if self.poll_answer_column is not None:
+                answered_df = poll_df[~pd.isna(poll_df[self.poll_answer_column])]
                 dashboard_df.loc[answered_df.index, self.dashboard_column] = \
                     answered_df[self.poll_answer_column]
             else:
-                dashboard_df.loc[answered_df.index, self.dashboard_column] = \
+                dashboard_df.loc[poll_df.index, self.dashboard_column] = \
                     self.answered_tag
 
 
@@ -528,9 +529,9 @@ def interview_action_old(entry_df, interview_column, workbook,
         })
     return form, action_label
 
-def latest_sheet_data(workbook, sheet_label, filter_dict=None,
+def latest_sheet_data(workbook, sheet_label, view='latest', filter_dict=None,
                       index_column=None, indexes=None):
-    df = workbook[sheet_label].get_df_view('latest')
+    df = workbook[sheet_label].get_df_view(view)
 
     if df is None:
         return None
@@ -620,13 +621,17 @@ class EmailledPollTracker:
 
     if form answered -> _answered
     ElseIf email action == plan
-        If email status == to_send -> _email_pending
+        If email status == to_send
+            If  date_now < scheduled_send_date
+                -> _email_pending
+            Else
+                -> _email_overdue
         ElseIf email status == error -> _email_error
         ElseIf email status == sent:
             If  date_now < timestamp + overdue_days
                 -> _email_sent
             Else
-                -> _email_overdue
+                -> _overdue
         ElseIf email action == call_off -> _cancelled
     """
 
@@ -653,6 +658,7 @@ class EmailledPollTracker:
             'Participant_ID' : 'text',
             'Email_Action' : Choice('text', ['plan', 'cancel', 'revoke']),
             'Email_Status' : Choice('text', ['to_send', 'sent', 'error']),
+            'Email_Scheduled_Send_Date' : 'datetime',
             'Email_Template' : Choice('text', [self.poll_label]),
             'Overdue_Days' : 'int',
             'User' : 'user_name',
@@ -709,7 +715,14 @@ class EmailledPollTracker:
                             (email_df, 'Email_Action', ['revoke']),
                             '%s_email_pending' % poll_tag:
                             And((email_df, 'Email_Action', ['plan']),
-                                (email_df, 'Email_Status', ['to_send'])),
+                                (email_df, 'Email_Status', ['to_send']),
+                                (email_df, 'Email_Scheduled_Send_Date',
+                                 Lower(date_now))),
+                            '%s_email_overdue' % poll_tag:
+                            And((email_df, 'Email_Action', ['plan']),
+                                (email_df, 'Email_Status', ['to_send']),
+                                (email_df, 'Email_Scheduled_Send_Date',
+                                 GreaterEqual(date_now))),
                             '%s_email_sent' % poll_tag:
                             And((email_df, 'Email_Action', ['plan']),
                                 (email_df, 'Email_Status', ['sent']),
@@ -903,7 +916,7 @@ class InterviewTracker:
                                    'error %s' % self.plan_sheet_label):
             return
 
-        if 1:
+        if 0:
             print('dashboard_df beginning of track_interview')
             print(dashboard_df)
 
@@ -939,7 +952,7 @@ class InterviewTracker:
             dashboard_df.loc[cancelled.index, column_date] = '%s_plan' % interview_tag
 
         common_pids = plan_df.index.intersection(interview_df.index)
-        if 1:
+        if 0:
             print('Get most recent entry btwn plan and interview')
 
             print('plan_df:')
@@ -978,7 +991,7 @@ class InterviewTracker:
         set_date_from_interview(interview_df_fresher)
 
         # Staff
-        if 1:
+        if 0:
             print('Set Staff...')
             print('dashboard_df:')
             print(dashboard_df)
@@ -1252,7 +1265,7 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
                                 filter_dict={'Interview_Type' : interview_label},
                                 index_column='Participant_ID',
                                 indexes=pids)
-    if 1:
+    if 0:
         print('dashboard_df beginning of track_interview')
         print(dashboard_df)
 
@@ -1285,10 +1298,11 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
 
         cancelled = int_sel_df[((int_sel_df['Session_Action']=='cancel_session') | \
                                 (int_sel_df['Session_Status']=='cancel_session'))]
-        dashboard_df.loc[cancelled.index, column_date] = '%s_plan' % interview_tag
+        dashboard_df.loc[cancelled.index, column_date] = \
+            '%s_plan' % interview_tag
 
     common_pids = plan_df.index.intersection(interview_df.index)
-    if 1:
+    if 0:
         print('Get most recent entry btwn plan and interview')
 
         print('plan_df:')
@@ -1327,7 +1341,7 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
     set_date_from_interview(interview_df_fresher)
 
     # Staff
-    if 1:
+    if 0:
         print('Set Staff...')
         print('dashboard_df:')
         print(dashboard_df)

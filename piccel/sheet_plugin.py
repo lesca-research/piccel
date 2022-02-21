@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import inspect
 
-from piccel.core import LazyFunc, SheetNotFound
+from piccel.core import LazyFunc, SheetNotFound, strip_indent, UserRole
 
 import logging
 logger = logging.getLogger('piccel')
@@ -13,6 +13,7 @@ plugin_source_header = \
 """
 import pandas as pd
 import numpy as np
+from piccel import UserRole
 from piccel.sheet_plugin import SheetPlugin
 from piccel.plugin_tools import map_set, And, Or
 from piccel.plugin_tools import (LescaDashboard, InterviewTracker,
@@ -22,14 +23,6 @@ from piccel.plugin_tools import (LescaDashboard, InterviewTracker,
                                  ParticipantStatusTracker)
 from piccel.logging import logger
 """
-
-def strip_indent(code):
-    indent_size = 0
-    while code[indent_size] == ' ':
-        indent_size += 1
-    if indent_size == 0:
-        return code
-    return '\n'.join(line[indent_size:] for line in code.split('\n'))
 
 class SheetPlugin:
 
@@ -103,6 +96,13 @@ class SheetPlugin:
 
     def show_index_in_ui(self):
         return False
+
+    def access_level(self):
+        return UserRole.VIEWER
+
+    def get_property(self, property_name):
+        """ Custom property """
+        return None
 
     def views(self, base_views):
         """
@@ -184,6 +184,9 @@ class UserSheetPlugin(SheetPlugin):
     def active_view(self, df):
         latest = self.sheet.latest_update_df(df)
         return latest[latest['Status'] == 'active']
+
+    def access_level(self):
+        return UserRole.MANAGER
 
     def default_view(self):
         return 'latest'

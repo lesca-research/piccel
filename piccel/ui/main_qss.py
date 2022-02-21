@@ -11,6 +11,12 @@ QLabel {{
    color: black;
 }}
 
+TextEditorWidget {{
+   font-family: "Courier";
+   font-size : 12pt;
+   color: black;
+}}
+
 QWidget {{
     background-color: rgb{default_bg_color};
 }}

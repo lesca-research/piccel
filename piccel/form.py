@@ -27,12 +27,12 @@ from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
                    FormEditionOrphanError, FormEditionCancelled)
 
 from . import ui
-from .ui.widgets import ListSelectDialog, show_critical_message_box
+from .ui.widgets import ListSelectDialog, show_critical_message_box, show_text_box
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 class InvalidFormItemType(Exception): pass
-class InvalidFormItemKey(Exception): pass
+class FormItemKeyNotFound(Exception): pass
 class InvalidFormItemInput(Exception): pass
 class InvalidFormSection(Exception): pass
 class FormDataInconsitency(Exception): pass
@@ -57,7 +57,6 @@ class FormSelector(QtWidgets.QDialog):
 
         self.setWindowTitle('Import %s' % {'section' : 'Section(s)',
                                            'item' : 'Item(s)'}[selection_mode])
-
 
         QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
         self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
@@ -785,6 +784,25 @@ function snakeCaseToCamelCase(s) {
     def __getitem__(self, k):
         return self.sections[k]
 
+    def format_entry_dict(self, entry_dict, html=False):
+        tps = self.get_vtypes()
+        def _format(k, v):
+            if v is None:
+                if html:
+                    return '<font color="grey">NA</font>'
+                else:
+                    return 'NA'
+            else:
+                return self.format(k,v)
+        if not html:
+            pat = '%s (%s): %s'
+            nb = '\n'
+        else:
+            pat = '<b>%s</b> (<i>%s</i>): %s'
+            nl = '<br>'
+        return nl.join(pat % (k, tps[k], _format(k,v))
+                       for k,v in entry_dict.items())
+
     def new(self, entry_dict=None, watchers=None):
         form = Form.from_dict(self.to_dict(), watchers=watchers)
         if entry_dict is not None:
@@ -807,8 +825,11 @@ function snakeCaseToCamelCase(s) {
     def set_values_from_entry(self, entry_dict):
         logger.debug('Filling values of form "%s" from entry with keys %s',
                      self.tr['title'], entry_dict.keys())
-        for key,value in entry_dict.items():
-            self.set_value_for_key(key, value)
+        for key, value in entry_dict.items():
+            if key not in self.key_to_items:
+                raise FormItemKeyNotFound(key)
+            for item in self.key_to_items[key]:
+                item.set_value(key, value)
 
     def set_value_for_key(self, key, value):
         for section in self.sections.values():
@@ -825,6 +846,14 @@ function snakeCaseToCamelCase(s) {
         else:
             logger.debug('Call on_cancel from form %s', self)
             self.on_cancel()
+
+    def get_invalid_keys(self):
+        invalid_keys = set()
+        for section_name in self.section_path:
+            if not self[section_name].is_valid():
+                for item in self[section_name].get_invalid_items():
+                    invalid_keys.update(item.keys.keys())
+        return invalid_keys
 
     def submit(self):
         """
@@ -1271,7 +1300,7 @@ class Translator():
     def unregister(self, key):
         self.trs.pop(key, None)
 
-    def check_translations(self, key, translations):
+    def check_translations(self, key, translations, auto_fix=True):
         if not isinstance(translations, dict):
             msg = 'Translations for key %s is not a dict: %s' % \
                 (key, translations)
@@ -1279,11 +1308,18 @@ class Translator():
 
         diff = set(translations.keys()).difference(self.supported_languages)
         if len(diff) > 0:
-            msg = 'Supported languages are: %s. Languages in '\
-                'translation of key %s: %s' % \
-                (', '.join(self.supported_languages), key,
-                 ', '.join(translations.keys()))
-            raise LanguageError(msg)
+            if not auto_fix:
+                msg = 'Supported languages are: %s. Languages in '\
+                    'translation of key %s: %s' % \
+                    (', '.join(self.supported_languages), key,
+                     ', '.join(translations.keys()))
+                raise LanguageError(msg)
+            else:
+                logger.warning('Fixing supported language %s to include ' \
+                               'languages in translation of key %s: %s',
+                               (', '.join(self.supported_languages), key,
+                                ', '.join(translations.keys())))
+                self.supported_languages.update(diff)
 
     def set_language(self, language):
         if language not in self.supported_languages:
@@ -1591,8 +1627,10 @@ class FormItem:
                              key)
                 return True
             else:
-                logger.debug2('Check uniqueness of %s', key)
-                if not self.unique_validator(key=key, value=value):
+                logger.debug2('Check uniqueness of %s (ignore na=%s)',
+                              key, self.allow_None)
+                if not self.unique_validator(key=key, value=value,
+                                             ignore_na=self.allow_None):
                     self._set_validity(False, 'Duplicate entry', key)
                     return False
         return True
@@ -1792,7 +1830,12 @@ class FormItem:
             current_choices = {self.tr[k]:k for k in self.choices}
             value_str = current_choices.get(value_str, value_str)
 
-        return self.unformat(value_str) if len(value_str)>0 else None
+        try:
+            return (self.unformat(value_str)
+                    if value_str is not None and len(value_str)>0
+                    else None)
+        except Exception:
+            from IPython import embed; embed()
 
     def get_items(self, error_when_invalid=True):
         return {k : self.get_value(k, error_when_invalid) for k in self.keys}
@@ -1823,14 +1866,17 @@ class FormItem:
            (self.generator.endswith('submission') or \
             self.generator == 'timestamp_creation'):
             for key in self.keys:
-                self.set_input_str(FormItem.GENERATORS[self.generator](self), key)
+                self.set_input_str(FormItem.GENERATORS[self.generator](self),
+                                   key)
         elif self.vtype == 'user_name':
             self.set_input_str(self.user)
         return self.get_items()
 
     def set_user(self, user):
+        assert(isinstance(user, str))
         self.user = user
         if self.vtype == 'user_name':
+            logger.debug('Set user name %s in item %s', user, self.label)
             self.set_input_str(self.user)
 
     def set_input_str(self, s, key=None, use_callback=True,
@@ -1913,6 +1959,74 @@ class TestForm(unittest.TestCase):
                     title={'French':'Titre de formulaire'})
         self.assertEqual(form.tr['title'], 'Titre de formulaire')
 
+
+    def test_format_entry_dict(self):
+        items = [FormItem({'Label' : None},
+                          default_language='French',
+                          supported_languages={'French'}),
+                 FormItem({'Mail_Content' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          vtype='html'),
+                 FormItem({'Age' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          vtype='int'),
+                 FormItem({'Integer_64' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          vtype='int64'),
+                 FormItem({'Number' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          vtype='number'),
+                 FormItem({'User' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          vtype='user_name'),
+                 FormItem({'Boolean' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          vtype='boolean'),
+                 FormItem({'Date' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          vtype='date'),
+                 FormItem({'Date_Time' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          vtype='datetime')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'}, title='')
+
+        user = 'me'
+        entry = {
+            'Label' : 'a text',
+            'Mail_Content' : r'<bold>Important email<\bold>',
+            'Age' : 55,
+            'Integer_64' : 42,
+            'Number' : 42.2,
+            'Boolean' : False,
+            'Date' : date(2018, 1, 12),
+            'Date_Time' : datetime(2018, 1, 12, 9, 32),
+        }
+        form.set_user(user)
+
+        expected_report = \
+r"""Label (text): a text
+Mail_Content (html): <bold>Important email<\bold>
+Age (int): 55
+Integer_64 (int64): 42
+Number (number): 42.200000
+Boolean (boolean): False
+Date (date): 2018-01-12
+Date_Time (datetime): 2018-01-12 09:32:00.000000"""
+        formatted_entry = form.format_entry_dict(entry)
+        self.maxDiff = None
+        self.assertEqual(formatted_entry,
+                         expected_report)
 
     def test_reset(self):
         # TODO: test with all dtypes
@@ -2861,7 +2975,7 @@ class TestFormItem(unittest.TestCase):
         item = FormItem({'Participant_ID':None}, unique=True,
                         supported_languages={'English'},
                         default_language='English')
-        def check_uniqueness(key, value):
+        def check_uniqueness(key, value, ignore_na=False):
             return value not in {'CE0005', 'CE0004'}
         item.set_unique_validator(check_uniqueness)
         self.assertTrue(item.is_valid())
@@ -3226,8 +3340,8 @@ class TestTranslator(unittest.TestCase):
 
 
 def compose(*funcs):
-    def _call():
-        r = funcs[0]()
+    def _call(*args, **kwargs):
+        r = funcs[0](*args, **kwargs)
         for f in funcs[1:]:
             r = f(r)
         return r
@@ -3257,11 +3371,13 @@ def link_line_edit(line_edit, dest_dict, dest_key, empty_str_is_None=False,
     if not read_only:
         line_edit.setReadOnly(False)
         if empty_str_is_None:
-            f_store_in_dict = partial(dict_set_none_if_empty, dest_dict, dest_key)
+            f_store_in_dict = partial(dict_set_none_if_empty, dest_dict,
+                                      dest_key)
         else:
             f_store_in_dict = partial(dest_dict.__setitem__, dest_key)
 
-        line_edit.editingFinished.connect(compose(line_edit.text, f_store_in_dict))
+        line_edit.editingFinished.connect(compose(line_edit.text,
+                                                  f_store_in_dict))
     else:
         line_edit.setReadOnly(True)
 
@@ -3334,7 +3450,7 @@ def link_spin_box(spin_box, dest_dict, dest_key, read_only=False):
     except TypeError:
         pass
     spin_box.setValue(dest_dict[dest_key])
-    if read_only:
+    if not read_only:
         spin_box.setEnabled(True)
         spin_box.valueChanged.connect(partial(dest_dict.__setitem__, dest_key))
     else:
@@ -3434,6 +3550,16 @@ class ItemPropertyEditor(QtWidgets.QWidget,
                 self.initialValueLineEdit.editingFinished.connect(store_init_value)
             else:
                 self.initialValueLineEdit.setReadOnly(True)
+        elif item_node.node_type == 'item_text':
+            self.typeLabel.hide()
+            self.typeComboBox.hide()
+            self.uniqueCheckBox.hide()
+            self.allowEmptyCheckBox.hide()
+            self.accessLevelComboBox.hide()
+            self.textNbLinesSpinBox.hide()
+            self.generatorComboBox.hide()
+            self.initialValueLineEdit.hide()
+            self.initialValueLabel.hide()
         else:
             self.initialValueLineEdit.hide()
             self.initialValueLabel.hide()
@@ -3850,7 +3976,7 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
         self.setupUi(self)
         self.origin_sheet_label = origin_sheet_label
 
-        close_callback = if_none(close_callback, lambda w: None)
+        close_callback = if_none(close_callback, lambda w: w.close())
 
         # Enable form buttons based on form notifications
         watchers = {
@@ -4001,8 +4127,8 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
             except Exception as e:
                 msg = 'Error occured while submitting:\n%s' % repr(e)
                 logger.error(msg)
+                logger.error(format_exc())
                 show_critical_message_box(msg)
-                # from IPython import embed; embed()
             close_callback(self)
 
         self.button_submit.clicked.connect(submit)
@@ -4045,10 +4171,6 @@ class FormFileEditor(QtWidgets.QWidget, ui.form_editor_file_ui.Ui_Form):
             self.load_form(form_fn)
 
         self.verticalLayout_2.addWidget(self.form_editor)
-
-    def test_form(self):
-        self.form_editor.test_form()
-        self.show()
 
     def load_form(self, form_fn):
         if form_fn is None:
@@ -4126,6 +4248,13 @@ class FormFileEditor(QtWidgets.QWidget, ui.form_editor_file_ui.Ui_Form):
 
 from PyQt5.QtCore import pyqtSignal
 
+class on_act:
+    """ To connected with QAction.trigger to ignore check state """
+    def __init__(self, callback):
+        self.callback = callback
+    def __call__(self, check_state):
+        return self.callback()
+
 class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
 
     formChanged = pyqtSignal()
@@ -4185,6 +4314,8 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         logger.debug('Edit form %s in selection_mode: %s', form.label,
                      self.selection_mode)
         self.set_form(form, self.locked_variable_types)
+
+        self.form_tester = None
 
         def on_preview_mode_change(state):
             pass
@@ -4336,10 +4467,19 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
     #         event.ignore()
     #         return False
 
-    def test_form(self, role=UserRole.VIEWER):
+    def test_form(self, role=UserRole.VIEWER, user='test_user'):
+        if self.form_tester is not None:
+            self.form_tester.close()
+
+        logger.debug('test_form: user=%s', user)
         form = self.get_form()
+        form.set_user(user)
+        form.set_on_submission(compose(partial(form.format_entry_dict,
+                                               html=True),
+                                       lambda s: show_text_box('Submitted values:<br>%s' % s)))
         logger.debug('Test form: %s', pformat(form.to_dict()))
-        FormWidget(form, user_role=role, parent=None).show()
+        self.form_tester = FormWidget(form, user_role=role, parent=None)
+        self.form_tester.show()
 
     def ask_import_sections(self, form_index):
         self._ask_import(form_index, 'section')
@@ -4403,39 +4543,39 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
             action = right_click_menu.addAction(self.multi_variable_icon,
                                                 self.tr("To group of variables"))
             f = partial(self.model.convert_item_to_multi_var, model_index)
-            action.triggered.connect(f)
+            action.triggered.connect(on_act(f))
 
         if model_item.node_type in ['item_single_var', 'item']:
             action = right_click_menu.addAction(self.text_item_icon,
                                                 self.tr("To text-only"))
             f = partial(self.model.convert_item_to_text_only, model_index)
-            action.triggered.connect(f)
+            action.triggered.connect(on_act(f))
 
             if len(model_item.childItems) == 0 or \
                model_item.childItems[0].node_type != 'choices':
                 action = right_click_menu.addAction(self.choices_icon,
                                                     self.tr("Add choices"))
                 f = partial(self.add_choices_to_item, model_index)
-                action.triggered.connect(f)
+                action.triggered.connect(on_act(f))
 
         if isinstance(model_item, ChoicesNode) and \
            model_item.other_choice_node() is None:
             action = right_click_menu.addAction(self.choices_icon,
                                                 self.tr("Add Other choice"))
             f = partial(self.add_other_choice_node_to_choices_node, model_index)
-            action.triggered.connect(f)
+            action.triggered.connect(on_act(f))
 
         if model_item.node_type == 'form':
 
             test_menu = right_click_menu.addMenu(self.tr('Test'))
             for role in UserRole:
                 act_test = test_menu.addAction(self.tr('As %s') % role.name)
-                act_test.triggered.connect(partial(self.test_form, role))
+                act_test.triggered.connect(on_act(partial(self.test_form, role)))
 
             act_test = right_click_menu.addAction(self.import_icon,
                                                   self.tr('Import'))
-            act_test.triggered.connect(partial(self.ask_import_sections,
-                                               model_index))
+            act_test.triggered.connect(on_act(partial(self.ask_import_sections,
+                                                      model_index)))
 
         # if model_item.node_type == 'section':
         #     act_test = right_click_menu.addAction(self.tr('Import item(s)'))
@@ -4447,9 +4587,9 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
                  model_item.label not in self.locked_variable_types):
             act_del = right_click_menu.addAction(self.delete_icon,
                                                  self.tr("Delete"))
-            act_del.triggered.connect(partial(self.model.removeRow,
-                                              model_index.row(),
-                                              model_index.parent()))
+            act_del.triggered.connect(on_act(partial(self.model.removeRow,
+                                                     model_index.row(),
+                                                     model_index.parent())))
 
         right_click_menu.exec_(self.sender().viewport().mapToGlobal(position))
 
@@ -4941,10 +5081,7 @@ class ItemNode(Node):
         if len(item_dict['keys']) > 0:
             self.text_only = False
             if len(item_dict['keys']) == 1:
-                try:
-                    self.key_tr = item_dict['keys'][self.label]
-                except KeyError:
-                    from IPython import embed; embed()
+                self.key_tr = item_dict['keys'][self.label]
                 init_values = item_dict.pop('init_values')
                 self.init_value = (init_values[self.label]
                                    if init_values is not None else None)
@@ -5579,7 +5716,7 @@ class TreeModel(QAbstractItemModel):
         if node_type == 'item':
             init_values = if_none(init_values, [None] * len(keys))
             for (key, key_tr), init_value in zip(keys.items(), init_values):
-                self.insert_sub_variable(item_index, key, init_value)
+                self.insert_sub_variable(item_index, key, key_tr, init_value)
 
     def insert_sub_variable(self, item_index, var_label, var_tr, init_value,
                             irow=None):
@@ -5687,6 +5824,8 @@ class TreeModel(QAbstractItemModel):
                                 'section']:
             return Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled | \
                 Qt.ItemIsEditable | default_flags
+        elif item.node_type == 'form':
+            return Qt.ItemIsDropEnabled | Qt.ItemIsEditable | default_flags
         else:
             return Qt.ItemIsEditable | default_flags
 

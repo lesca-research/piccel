@@ -37,7 +37,7 @@ from .plugin_tools import (LescaDashboard, InterviewTracker,
                            ParticipantStatusTracker)
 from .form import (Form, FormSection, FormItem, FormSheetEditor,
                    NotEditableError, DateTimeCollector, LanguageError,
-                   FormWidget, FormFileEditor)
+                   FormWidget, FormFileEditor, FormItemKeyNotFound)
 
 import unittest
 import tempfile
@@ -62,9 +62,15 @@ from io import BytesIO
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from . import ui
-from .ui.widgets import show_critical_message_box
+from .ui.widgets import (show_critical_message_box, show_info_message_box,
+                         PasswordEdit)
 
-from .core import LazyFunc, df_index_from_value, if_none, refresh_text
+from .core import (LazyFunc, df_index_from_value, if_none,
+                   refresh_text, strip_indent)
+
+from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
+                   FormEditionNotOpen, FormEditionLockedType,
+                   FormEditionOrphanError, FormEditionCancelled, SheetNotFound)
 
 from appdirs import user_data_dir
 
@@ -135,14 +141,22 @@ def derive_key(password_str, salt_bytes):
 
 class Encrypter:
 
-    # TODO: init from key instead of pwd/salt and
-    # create other constructor for pwd/salt
-    def __init__(self, password, salt_bytes, key=None):
+    # TODO: deprecate key -- not safe to store it
+    #       Always rely on password, use password manager if needed
+    def __init__(self, password, salt_bytes=None, key=None, get_password=None):
+
+        self.salt_bytes = None
+        self.get_password = get_password
+
         if key is None:
-            self.key = derive_key(password, salt_bytes)
+            self.salt_bytes = if_none(salt_bytes, os.urandom(32))
+            self.key = derive_key(password, self.salt_bytes)
         else:
             self.key = key
         self.fernet = Fernet(self.key)
+
+    def set_password_input_func(self, password_func):
+        self.get_password = password_func
 
     def get_key(self):
         return self.key.decode()
@@ -152,13 +166,57 @@ class Encrypter:
         return Encrypter(None, None, key_str.encode())
 
     def encrypt_str(self, content_str):
-        return self.fernet.encrypt(content_str.encode()).decode()
+        if self.salt_bytes is not None:
+            salt_hex = self.salt_bytes.hex()
+        else:
+            salt_hex = None
+        return json.dumps({
+            'salt_hex' : salt_hex,
+            'crypted_content' :  (self.fernet.encrypt(content_str.encode())
+                                  .decode())
+        })
 
     def decrypt_to_str(self, crypted_str):
-        return self.fernet.decrypt(crypted_str.encode()).decode()
+        old_format = False
+        try:
+            content = json.loads(crypted_str)
+        except json.JSONDecodeError:
+            logger.warning('Error loading json. Trying old encryption format.')
+            content = {
+                'salt_hex' : None,
+                'crypted_content' :  crypted_str
+            }
+            old_format = True
+
+        if not old_format and 'salt_hex' not in content:
+            from IPython import embed; embed()
+
+        if not old_format and self.salt_bytes is not None and \
+           self.salt_bytes.hex() != content['salt_hex']:
+            logger.warning('Different salt found in content to decrypt. '\
+                           'Resquest password to build encryption key again.')
+            if self.get_password is None:
+                raise IOError('Cannot decrypt because cannot get password again')
+            else:
+                loaded_salt_bytes = bytes.fromhex(content['salt_hex'])
+                key = derive_key(self.get_password(), loaded_salt_bytes)
+                fernet = Fernet(key)
+        else:
+            fernet = self.fernet
+
+        return fernet.decrypt(content['crypted_content'].encode()).decode()
 
 class UnknownUser(Exception): pass
 class InvalidPassword(Exception): pass
+class PasswordReset(Exception): pass
+
+def hash_password(password_str):
+    return bcrypt.hashpw(password_str.encode('utf-8'),
+                         bcrypt.gensalt()).decode('utf-8')
+
+def password_is_valid(password_str, password_hash_str):
+    return bcrypt.checkpw(password_str.encode('utf-8'),
+                          password_hash_str.encode('utf-8'))
 
 class PasswordVault:
 
@@ -293,10 +351,10 @@ def module_from_code_str(code):
     module = importlib.util.module_from_spec(spec)
     try:
         exec(code, module.__dict__)
-    except Exception as e:
+    except:
         logger.error('Error while importing code:\n%s\nError:\n%s',
-                     code, repr(e))
-        raise e
+                     code, format_exc())
+        raise
     return module
 
 class LocalFileSystem:
@@ -308,6 +366,9 @@ class LocalFileSystem:
         self.root_folder = op.normpath(root_folder)
         self.encrypter = encrypter
         self.enable_track_changes(track_changes)
+
+    def is_encrypted(self):
+        return self.encrypter is not None
 
     def enable_track_changes(self, state=True):
         self.track_changes = state
@@ -359,6 +420,7 @@ class LocalFileSystem:
         """ Note: change tracking will be reset """
         if not self.exists(folder):
             raise IOError('%s does not exist' % folder)
+        logger.debug('Create new filesystem with root %s' % folder)
         return LocalFileSystem(op.join(self.root_folder, folder),
                                self.encrypter, track_changes)
 
@@ -430,7 +492,6 @@ class LocalFileSystem:
                 fn = op.normpath(op.join(rdir, bfn))
                 self.current_stats.pop(fn)
 
-        
         logger.debug2('Remove folder %s', full_folder)
         shutil.rmtree(full_folder)
 
@@ -475,13 +536,13 @@ class LocalFileSystem:
 
         self.current_stats[fn] = self.file_size(fn)
 
-    def load(self, fn):
+    def load(self, fn, crypted_content=True):
         afn = op.join(self.root_folder, fn)
 
         with open(afn, 'r') as fin:
             content_str = fin.read()
 
-        if self.encrypter is not None:
+        if crypted_content and self.encrypter is not None:
             content_str = self.encrypter.decrypt_to_str(content_str)
         return content_str
 
@@ -531,7 +592,13 @@ class Hints:
     ERROR = Hint(icon_style=QtWidgets.QStyle.SP_MessageBoxCritical,
                  background_color_hex_str='#EF2929')
     TEST = Hint(foreground_color_hex_str='#8F9EB7')
-    ALL_HINTS = [WARNING, DONE, NOT_DONE, ERROR, QUESTION]
+    IGNORED = Hint(background_color_hex_str='#999999',
+                   foreground_color_hex_str='#FFFFFF')
+    COMPLETED = Hint(background_color_hex_str='#B6D7A8',
+                     foreground_color_hex_str='#FFFFFF')
+
+    ALL_HINTS = [WARNING, DONE, NOT_DONE, ERROR, QUESTION,
+                 TEST, IGNORED, COMPLETED]
 
     @staticmethod
     def preload(qobj):
@@ -661,10 +728,6 @@ class TestLocalFileSystem(unittest.TestCase):
 
 class NonUniqueIndexFromValues(Exception) : pass
 
-from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
-                   FormEditionNotOpen, FormEditionLockedType,
-                   FormEditionOrphanError, FormEditionCancelled, SheetNotFound)
-
 class DataSheetSetupDialog(QtWidgets.QDialog):
     def __init__(self, sheet, parent=None):
         super(QtWidgets.QDialog, self).__init__(parent)
@@ -700,6 +763,32 @@ def if_plugin_valid(f):
                            'is invalid', f.__name__, args[0].label)
     return wrapper
 
+
+class DictStrEditorWidget(QtWidgets.QWidget):
+    def __init__(self, data_dict, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.formLayout = QtWidgets.QFormLayout(self)
+        self.formLayout.setContentsMargins(4, 4, 9, 4)
+        self.formLayout.setObjectName("formLayout")
+
+        self.fields = {}
+        for irow, (key, value) in enumerate(data_dict.items()):
+            label = QtWidgets.QLabel(self)
+            label.setText(key)
+            self.formLayout.setWidget(irow+1, QtWidgets.QFormLayout.LabelRole,
+                                      label)
+            field = QtWidgets.QLineEdit(self)
+            assert(value is None or isinstance(value, str))
+            field.setText(if_none(value, ''))
+            self.formLayout.setWidget(irow+1, QtWidgets.QFormLayout.FieldRole,
+                                      field)
+            self.fields[key] = field
+
+    def get_dict(self):
+        def none_if_empty(s):
+            return s if len(s) > 0 else None
+        return {k : none_if_empty(f.text()) for k,f in self.fields.items()}
+
 class DataSheet:
     """
     Table data where entries where input is done with an associated form.
@@ -712,9 +801,8 @@ class DataSheet:
     SHEET_LABEL_RE = re.compile('^[A-Za-z._-]+$')
 
     def __init__(self, label, form_master=None, df=None, user=None,
-                 filesystem=None, live_forms=None,
-                 watchers=None, workbook=None, properties=None,
-                 plugin_code_str=None, user_role=None):
+                 filesystem=None, live_forms=None, watchers=None,
+                 workbook=None, plugin_code_str=None, user_role=None):
         """
         filesystem.root is the sheet-specific folder where to save all data
         and pending forms.
@@ -730,9 +818,6 @@ class DataSheet:
         # TODO: check consistency between access level and given user role
 
         self.label = DataSheet.validate_sheet_label(label)
-        self.properties = {}
-        self.access_level = UserRole.VIEWER
-        self.update_properties(properties if properties is not None else {})
 
         if df is not None and form_master is None:
             raise Exception('Form master cannot be None if df is given')
@@ -787,6 +872,9 @@ class DataSheet:
                            else inspect.getsource(sheet_plugin_template))
         self.set_plugin_from_code(plugin_code_str)
 
+    def access_level(self):
+        return self.plugin.access_level()
+
     def set_user(self, user, user_role):
         self.user = user
         self.user_role = user_role
@@ -826,21 +914,20 @@ class DataSheet:
         self.plugin.set_workbook(workbook)
 
     @staticmethod
-    def from_files(user, filesystem, user_role=None, watchers=None, workbook=None):
+    def from_files(user, filesystem, user_role=None, watchers=None,
+                   workbook=None):
         filesystem = filesystem.clone()
         filesystem.enable_track_changes()
 
         label = DataSheet.get_sheet_label_from_filesystem(filesystem)
         logger.debug('Load form master for sheet %s', label)
         form_master = DataSheet.load_form_master(filesystem)
-        logger.debug('Create sheet %s, using filesystem(root=%s)',
-                     label, filesystem.full_path(filesystem.root_folder))
-        sheet_properties = DataSheet.load_properties_from_file(filesystem)
+        logger.debug('Create sheet %s for user %s, using filesystem(root=%s)',
+                     label, user, filesystem.full_path(filesystem.root_folder))
         plugin_code = DataSheet.load_plugin_code_from_file(filesystem)
         sheet = DataSheet(label, form_master=form_master, df=None, user=user,
                           user_role=user_role, filesystem=filesystem,
                           watchers=watchers, workbook=workbook,
-                          properties=sheet_properties,
                           plugin_code_str=plugin_code)
         sheet.reload_all_data()
         sheet.load_live_forms()
@@ -904,6 +991,7 @@ class DataSheet:
                 self.set_default_view(default_view)
 
             self.plugin.set_workbook(self.workbook)
+            self.plugin.access_level()
 
         except Exception as e:
             if first_attempt and self.label == '__users__':
@@ -939,7 +1027,7 @@ class DataSheet:
         return self.plugin_valid
 
     @staticmethod
-    def load_properties_from_file(filesystem):
+    def ___load_properties_from_file(filesystem):
         property_fn = 'properties.json'
         properties = {'access_level' : UserRole.VIEWER}
         if filesystem.exists(property_fn):
@@ -951,16 +1039,15 @@ class DataSheet:
                          filesystem.root_folder)
         return properties
 
-    def update_properties(self, properties):
+    def ___update_properties(self, properties):
         if 'access_level' in properties:
             self.access_level = properties.pop('access_level')
         self.properties.update(properties)
 
     def get_property(self, label):
-        assert(label != 'access_level')
-        return self.properties[label]
+        return self.plugin.get_property(label)
 
-    def save_properties(self, overwrite=False):
+    def ___save_properties(self, overwrite=False):
         if self.filesystem is None:
             raise Exception('No filesystem available to save properties '\
                             'for sheet %s', self.label)
@@ -1226,7 +1313,6 @@ class DataSheet:
                           'filesystem)')
 
         self.save_form_master(overwrite=overwrite)
-        self.save_properties(overwrite=overwrite)
         self.save_plugin_code(overwrite=overwrite)
 
     def save_plugin_code(self, overwrite=False):
@@ -1255,7 +1341,6 @@ class DataSheet:
             self.filesystem.makedirs('data')
 
         self.save_form_master(overwrite=overwrite)
-        self.save_properties(overwrite=overwrite)
         self.save_all_data(overwrite=overwrite)
         for form_id, form in self.live_forms.items():
             for section_name, section in form.sections.items():
@@ -1335,15 +1420,18 @@ class DataSheet:
                     submission = (saved_entries[first_section]
                                   .pop('__submission__'))
 
-                    logger.debug2('Loaded from live from file: %s '\
+                    logger.debug2('Loaded from live from %s: '\
                                  '__entry_id__ = %s, __update_idx__ = %s ',
-                                  entry_id_str, update_idx_str)
+                                  live_form_folder, entry_id_str, update_idx_str)
 
                     form_id = int(form_id_str) # TODO factorize
-                    live_form = {'append' : self.form_new_entry,
+                    entry_idx = (entry_id, np.int64(update_idx_str),
+                                 np.int64(conflict_idx_str))
+                    form_func = {'append' : self.form_new_entry,
                                  'update' : self.form_update_entry,
-                                 'set': self.form_set_entry}[submission](entry_id,
-                                                                         form_id)
+                                 'set': self.form_set_entry}[submission]
+                    live_form = form_func(entry_idx, form_id)
+
                     # From this point form input saving callback is active
                     for section, entries in saved_entries.items():
                         for key, value_str in entries.items():
@@ -1655,7 +1743,12 @@ class DataSheet:
             df = df.drop(conflicting_ids)
         ids_of_duplicates = set()
         latest_df = self.latest_update_df(df)
+        #if 'Security_Word' in cols_to_check:
+        #    from IPython import embed; embed()
         for col in cols_to_check:
+            if next((i.allow_None for i in self.form_master.key_to_items[col]),
+                    False):
+                latest_df.dropna(subset=[col], inplace=True)
             m = latest_df[col].duplicated(keep=False)
             ids_of_duplicates.update(latest_df[m].index)
         if len(ids_of_duplicates) > 0:
@@ -1673,7 +1766,8 @@ class DataSheet:
                            ids_of_conflicts.to_list())
         return ids_of_conflicts
 
-    def validate_unique(self, key, value, update_idx, entry_id, conflict_idx):
+    def validate_unique(self, key, value, update_idx, entry_id, conflict_idx,
+                        ignore_na=False):
         logger.debug2('Sheet %s: Validate uniqueness of %s', self.label, key)
         if self.df is None or self.df.shape[0]==0:
             return True
@@ -1708,15 +1802,18 @@ class DataSheet:
                             .set_index(['__entry_id__', '__update_idx__',
                                         '__conflict_idx__']))
             tmp_df = self.df[[key]].append(tmp_entry_df)
+        if ignore_na:
+            tmp_df.dropna(subset=[key], inplace=True)
         duplicate_entry_ids = self.duplicate_entries(tmp_df,
                                                      cols_to_check=[key])
         duplicate_entry_ids.difference_update(self.concurrent_updated_entries(tmp_df))
         duplicate_candidate_ids = [ii[0] for ii in duplicate_entry_ids]
         unique_ok = tmp_entry_df.index[0][0] not in duplicate_candidate_ids
-        logger.debug2('Check if %s is in duplicate candidates %s', entry_id,
+        logger.debug2('Checked if %s is in duplicate candidates %s', entry_id,
                       duplicate_candidate_ids)
         if not unique_ok:
             logger.warning('Value %s for key %s is not unique', value, key)
+
         return unique_ok
 
     @if_plugin_valid
@@ -1759,9 +1856,13 @@ class DataSheet:
         if not self.has_write_access:
             return None
         entry_dict = self.df.loc[[entry_idx]].to_dict('record')[0]
-        return self._new_form('set', entry_dict=entry_dict, form_id=form_id,
-                              entry_id=entry_idx[0], update_idx=entry_idx[1],
-                              conflict_idx=entry_idx[2])
+        try:
+            form = self._new_form('set', entry_dict=entry_dict, form_id=form_id,
+                                  entry_id=entry_idx[0], update_idx=entry_idx[1],
+                                  conflict_idx=entry_idx[2])
+        except IndexError:
+            from IPython import embed; embed()
+        return form
 
     def _new_form(self, submission, entry_dict=None, entry_id=None,
                   form_id=None, update_idx=np.int64(0),
@@ -1810,10 +1911,10 @@ class DataSheet:
 
         logger.debug2('Sheet %s: set unique validator', self.label)
 
-        form.set_unique_validator(LazyFunc(self.validate_unique,
-                                           update_idx=update_idx,
-                                           entry_id=entry_id,
-                                           conflict_idx=conflict_idx))
+        form.set_unique_validator(partial(self.validate_unique,
+                                          update_idx=update_idx,
+                                          entry_id=entry_id,
+                                          conflict_idx=conflict_idx))
         entry_id_str = str(entry_id)
         update_idx_str = str(update_idx)
         conflict_idx_str = str(conflict_idx)
@@ -1986,7 +2087,7 @@ class DataSheet:
 
     def append_entry(self, entry_dict, entry_idx=None):
         if entry_idx is None:
-            entry_idx = (self.new_entry_id(), 0)
+            entry_idx = (self.new_entry_id(), 0, 0)
         self.add_entry(entry_dict, entry_idx, self._append_df)
 
     # TODO: admin feature!
@@ -2032,6 +2133,7 @@ class DataSheet:
         self.df = self.df.append(entry_df)
         self.df.sort_index(inplace=True)
         entry_index = self.fix_conflicting_entries(index_to_track=entry_df.index[0])
+        logger.debug2('Entry index after fixing: %s', entry_index)
         logger.debug2('Entry has been appended to sheet %s', self.label)
         logger.debug2('Resulting df has columns: %s)', ','.join(self.df.columns))
         self.invalidate_cached_views()
@@ -2245,8 +2347,7 @@ class TestDataSheet(unittest.TestCase):
         self.sheet_ts = DataSheet(self.sheet_id,
                                   Form.from_dict(self.form_def_ts_data),
                                   self.data_df_ts_data,
-                                  self.user, self.filesystem,
-                                  properties={'access_level':UserRole.MANAGER})
+                                  self.user, self.filesystem)
         self.sheet_ts.save_logic()
         self.sheet_ts.save_live_data()
         logger.debug('--------------------')
@@ -2348,15 +2449,23 @@ def foo():
         self.assertEqual(module.foo()[0], 1)
 
     def test_properties(self):
-        self.assertEqual(self.sheet_ts.access_level, UserRole.MANAGER)
-        self.assertEqual(self.sheet.access_level, UserRole.VIEWER)
+        class PPSheetPlugin(SheetPlugin):
+            def access_level(self):
+                return UserRole.MANAGER
+            def get_property(self, property_name):
+                if property_name == 'lesca_participant_sheet':
+                    return True
+                return None
+        self.sheet_ts.set_plugin_from_code(PPSheetPlugin.get_code_str())
+        self.sheet_ts.save_plugin_code(overwrite=True)
+        self.assertEqual(self.sheet_ts.access_level(), UserRole.MANAGER)
 
-        self.sheet_ts.update_properties({'lesca_participant_sheet' : True})
-        self.sheet_ts.save_properties(overwrite=True)
+        self.assertEqual(self.sheet.access_level(), UserRole.VIEWER)
+        self.assertIsNone(self.sheet.get_property('unknown_prop'))
 
         sheet_ts2 = DataSheet.from_files(self.user,
                                          self.sheet_ts.filesystem.clone(), None)
-        self.assertEqual(sheet_ts2.access_level, UserRole.MANAGER)
+        self.assertEqual(sheet_ts2.access_level(), UserRole.MANAGER)
         self.assertTrue(sheet_ts2.get_property('lesca_participant_sheet'))
 
 
@@ -2434,6 +2543,60 @@ def foo():
         form.set_values_from_entry({'Participant_ID' : 'P1'})
         self.assertFalse(form.is_valid())
 
+    def test_unique_allow_empty(self):
+        form_def = {
+            'title' : {'French' : 'Un formulaire'},
+            'default_language' : 'French',
+            'supported_languages' : {'French'},
+            'sections' : {
+                'section1' : {
+                    'items' : [
+                        {'keys' : {'Participant_ID' :
+                                   {'French':'Code Participant'}},
+                         'allow_empty' : True,
+                         'unique' : True,
+                        },
+                        {'keys' : {'Name' : {'French':'Nom'}}}
+                    ]
+                }
+            }
+        }
+        data = pd.DataFrame(OrderedDict([
+            ('Participant_ID', ['P1', 'P2', None, 'P3']),
+            ('__entry_id__',   np.array([0, 1, 2, 2], dtype=np.int64)),
+            ('__update_idx__', np.array([0, 0, 0, 1], dtype=np.int64)),
+            ('__conflict_idx__', np.array([0, 0, 0, 0], dtype=np.int64)),
+            ('Name', ['John', 'Jon', 'Robert', 'Robert']),
+        ])).set_index(['__entry_id__', '__update_idx__', '__conflict_idx__'])
+
+        sheet_id = 'pinfo'
+        user = 'me'
+        sheet_folder = op.join(self.tmp_dir, sheet_id)
+        os.makedirs(sheet_folder)
+        filesystem = LocalFileSystem(sheet_folder)
+
+        logger.debug('utest: create sheet')
+        sheet = DataSheet(sheet_id, Form.from_dict(form_def),
+                          data, user, filesystem)
+
+        logger.debug('utest: create update form')
+        form = sheet.form_update_entry(sheet.df.index[0])
+        self.assertTrue(form.is_valid())
+
+        logger.debug('utest: create new entry form')
+        form = sheet.form_new_entry()
+        form.set_values_from_entry({'Participant_ID' : None})
+        self.assertTrue(form.is_valid())
+        form.submit()
+
+        logger.debug('utest: create update form')
+        form = sheet.form_update_entry(sheet.df.index[3])
+        self.assertTrue(form.is_valid())
+
+        logger.debug('-- utest: set PID to P1 in form. Expect duplicate')
+        form.set_values_from_entry({'Participant_ID' : 'P1'})
+        self.assertFalse(form.is_valid())
+
     def test_inconsistencies(self):
         form_def = {
             'title' : {'French' : 'Un formulaire'},
@@ -2493,8 +2656,8 @@ def foo():
                          'freeze_on_update' : True,
                          'allow_empty' : False,
                         },
-
-                        {'keys' : {'Name' : {'French':'Nom'}}}
+                        {'keys' : {'Name' : {'French':'Nom'}}},
+                        {'keys' : {'Extra' : {'French':'Extra'}}}
                     ]
                 }
             }
@@ -2534,13 +2697,9 @@ def foo():
                          [(2,1,0)])
 
         # Update entry
-        # from IPython import embed; embed()
         form = sheet.form_update_entry((2,1,0))
-        form.set_values_from_entry({'Extra' : 'waza'})
-        form.submit()
-        self.assertEqual(sheet.df_index_from_value({'Participant_ID' : 'P1',
-                                                     'Interview' : 'Tuto'}),
-                         [(2,2,0)])
+        self.assertRaises(FormItemKeyNotFound, form.set_values_from_entry,
+                          {'Unknown' : 'waza'})
 
         # No need to test data modications as long as search method is systematic
         # and does rely on secondary maintained indexes
@@ -2989,7 +3148,6 @@ def foo():
         form = self.sheet_ts.form_update_entry((1,0,0))
         form.set_values_from_entry({'Age' : 33})
         form.submit()
-
         form = sheet_ts2.form_update_entry((1,0,0))
         form.set_values_from_entry({'Age' : 44})
         form.submit()
@@ -3285,7 +3443,7 @@ class PiccelLogic:
         * get_recent_files
         - load -> Decrypt
     State: Decrypt
-        - decrypt workbook -> Login
+        - decrypt workbook with password -> Login
     State: Login
         * get_users (name, role, password_check)
         - on_login_fail -> Login
@@ -3327,16 +3485,8 @@ class PiccelLogic:
         return message
 
     def decrypt(self, access_pwd):
-        message = 'ok'
-        try:
-            self.workbook.decrypt(access_pwd)
-            self.state = PiccelLogic.STATE_LOGIN
-        except Exception as e:
-            logger.error('Error decrypting workbook %s: %s',
-                         self.workbook.label, e)
-            message = 'Decryption error'
-            self.state = PiccelLogic.STATE_SELECTOR
-        return message
+        self.workbook.decrypt(access_pwd)
+        self.state = PiccelLogic.STATE_LOGIN
 
     def get_user_names(self):
         last_user = self.system_data.get_last_user()
@@ -3351,12 +3501,20 @@ class PiccelLogic:
     def get_user_role(self, user):
         return self.workbook.get_user_role(user)
 
+    def get_security_word(self, user):
+        return self.workbook.get_security_word(user)
+
+    def password_reset_needed(self, user):
+        return self.workbook.password_reset_needed(user)
+
     def check_access_password(self, password_str):
         return self.workbook.access_password_is_valid(password_str)
 
-    def check_role_password(self, user, password_str):
-        user_role = self.workbook.get_user_role(user)
-        return self.workbook.role_password_is_valid(user_role, password_str)
+    def check_user_password(self, user, password_str):
+        return self.workbook.user_password_is_valid(user, password_str)
+
+    def set_user_password(self, user, password_str):
+        return self.workbook.set_user_password(user, password_str)
 
     def cancel_access(self):
         self.cancel_login()
@@ -3367,13 +3525,13 @@ class PiccelLogic:
         self.workbook = None
         self.state = PiccelLogic.STATE_SELECTOR
 
-    def login(self, user, role_pwd=None, progression_callback=None):
+    def login(self, user, pwd, user_role=None, progression_callback=None):
         """
         Create encrypter using given access password.
         Load workbook using given user.
         """
 
-        self.workbook.user_login(user, role_pwd,
+        self.workbook.user_login(user, pwd, user_role=user_role,
                                  progress_callback=progression_callback)
 
         logger.debug('Record that last user is %s', user)
@@ -3394,24 +3552,22 @@ class TestPiccelLogic(unittest.TestCase):
         self.tmp_dir = tempfile.mkdtemp()
         filesystem = LocalFileSystem(self.tmp_dir)
         self.access_pwd = '1234'
-        self.editor_pwd = 'FVEZ'
         self.admin_pwd = '5425'
-        self.manager_pwd = 'a542fezf5'
         self.admin_user = 'thomas'
         wb_label = 'Test WB'
         wb = WorkBook.create(wb_label, filesystem,
                              access_password=self.access_pwd,
                              admin_password=self.admin_pwd,
-                             manager_password=self.manager_pwd,
-                             editor_password=self.editor_pwd,
                              admin_user=self.admin_user)
         self.cfg_bfn = protect_fn(wb_label) + '.psh'
 
         sh_users = wb['__users__']
-        for user, role in [('simon' , UserRole.EDITOR),
-                           ('catherine' , UserRole.MANAGER),
-                           ('guest' , UserRole.VIEWER)]:
-            sh_users.add_new_entry({'User_Name' : user, 'Role' : role.name})
+        for user, role, pwd in [('simon' , UserRole.EDITOR, 'pwd_simon'),
+                                ('catherine' , UserRole.MANAGER, 'pwd_cath'),
+                                ('guest' , UserRole.VIEWER, 'pwd_guest')]:
+            sh_users.add_new_entry({'User_Name' : user, 'Role' : role.name,
+                                    'Security_Word' : 'yata ' + user})
+            wb.set_user_password(user, pwd)
 
     def tearDown(self):
         self.udata.clear()
@@ -3430,8 +3586,7 @@ class TestPiccelLogic(unittest.TestCase):
         logic = PiccelLogic(self.udata)
         filesystem = LocalFileSystem(self.tmp_dir)
         logic.load_configuration(filesystem, self.cfg_bfn)
-        msg = logic.decrypt(self.access_pwd)
-        self.assertEqual(msg, 'ok')
+        logic.decrypt(self.access_pwd)
         self.assertEqual(logic.state, logic.STATE_LOGIN)
 
     def test_login_unknown_user(self):
@@ -3439,7 +3594,7 @@ class TestPiccelLogic(unittest.TestCase):
         filesystem = LocalFileSystem(self.tmp_dir)
         logic.load_configuration(filesystem, self.cfg_bfn)
         logic.decrypt(self.access_pwd)
-        self.assertRaises(UnknownUser, logic.login, 'chouchou', 'bobie')
+        self.assertRaises(UnknownUser, logic.login, 'chouchou', 'bobbie')
 
     def test_login_invalid_password(self):
         logic = PiccelLogic(self.udata)
@@ -3448,7 +3603,7 @@ class TestPiccelLogic(unittest.TestCase):
         logic.decrypt(self.access_pwd)
         self.assertRaises(InvalidPassword, logic.login, 'thomas', 'nope')
         self.assertRaises(InvalidPassword, logic.login, 'thomas',
-                          self.access_pwd, 'nope')
+                          self.access_pwd)
 
     def test_check_passwords(self):
         logic = PiccelLogic(self.udata)
@@ -3456,22 +3611,22 @@ class TestPiccelLogic(unittest.TestCase):
         logic.load_configuration(filesystem, self.cfg_bfn)
         self.assertTrue(logic.check_access_password(self.access_pwd))
         logic.decrypt(self.access_pwd)
-        self.assertTrue(logic.check_role_password('thomas', self.admin_pwd))
-        self.assertTrue(logic.check_role_password('simon', self.editor_pwd))
-        self.assertTrue(logic.check_role_password('guest', self.access_pwd))
-        self.assertTrue(logic.check_role_password('catherine', self.manager_pwd))
+        self.assertTrue(logic.check_user_password('thomas', self.admin_pwd))
+        self.assertTrue(logic.check_user_password('simon', 'pwd_simon'))
+        self.assertTrue(logic.check_user_password('guest', 'pwd_guest'))
+        self.assertTrue(logic.check_user_password('catherine', 'pwd_cath'))
 
-        self.assertFalse(logic.check_role_password('thomas', 'nope'))
-        self.assertFalse(logic.check_role_password('simon', 'nope'))
-        self.assertFalse(logic.check_role_password('catherine', 'nope'))
-        self.assertFalse(logic.check_role_password('guest', 'nope'))
+        self.assertFalse(logic.check_user_password('thomas', 'nope'))
+        self.assertFalse(logic.check_user_password('simon', 'nope'))
+        self.assertFalse(logic.check_user_password('catherine', 'nope'))
+        self.assertFalse(logic.check_user_password('guest', 'nope'))
 
     def test_last_user_first(self):
         logic = PiccelLogic(self.udata)
         filesystem = LocalFileSystem(self.tmp_dir)
         logic.load_configuration(filesystem, self.cfg_bfn)
         logic.decrypt(self.access_pwd)
-        logic.login('simon', self.editor_pwd)
+        logic.login('simon', 'pwd_simon')
 
         filesystem.unset_encrypter()
         logic2 = PiccelLogic(self.udata)
@@ -3485,8 +3640,8 @@ class TestPiccelLogic(unittest.TestCase):
         logic.load_configuration(filesystem, self.cfg_bfn)
         logic.decrypt(self.access_pwd)
         logic.login('thomas', self.admin_pwd)
-        logic.login('simon', self.editor_pwd)
-        logic.login('guest')
+        logic.login('simon', 'pwd_simon')
+        logic.login('guest', 'pwd_guest')
         self.assertIsNotNone(logic.workbook)
         self.assertEqual(logic.state, PiccelLogic.STATE_WORKBOOK)
 
@@ -3535,6 +3690,91 @@ def combine_regexps(regexp_strs):
 class WorkBookExistsError(Exception): pass
 class WorkBookLoginError(Exception): pass
 
+
+roles_tr = {r.name : {language : (r.name[0].upper()+r.name[1:].lower())
+                      for language in ['French', 'English']}
+            for r in UserRole}
+
+UF_ITEMS = [FormItem({'User_Name' :
+                      {'French' : "Nom d'utilisateur",
+                       'English' : "User name"}},
+                     allow_empty=False,
+                     unique=True,
+                     freeze_on_update=True,
+                     default_language='French',
+                     supported_languages={'French', 'English'}),
+            FormItem(keys={'Role':None},
+                     choices=roles_tr,
+                     allow_empty=False,
+                     init_values={'Role' : 'EDITOR'},
+                     supported_languages={'French', 'English'},
+                     default_language='French'),
+            FormItem(keys={'Status':{'French' : 'Statut',
+                                     'English' : 'Status'}},
+                     choices={'active' : {'French' : 'Actif.ve',
+                                          'English' : 'Active'},
+                              'non_active' : {'French' : 'Non actif.ve',
+                                              'English' : 'Not active'}},
+                     allow_empty=False,
+                     init_values={'Status' : 'active'},
+                     supported_languages={'French', 'English'},
+                     default_language='French'),
+            FormItem({'Password_Reset' :
+                      {'French' : "Réinitialiser le mot de passe",
+                       'English' : "Reset password"}},
+                     allow_empty=False,
+                     vtype='boolean',
+                     choices={'True' : {'French' : 'Oui', 'English' : 'Yes'},
+                              'False' : {'French' : 'Non', 'English' : 'No'}},
+                     init_values={'Password_Reset' : True},
+                     default_language='French',
+                     supported_languages={'French', 'English'}),
+            FormItem({'Security_Word' :
+                      {'French' : "Mot de sécurité",
+                       'English' : "Security word"}},
+                     description={'French' : "Transmettre ce mot à "\
+                                  "l'utilisateur lors de la rèinitialisation.",
+                                  'English' : "Give this word to the user "\
+                                  "when resetting password"},
+                     allow_empty=False,
+                     unique=True,
+                     default_language='French',
+                     supported_languages={'French', 'English'}),
+            FormItem({'Password_Hash' :
+                      {'French' : "Mot de passe crypté",
+                       'English' : "Crypted password"}},
+                     access_level=UserRole.ADMIN,
+                     default_language='French',
+                     supported_languages={'French', 'English'}),
+            FormItem(keys={'User' : None},
+                     vtype='user_name',
+                     access_level=UserRole.ADMIN,
+                     allow_empty=False,
+                     supported_languages={'French', 'English'},
+                     default_language='French'),
+            FormItem(keys={'Timestamp_Submission':None},
+                     vtype='datetime', generator='timestamp_creation',
+                     supported_languages={'French', 'English'},
+                     default_language='French',
+                     access_level=UserRole.ADMIN)]
+UF_SECTIONS = {'section_main' : \
+               FormSection(UF_ITEMS, default_language='French',
+                           supported_languages={'French', 'English'})}
+USERS_FORM = Form(UF_SECTIONS, default_language='French',
+                  supported_languages={'French', 'English'},
+                  title={'French': 'Utilisateur du classeur',
+                         'English': 'Workbook user'})
+class InvalidJobName(Exception): pass
+class JobDisabled(Exception): pass
+class JobNotFound(Exception): pass
+class InvalidJobCode(Exception):
+    def __init__(self, error_message):
+        self.error_message = error_message
+
+class InvalidJobs(Exception):
+    def __init__(self, invalid_jobs):
+        self.invalid_jobs = invalid_jobs
+
 class WorkBook:
     """
     Workflow:
@@ -3544,6 +3784,8 @@ class WorkBook:
     """
     ACCESS_KEY = 'data_access'
     SHEET_FOLDER = 'sheets'
+    JOBS_FOLDER = 'jobs'
+    JOB_EXT = '.py'
     ENCRYPTION_FN = 'encryption.json'
 
     def __init__(self, label, data_folder, filesystem, password_vault=None,
@@ -3590,6 +3832,11 @@ class WorkBook:
             logger.info('WorkBook %s: Create sheet subfolder', self.label)
             filesystem.makedirs(sheet_folder)
 
+        jobs_folder = op.join(data_folder, WorkBook.JOBS_FOLDER)
+        if not filesystem.exists(jobs_folder):
+            logger.info('WorkBook %s: Create job subfolder', self.label)
+            filesystem.makedirs(jobs_folder)
+
         if password_vault is None:
             logger.info('WorkBook %s: Create password vault', self.label)
             pwd_rfn = op.join(data_folder, WorkBook.ENCRYPTION_FN)
@@ -3599,9 +3846,9 @@ class WorkBook:
                         self.label, pwd_fn)
             password_vault.save()
         self.password_vault = password_vault
+
         self.user = None
         self.user_role = None
-        self.user_roles = None
 
         self.data_folder = data_folder
         self.linked_book_fns = (linked_book_fns if linked_book_fns is not None \
@@ -3621,13 +3868,18 @@ class WorkBook:
                      self.label, self.password_vault.pwd_fn)
 
         self.sheets = {}
+        self.jobs = {}
+        self.jobs_code = {}
+        self.jobs_invalidity = {}
+
         self.decrypted = False
         self.logged_in = False
 
+
     @staticmethod
     def create(label, filesystem, access_password, admin_password,
-               manager_password, editor_password, admin_user,
-               data_folder=None, salt_hex=None, color_hex_str=None):
+               admin_user, data_folder=None, salt_hex=None,
+               color_hex_str=None):
         data_folder = (data_folder if data_folder is not None
                        else protect_fn(label) + '_files')
         cfg_bfn = protect_fn(label) + '.psh'
@@ -3637,70 +3889,91 @@ class WorkBook:
                       color_hex_str=color_hex_str)
         wb.set_access_password(access_password)
         assert(admin_password is not None)
-        wb.set_password(UserRole.ADMIN, admin_password)
-        if editor_password is not None:
-            wb.set_password(UserRole.EDITOR, editor_password)
-        if manager_password is not None:
-            wb.set_password(UserRole.MANAGER, manager_password)
         wb.decrypt(access_password)
         wb.user = admin_user
         wb.user_role = UserRole.ADMIN
         wb.logged_in = True
 
         sheet_id = '__users__'
-        roles_tr = {r.name : {language : (r.name[0].upper()+r.name[1:].lower())
-                              for language in ['French', 'English']}
-                    for r in UserRole}
-        items = [FormItem({'User_Name' :
-                           {'French' : "Nom d'utilisateur",
-                            'English' : "User name"}},
-                          allow_empty=False,
-                          unique=True,
-                          default_language='French',
-                          supported_languages={'French', 'English'}),
-                 FormItem(keys={'Role':None},
-                          choices=roles_tr,
-                          allow_empty=False,
-                          init_values={'Role' : 'EDITOR'},
-                          supported_languages={'French', 'English'},
-                          default_language='French'),
-                 FormItem(keys={'Status':{'French' : 'Statut',
-                                          'English' : 'Status'}},
-                          choices={'active' : {'French' : 'Actif.ve',
-                                               'English' : 'Active'},
-                                   'non_active' : {'French' : 'Non actif.ve',
-                                                   'English' : 'Not active'}},
-                          allow_empty=False,
-                          init_values={'Status' : 'active'},
-                          supported_languages={'French', 'English'},
-                          default_language='French'),
-                 FormItem(keys={'User' : None},
-                          vtype='user_name',
-                          access_level=UserRole.ADMIN,
-                          allow_empty=False,
-                          supported_languages={'French', 'English'},
-                          default_language='French'),
-                 FormItem(keys={'Timestamp_Submission':None},
-                          vtype='datetime', generator='timestamp_creation',
-                          supported_languages={'French', 'English'},
-                          default_language='French',
-                          access_level=UserRole.ADMIN)]
-        sections = {'section_main' : \
-                    FormSection(items, default_language='French',
-                                supported_languages={'French', 'English'})}
-        form = Form(sections, default_language='French',
-                    supported_languages={'French', 'English'},
-                    title={'French': 'Utilisateur du classeur',
-                           'English': 'Workbook user'})
-        sh1 = DataSheet(sheet_id, form, user=admin_user)
+        sh1 = DataSheet(sheet_id, USERS_FORM.new(), user=admin_user)
         sh1.set_plugin_from_code(UserSheetPlugin.get_code_str())
-
         wb.add_sheet(sh1) # TODO insure that logic is properly saved
         sh1.add_new_entry({'User_Name' : admin_user,
-                           'Role' : UserRole.ADMIN.name})
+                           'Role' : UserRole.ADMIN.name,
+                           'Security_Word' : 'azerty',
+                           'Password_Reset' : False,
+                           'Password_Hash' : hash_password(admin_password)})
 
         wb.save_configuration_file(cfg_bfn)
         return wb
+
+    def set_job_code(self, job_name, job_code_str):
+        logger.debug('Set code of job %s', job_name)
+        if not job_name.isidentifier():
+            raise InvalidJobName(job_name)
+
+        # TODO also consider job.check() to invalidate it
+        self.jobs_code[job_name] = job_code_str
+        self.save_job_code(job_name, job_code_str)
+        try:
+            self.jobs[job_name] = self.job_from_code(job_name, job_code_str)
+        except InvalidJobCode as e:
+            self.jobs_invalidity[job_name] = e.args[0]
+
+    def delete_job(self, job_name):
+        logger.debug('Save code of job %s', job_name)
+        if job_name not in self.jobs_code:
+            raise JobNotFound(job_name)
+
+        self.jobs.pop(job_name, None)
+        self.jobs_code.pop(job_name)
+        self.jobs_invalidity.pop(job_name, None)
+        jobs_folder = op.join(self.data_folder, WorkBook.JOBS_FOLDER)
+        self.filesystem.remove(op.join(jobs_folder, '%s.py' % job_name))
+
+    def save_job_code(self, job_name, job_code_str):
+        logger.debug('Save code of job %s', job_name)
+        jobs_folder = op.join(self.data_folder, WorkBook.JOBS_FOLDER)
+        self.filesystem.save(op.join(jobs_folder, '%s.py' % job_name),
+                             job_code_str, overwrite=True)
+
+    def get_job_code(self, job_name):
+        return self.jobs_code[job_name]
+
+    def job_from_code(self, job_name, job_code_str):
+        try:
+            job = module_from_code_str(job_code_str)
+        except:
+            raise InvalidJobCode('Error during code import:\n %s' % format_exc())
+
+        errors = []
+        for func in ('who_can_run', 'min_access_level', 'icon', 'run'):
+            try:
+                if not eval('callable(job.%s)' % func):
+                    errors.append('%s is not a function' % func)
+            except AttributeError:
+                errors.append('job %s does not implement function %s' % \
+                              (job_name, func))
+
+        if not isinstance(job.min_access_level(), UserRole):
+            errors.append('%s.%s does not return a UserRole' % \
+                          (job_name, func))
+
+        if len(errors) > 0:
+            message = ('Error while setting job %s:\n%s' %
+                       (job_name, '\n'.join([' - %s' % e for e in errors])))
+            logger.error(message)
+            raise InvalidJobCode(message)
+
+        return job
+
+    def run_job(self, job_name, ask_input=None):
+        if job_name not in self.jobs:
+            if job_name in self.jobs_invalidity:
+                raise JobDisabled(job_name)
+            elif job_name not in self.jobs:
+                raise JobNotFound(job_name)
+        self.jobs[job_name].run(self, ask_input)
 
     def add_linked_workbook(self, cfg_fn, sheet_filters):
         self.linked_book_fns[cfg_fn] = sheet_filters
@@ -3755,7 +4028,7 @@ class WorkBook:
         if filesystem is None:
             filesystem = LocalFileSystem(op.dirname(workbook_fn))
             workbook_fn = op.basename(workbook_fn)
-        cfg = json.loads(filesystem.load(workbook_fn))
+        cfg = json.loads(filesystem.load(workbook_fn, crypted_content=False))
         wb_cfg_folder = op.normpath(op.dirname(workbook_fn))
         filesystem = filesystem.change_dir(wb_cfg_folder)
         if filesystem.exists(cfg['data_folder']):
@@ -3776,11 +4049,30 @@ class WorkBook:
                         linked_book_fns=cfg['linked_sheets'],
                         color_hex_str=cfg.get('color_hex_str', None))
 
-    def set_password(self, role, pwd, old_pwd=''):
-        assert(role in UserRole)
-        logger.debug('Set password for role %s', role.name)
-        self.password_vault.set_password(role.name, pwd, old_pwd)
-        self.password_vault.save()
+    def set_user_password(self, user, new_pwd):
+        assert(self.decrypted)
+        users_sheet = self.request_read_only_sheet('__users__', user=user)
+        users = users_sheet.get_df_view('latest')
+        logger.debug('Set password for user %s', user)
+        entry_index = users_sheet.df_index_from_value({'User_Name' : user},
+                                                      view='latest')
+        if len(entry_index) == 0:
+            raise UnknownUser(user)
+
+        if len(entry_index) > 1:
+            logger.warning('Multiple entries for user %s: %s',
+                           user, entry_index)
+
+        form = users_sheet.form_update_entry(entry_index[-1])
+        form.set_values_from_entry({'Password_Hash' : hash_password(new_pwd),
+                                    'Password_Reset' : False,
+                                    'User' : user})
+        # TODO: remove this when no longer need
+        if 'Security_Word' in form.get_invalid_keys():
+            logger.warning('No security word defined for user %s in __users__.'\
+                           'Using default one')
+            form.set_values_from_entry({'Security_Word' : '1234'})
+        form.submit()
 
     def set_access_password(self, pwd):
         if self.password_vault.has_password_key(WorkBook.ACCESS_KEY):
@@ -3791,25 +4083,38 @@ class WorkBook:
         self.password_vault.set_password(UserRole.VIEWER.name, pwd)
         self.password_vault.save()
 
-    def decrypt(self, access_pwd, key_afn=None):
+    def decrypt(self, access_pwd=None, key_afn=None):
         """
         Load user list and resolve linked books
         Must be called before user login.
         """
         # TODO improve API with key input
-        if key_afn is None:
-            if not self.access_password_is_valid(access_pwd):
-                logger.error('Invalid password for data access')
-                raise InvalidPassword('Data access')
-            logger.info('WorkBook %s: decrypt', self.label)
-            encrypter = self.password_vault.get_encrypter(WorkBook.ACCESS_KEY,
-                                                          access_pwd)
-        else:
-            with open(key_afn, 'r') as fin:
-                key = fin.read()
-            encrypter = self.password_vault.get_encrypter(None, None, key)
-        self.filesystem.set_encrypter(encrypter)
+        if access_pwd is not None or key_afn is not None:
+            if key_afn is None:
+                if not self.access_password_is_valid(access_pwd):
+                    logger.error('Invalid password for data access')
+                    raise InvalidPassword('Data access')
+                logger.info('WorkBook %s: decrypt', self.label)
+                encrypter = self.password_vault.get_encrypter(WorkBook.ACCESS_KEY,
+                                                              access_pwd)
+            else:
+                with open(key_afn, 'r') as fin:
+                    key = fin.read()
+                encrypter = self.password_vault.get_encrypter(None, None, key)
+            self.filesystem.set_encrypter(encrypter)
+
         self.decrypted = True
+
+        # Check __users__ sheet - remove when all fixed
+        # try:
+        #     users_sheet = self.request_read_only_sheet('__users__')
+        #     if not users_sheet.form_master.has_key('Password_Hash') or \
+        #        not users_sheet.form_master.has_key('Security_Word'):
+        #         logger.info('Fix form master for __users__ sheet')
+        #         users_sheet.set_form_master(USERS_FORM.new(),
+        #                                     save=True, overwrite=True)
+        # except SheetNotFound:
+        #     logger.debug('__users__ sheet not found. Could not check it')
 
         # TODO: fix handling roles in linked workbooks
 
@@ -3886,51 +4191,100 @@ class WorkBook:
         except UnknownUser:
             raise NoAccessPasswordError()
 
-    def role_password_is_valid(self, role, pwd):
-        assert(role in UserRole)
-        return self.password_vault.password_is_valid(role.name, pwd)
+    def get_security_word(self, user):
+        assert(self.decrypted)
+        users_sheet = self.request_read_only_sheet('__users__')
+        users = users_sheet.get_df_view('latest').set_index('User_Name')
 
-    def request_read_only_sheet(self, sheet_label):
+        if user not in users.index:
+            raise UnknownUser(user)
+
+        security_word = users.loc[user, 'Security_Word']
+        if pd.isna(security_word):
+            logger.warning('Security word for user %s is empty. '\
+                           'Using default one', user)
+            security_word = '1234'
+        return security_word
+
+    def password_reset_needed(self, user):
+        assert(self.decrypted)
+        users_sheet = self.request_read_only_sheet('__users__')
+        users = users_sheet.get_df_view('latest').set_index('User_Name')
+
+        if user not in users.index:
+            raise UnknownUser(user)
+
+        return (users.loc[user, 'Password_Reset'] or
+                pd.isna(users.loc[user, 'Password_Hash']))
+
+    def user_password_is_valid(self, user, pwd):
+        assert(self.decrypted)
+        users_sheet = self.request_read_only_sheet('__users__')
+        users = users_sheet.get_df_view('latest').set_index('User_Name')
+
+        if user not in users.index:
+            raise UnknownUser(user)
+
+        if users.loc[user, 'Password_Reset']:
+            raise PasswordReset(user)
+
+        return (not pd.isna(users.loc[user, 'Password_Hash']) and
+                password_is_valid(pwd, users.loc[user, 'Password_Hash']))
+
+    def request_read_only_sheet(self, sheet_label, user=None):
         if not self.logged_in:
+            user = if_none(user, self.user)
             sheet_folder = op.join(self.data_folder, WorkBook.SHEET_FOLDER)
+            if not self.filesystem.exists(op.join(sheet_folder,
+                                                  sheet_label)):
+                raise SheetNotFound(sheet_label)
             sh_fs = self.filesystem.change_dir(op.join(sheet_folder,
                                                        sheet_label))
-            sheet = DataSheet.from_files(None, sh_fs, None, workbook=self)
+            logger.debug('Create requested r-o sheet %s for user %s',
+                         sheet_label, user)
+            sheet = DataSheet.from_files(user, sh_fs, None, workbook=self)
         else:
+            if sheet_label not in self.sheets:
+                raise SheetNotFound(sheet_label)
             sheet = self[sheet_label]
 
         return sheet
-    def user_login(self, user, pwd, progress_callback=None, load_sheets=True):
+
+    def user_login(self, user, pwd=None, user_role=None, progress_callback=None,
+                   load_sheets=True):
         """
-        Note: The role password only protects access to certain methods of the
-        WorkBook class.
+        Note:
         If a user has write access to the workbook files and has the data access
         password, then they can modify workbook files as they want.
         There is no mechanism that strictly protects admin operations.
 
         Write access must be handled by the file system.
         """
-        # TODO: check role according to self.user_roles
         assert(self.decrypted)
         self.user = user
-        self.user_role = self.get_user_role()
+        main_role = self.get_user_role()
+        if user_role is not None:
+            if user_role > main_role:
+                raise UnauthorizedRole('%s has main role %s, cannot be %s' %
+                                       user, main_role, user_role)
+            self.user_role = user_role
+        else:
+            self.user_role = main_role
         logger.info('Logging as user %s with role %s',
                     self.user, self.user_role)
-        if self.user_role != UserRole.VIEWER:
-            if not self.password_vault.has_password_key(self.user_role.name):
-                raise NoRolePasswordError(self.user_role.name)
-            if not self.password_vault.password_is_valid(self.user_role.name,
-                                                         pwd):
-                logger.error('Invalid password for role %s', self.user_role.name)
-                raise InvalidPassword('role %s' % self.user_role.name)
+
+        if pwd is not None and not self.user_password_is_valid(user, pwd):
+            logger.error('Invalid password for %s', user)
+            raise InvalidPassword(user)
 
         for linked_book, sheet_filter in self.linked_books:
-            linked_book.user_login(user, pwd, load_sheets=load_sheets)
+            linked_book.user_login(user, pwd, user_role=user_role,
+                                   load_sheets=load_sheets)
 
         self.logged_in = True
 
         if load_sheets:
-            self.reload(progress_callback)
+           self.reload(progress_callback)
 
     def get_sheet(self, sheet_label):
         if not self.logged_in:
@@ -3944,8 +4298,9 @@ class WorkBook:
         return sum(1 for sh in self.filesystem.listdir(sheet_folder) \
                    if sheet_re.match(sh))
 
-    def dump_default_plugin(self, plugin_fn, plugin_code=None):
-        logger.debug('Dump default workbook plugin')
+    def dump_common_plugin(self, plugin_code=None):
+        plugin_fn = op.join(self.data_folder, 'plugin_common.py')
+        logger.debug('Dump workbook plugin in %s', plugin_fn)
         if plugin_code is None:
             plugin_code = inspect.getsource(workbook_plugin_template)
         self.filesystem.save(plugin_fn, plugin_code, overwrite=True)
@@ -3965,8 +4320,9 @@ class WorkBook:
         if not self.filesystem.exists(plugin_fn):
             logger.info('WorkBook %s: plugin file "%s" does not exist. '\
                         'Dump default one', self.label, plugin_fn)
-            self.dump_default_plugin(plugin_fn)
+            self.dump_common_plugin()
         self.load_plugin()
+        self.load_jobs()
 
         # TODO: sort out sheet filtering
         # ASSUME all sheet labels are unique
@@ -3981,6 +4337,18 @@ class WorkBook:
                                                        parent_workbook=self))
         self.after_workbook_load()
 
+    def load_jobs(self):
+        self.jobs.clear()
+        self.jobs_invalidity.clear()
+
+        jobs_folder = op.join(self.data_folder, WorkBook.JOBS_FOLDER)
+        for job_fn in self.filesystem.listdir(jobs_folder):
+            if job_fn.endswith(WorkBook.JOB_EXT):
+                job_name = op.splitext(job_fn)[0]
+                job_code_str = self.filesystem.load(op.join(jobs_folder,
+                                                            job_fn))
+                self.set_job_code(job_name, job_code_str)
+
     def after_workbook_load(self):
         logger.debug('Workbook %s: call after_workbook_load on all sheets',
                      self.label)
@@ -3989,6 +4357,12 @@ class WorkBook:
 
         for sheet in self.sheets.values():
             sheet.after_workbook_load()
+
+    def get_common_plugin_code(self):
+        plugin_fn = op.join(self.data_folder, 'plugin_common.py')
+        tmp_fn = self.filesystem.copy_to_tmp(plugin_fn, decrypt=True)
+        with open(tmp_fn, 'r') as fin:
+            return fin.read()
 
     def load_plugin(self):
         plugin_module = 'plugin_common'
@@ -4075,7 +4449,6 @@ class WorkBook:
 
     def __eq__(self, other):
         return isinstance(other, WorkBook) and self.label==other.label and\
-            self.user_roles == other.user_roles and \
             self.password_vault == other.password_vault and \
             self.data_folder == other.data_folder and \
             self.linked_book_fns == other.linked_book_fns and \
@@ -4151,6 +4524,15 @@ class WorkBook:
         form_folder = self.get_live_form_folder(sheet_label, form_id)
         return self.filesystem.dir_is_empty(form_folder)
 
+
+job_code_header = \
+"""
+import pandas as pd
+import numpy as np
+from piccel import UserRole
+from piccel.logging import logger
+"""
+
 class TestWorkBook(unittest.TestCase):
 
     def setUp(self):
@@ -4158,10 +4540,206 @@ class TestWorkBook(unittest.TestCase):
         logger.setLevel(logging.DEBUG)
         self.access_pwd = '1234'
         self.admin_pwd = '5425'
-        self.editor_pwd = '0R43'
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir)
+
+    def test_job_check(self):
+        raise NotImplementedError()
+
+    def test_job(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'Participant_info'
+        data_folder = 'pinfo_files'
+        wb = WorkBook(wb_id, data_folder, fs)
+
+        def who_can_run():
+            return None
+
+        def min_access_level():
+            return UserRole.ADMIN
+
+        def icon():
+            return None
+
+        def run(workbook, ask_password):
+            workbook.hack_report = 'Job done'
+
+        job_code = (job_code_header + '\n\n' +
+                    '\n\n'.join(strip_indent(inspect.getsource(f))
+                                for f in (who_can_run, min_access_level,
+                                          icon, run)))
+        wb.set_job_code('a_job', job_code)
+        wb.run_job('a_job')
+        self.assertEqual(wb.hack_report, 'Job done')
+
+    def test_job_bad_name(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'Participant_info'
+        data_folder = 'pinfo_files'
+        wb = WorkBook(wb_id, data_folder, fs)
+        self.assertRaises(InvalidJobName, wb.set_job_code, 'baaad name!', 'nvm')
+
+    def test_job_bad_code(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'Participant_info'
+        data_folder = 'pinfo_files'
+        user = 'me'
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
+
+        code = 'baaad code'
+        wb.set_job_code('a_job', code)
+        self.assertTrue('a_job' in wb.jobs_invalidity)
+        self.assertRaises(JobDisabled, wb.run_job, 'a_job')
+        self.assertEqual(wb.get_job_code('a_job'), code)
+
+        wb2 = WorkBook.from_configuration_file(op.join(self.tmp_dir, cfg_bfn))
+        wb2.decrypt(self.access_pwd)
+        wb2.user_login(user, self.admin_pwd)
+
+        self.assertRaises(JobDisabled, wb2.run_job, 'a_job')
+
+        def who_can_run():
+            return None
+
+        def min_access_level():
+            return UserRole.ADMIN
+
+        def icon():
+            return None
+
+        def run(workbook, ask_password):
+            workbook.hack_report = 'Job done'
+
+        job_code = (job_code_header + '\n\n' +
+                    '\n\n'.join(strip_indent(inspect.getsource(f))
+                                for f in (who_can_run, min_access_level,
+                                          icon, run)))
+
+        wb2.set_job_code('a_job', job_code)
+        self.assertEqual(wb2.get_job_code('a_job'), job_code)
+        wb2.run_job('a_job')
+
+    def test_delete_good_job(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'Participant_info'
+        data_folder = 'pinfo_files'
+        user = 'me'
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
+
+        def who_can_run():
+            return None
+
+        def min_access_level():
+            return UserRole.ADMIN
+
+        def icon():
+            return None
+
+        def run(workbook, ask_password):
+            workbook.hack_report = 'Job done'
+
+        job_code = (job_code_header + '\n\n' +
+                    '\n\n'.join(strip_indent(inspect.getsource(f))
+                                for f in (who_can_run, min_access_level,
+                                          icon, run)))
+        wb.set_job_code('a_job', job_code)
+        wb.delete_job('a_job')
+
+        wb2 = WorkBook.from_configuration_file(op.join(self.tmp_dir, cfg_bfn))
+        wb2.decrypt(self.access_pwd)
+        wb2.user_login(user, self.admin_pwd)
+
+        self.assertRaises(JobNotFound, wb2.run_job, 'a_job')
+
+    def test_delete_bad_job(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'Participant_info'
+        data_folder = 'pinfo_files'
+        user = 'me'
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
+
+        wb.set_job_code('a_job', 'baaad code')
+        wb.delete_job('a_job')
+        self.assertFalse('a_job' in wb.jobs_code)
+        self.assertFalse('a_job' in wb.jobs_invalidity)
+
+        wb2 = WorkBook.from_configuration_file(op.join(self.tmp_dir, cfg_bfn))
+        wb2.decrypt(self.access_pwd)
+        wb2.user_login(user, self.admin_pwd)
+
+        self.assertFalse('a_job' in wb2.jobs_code)
+        self.assertFalse('a_job' in wb2.jobs_invalidity)
+
+    def test_job_ask_password(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'Participant_info'
+        data_folder = 'pinfo_files'
+        wb = WorkBook(wb_id, data_folder, fs)
+
+        def who_can_run():
+            return None
+
+        def min_access_level():
+            return UserRole.ADMIN
+
+        def icon():
+            return None
+
+        def run(workbook, ask_password):
+            workbook.hack_pwd = ask_password('Gimme')
+
+        job_code = (job_code_header + '\n\n' +
+                    '\n\n'.join(strip_indent(inspect.getsource(f))
+                                for f in (who_can_run, min_access_level,
+                                          icon, run)))
+        wb.set_job_code('a_job', job_code)
+
+        def _ask_password(prompt):
+            return 'pwd'
+        wb.run_job('a_job', _ask_password)
+
+        self.assertEqual(wb.hack_pwd, 'pwd')
+
+    def test_job_persistence(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'Participant_info'
+        data_folder = 'pinfo_files'
+        user = 'me'
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
+
+        def who_can_run():
+            return None
+
+        def min_access_level():
+            return UserRole.ADMIN
+
+        def icon():
+            return None
+
+        def run(workbook, ask_password):
+            workbook.hack_report = 'Job done'
+
+        job_code = (job_code_header + '\n\n' +
+                    '\n\n'.join(strip_indent(inspect.getsource(f))
+                                for f in (who_can_run, min_access_level,
+                                          icon, run)))
+        wb.set_job_code('a_job', job_code)
+
+        wb2 = WorkBook.from_configuration_file(op.join(self.tmp_dir, cfg_bfn))
+        wb2.decrypt(self.access_pwd)
+        wb2.user_login(user, self.admin_pwd)
+
+        wb2.run_job('a_job')
+        self.assertEqual(wb2.hack_report, 'Job done')
 
     def test_combine_regexp(self):
         re1 = '.*A'
@@ -4190,9 +4768,7 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('utest: create workbook1')
 
         wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
-                             admin_password=self.admin_pwd,
-                             manager_password=None,
-                             editor_password=self.editor_pwd, admin_user=user)
+                             admin_password=self.admin_pwd, admin_user=user)
         cfg_bfn = protect_fn(wb_id) + '.psh'
 
         sheet_id = 'Participant_info'
@@ -4254,30 +4830,33 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(wb.access_password_is_valid(access_pwd))
         self.assertFalse(wb.access_password_is_valid('154Y76'))
 
-    def test_set_user(self):
+    def test_user_password_reset(self):
         fs = LocalFileSystem(self.tmp_dir)
         wb = WorkBook.create('Participant_info', fs, access_password='12345',
-                             admin_password='12T64', manager_password='456782',
-                             editor_password=None, admin_user='admin')
+                             admin_password='12T64', admin_user='admin')
 
         wb['__users__'].add_new_entry({'User_Name' : 'me',
-                                        'Role' : UserRole.EDITOR.name})
+                                       'Security_Word' : 'yata',
+                                       'Role' : UserRole.EDITOR.name})
+        self.assertRaises(PasswordReset, wb.user_login, 'me', 'hahaha')
+        wb.set_user_password('me', 'pwd_me') # Password_Reset is set to False there
+        wb.user_login('me', 'pwd_me')
 
-        self.assertRaises(NoRolePasswordError, wb.user_login, 'me', 'hahaha')
+        form_update_or_new('__users__', wb, {'User_Name' : 'me'},
+                           {'Password_Reset' : True})[0].submit()
 
-        editor_pwd = '1fvnez'
-        wb.set_password(UserRole.EDITOR, editor_pwd)
-        wb.user_login('me', editor_pwd)
+        self.assertRaises(PasswordReset, wb.user_login, 'me', 'pwd_me')
 
     def test_edit_users(self):
         fs = LocalFileSystem(self.tmp_dir)
         wb = WorkBook.create('Participant_info', fs, access_password='12345',
-                             admin_password='12T64', manager_password='456782',
-                             editor_password='fnezjk', admin_user='admin')
+                             admin_password='12T64', admin_user='admin')
         self.assertEqual(wb.get_users(), {'admin' : UserRole.ADMIN})
         wb['__users__'].add_new_entry({'User_Name' : 'me',
+                                       'Security_Word' : 'yata',
                                        'Role' : UserRole.EDITOR.name})
         wb['__users__'].add_new_entry({'User_Name' : 'other',
+                                       'Security_Word' : 'yata2',
                                        'Role' : UserRole.MANAGER.name})
         self.assertEqual(wb.get_users(),
                          {'admin' : UserRole.ADMIN,
@@ -4318,8 +4897,6 @@ class TestWorkBook(unittest.TestCase):
 
         # Create new workbook from scratch
         wb_id = 'Participant_info'
-        user = 'me'
-        self.user_roles = {user : UserRole.ADMIN}
         data_folder = 'pinfo_files'
         wb1 = WorkBook(wb_id, data_folder, fs)
         cfg_fn = 'wb.psh'
@@ -4336,12 +4913,9 @@ class TestWorkBook(unittest.TestCase):
         user = 'me'
         user_roles = {user : UserRole.ADMIN}
         data_folder = 'pinfo_files'
-        wb1 = WorkBook(wb_id, data_folder, fs)
-        wb1.set_access_password(self.access_pwd)
-        wb1.set_password(UserRole.ADMIN, self.admin_pwd)
-        wb1.set_password(UserRole.EDITOR, self.editor_pwd)
-
-        wb1.decrypt(self.access_pwd)
+        wb1 = WorkBook.create(wb_id, fs, data_folder=data_folder,
+                              access_password=self.access_pwd,
+                              admin_password=self.admin_pwd, admin_user='me')
 
         key_fn = op.join(self.tmp_dir, 'key')
         logger.debug('utest: dump key from workbook1')
@@ -4352,6 +4926,7 @@ class TestWorkBook(unittest.TestCase):
 
         wb2 = WorkBook(wb_id, data_folder, fs)
         wb2.decrypt(None, key_afn=key_fn)
+        wb2.user_login('me', self.admin_pwd)
 
         self.assertEqual(wb1, wb2)
 
@@ -4365,9 +4940,7 @@ class TestWorkBook(unittest.TestCase):
         wb_id = 'Participant_info'
         user = 'me'
         wb1 = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
-                              admin_password=self.admin_pwd,
-                              manager_password=None,
-                              editor_password=self.editor_pwd, admin_user=user)
+                              admin_password=self.admin_pwd, admin_user=user)
         cfg_bfn = protect_fn(wb_id) + '.psh'
 
         # Create a sheet with data
@@ -4456,12 +5029,10 @@ class TestWorkBook(unittest.TestCase):
         user = 'me'
         wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
                              admin_password=self.admin_pwd,
-                             manager_password=None,
-                             editor_password=self.editor_pwd,
                              admin_user=user)
 
         # Create data sheet participant info (no form)
-        sheet_id = 'Participants'
+        sheet_id = 'Participants_Status'
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE90001'],
                               'Secure_ID' : ['452164532', '5R32141']})
         items = [FormItem({'Participant_ID' :
@@ -4472,7 +5043,18 @@ class TestWorkBook(unittest.TestCase):
                  FormItem(keys={'Secure_ID':None},
                           vtype='text', supported_languages={'French'},
                           default_language='French',
-                          allow_empty=False)
+                          allow_empty=False),
+                 FormItem({'Study_Status' :
+                           {'French':'Statut du participant'}},
+                          default_language='French',
+                          supported_languages={'French'},
+                          choices={
+                              'ongoing' : {'French' : 'Etude en cours'},
+                              'drop_out' : {'French' : "Sorti.e de l'étude"},
+                              'inactive' : {'French' : "Entrée inactive"},
+                          },
+                          init_values={'Study_Status' : 'ongoing'},
+                          allow_empty=False),
         ]
         sections = {'section1' : FormSection(items, default_language='French',
                                              supported_languages={'French'})}
@@ -4480,6 +5062,14 @@ class TestWorkBook(unittest.TestCase):
                     supported_languages={'French'},
                     title={'French':'Participant Information'})
         sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
+        class ParticipantPlugin(SheetPlugin):
+            def active_view(self, df):
+                latest = self.sheet.latest_update_df(df)
+                return latest[latest['Study_Status'] != 'inactive']
+            def views(self, views):
+                views.update({'latest_active' : self.active_view})
+                return views
+        sh_pp.set_plugin_from_code(ParticipantPlugin.get_code_str())
 
         # Create data sheet evaluation with outcome = OK or FAIL
         sheet_id = 'Evaluation'
@@ -4491,6 +5081,14 @@ class TestWorkBook(unittest.TestCase):
                           vtype='boolean', supported_languages={'French'},
                           default_language='French',
                           allow_empty=False),
+                 FormItem(keys={'Session_Action':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          choices={'do_session':{'French':'Réaliser la séance'},
+                                   'cancel_session':
+                                   {'French':'Annuler la séance'}},
+                          allow_empty=False,
+                          init_values={'Session_Action' : 'do_session'}),
                  FormItem(keys={'Outcome':None},
                           vtype='text', supported_languages={'French'},
                           default_language='French',
@@ -4559,7 +5157,6 @@ class TestWorkBook(unittest.TestCase):
                         action_label = '%s | Update' % self.eval.label
                     form.set_values_from_entry({
                         'Session_Action' : 'do_session',
-                        'Staff' : self.eval.user
                     })
                 return form, action_label
 
@@ -4632,7 +5229,6 @@ class TestWorkBook(unittest.TestCase):
 
         self.assertEqual(dashboard_df.shape, (2,1))
 
-
     def test_dashboard_status_track(self):
         # Create empty workbook
         fs = LocalFileSystem(self.tmp_dir)
@@ -4641,13 +5237,10 @@ class TestWorkBook(unittest.TestCase):
         wb_id = 'Study'
         user = 'me'
         wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
-                             admin_password=self.admin_pwd,
-                             manager_password=None,
-                             editor_password=self.editor_pwd,
-                             admin_user=user)
+                             admin_password=self.admin_pwd, admin_user=user)
 
         # Create sheet for participant status
-        sheet_id = 'Participants'
+        sheet_id = 'Participants_Status'
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002'],
                               'Study_Status' : ['ongoing', 'ongoing'],
                               'Staff' : ['TV', 'TV'],
@@ -4669,6 +5262,7 @@ class TestWorkBook(unittest.TestCase):
                           choices={
                               'ongoing' : {'French' : 'Etude en cours'},
                               'drop_out' : {'French' : "Sorti.e de l'étude"},
+                              'inactive' : {'French' : "Entrée inactive"},
                           },
                           allow_empty=False),
                  FormItem({'User' : None},
@@ -4687,7 +5281,19 @@ class TestWorkBook(unittest.TestCase):
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
                     title={'French':'Participant Status'})
+
+
+
         sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
+
+        class ParticipantPlugin(SheetPlugin):
+            def active_view(self, df):
+                latest = self.sheet.latest_update_df(df)
+                return latest[latest['Study_Status'] != 'inactive']
+            def views(self, views):
+                views.update({'latest_active' : self.active_view})
+                return views
+        sh_pp.set_plugin_from_code(ParticipantPlugin.get_code_str())
 
         # Create Progress note sheet
         items = [FormItem({'Participant_ID' :
@@ -4733,7 +5339,8 @@ class TestWorkBook(unittest.TestCase):
 
             def after_workbook_load(self):
                 self.status_tracker = \
-                    ParticipantStatusTracker('Participants', 'Progress_Note',
+                    ParticipantStatusTracker('Participants_Status',
+                                             'Progress_Note',
                                              self.workbook)
                 super(DashboardStatus, self).after_workbook_load()
 
@@ -4817,17 +5424,26 @@ class TestWorkBook(unittest.TestCase):
         user = 'me'
         wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
                              admin_password=self.admin_pwd,
-                             manager_password=None,
-                             editor_password=self.editor_pwd,
                              admin_user=user)
 
         # Create data sheet participant info (no form)
-        sheet_id = 'Participants'
+        sheet_id = 'Participants_Status'
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002']})
         items = [FormItem({'Participant_ID' :
-                   {'French':'Code Participant'}},
+                           {'French':'Code Participant'}},
                           default_language='French',
                           supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem({'Study_Status' :
+                           {'French':'Statut du participant'}},
+                          default_language='French',
+                          supported_languages={'French'},
+                          choices={
+                              'ongoing' : {'French' : 'Etude en cours'},
+                              'drop_out' : {'French' : "Sorti.e de l'étude"},
+                              'inactive' : {'French' : "Entrée inactive"},
+                          },
+                          init_values={'Study_Status' : 'ongoing'},
                           allow_empty=False),
         ]
         sections = {'section1' : FormSection(items, default_language='French',
@@ -4836,6 +5452,15 @@ class TestWorkBook(unittest.TestCase):
                     supported_languages={'French'},
                     title={'French':'Participant Information'})
         sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
+
+        class ParticipantPlugin(SheetPlugin):
+            def active_view(self, df):
+                latest = self.sheet.latest_update_df(df)
+                return latest[latest['Study_Status'] != 'inactive']
+            def views(self, views):
+                views.update({'latest_active' : self.active_view})
+                return views
+        sh_pp.set_plugin_from_code(ParticipantPlugin.get_code_str())
 
         # Create Interview plan sheet
         sheet_id = DEFAULT_INTERVIEW_PLAN_SHEET_LABEL
@@ -4881,7 +5506,7 @@ class TestWorkBook(unittest.TestCase):
                  FormItem(keys={'Callback_Days':None},
                           vtype='int', supported_languages={'French'},
                           default_language='French',
-                          number_interval={'left':0, 'closed':'neither'},
+                          number_interval={'left':0, 'closed':'left'},
                           allow_empty=True),
                  FormItem(keys={'Send_Email':None},
                           vtype='boolean', supported_languages={'French'},
@@ -5067,12 +5692,12 @@ class TestWorkBook(unittest.TestCase):
                                     'Interview_Date' : None,
                                     'Availability' : 'parfois',
                                     'Date_Is_Set' : False,
-                                    'Callback_days' : 0,
+                                    'Callback_Days' : 0,
                                     'Send_Email' : False,
                                     'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_not_done')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_callback_now')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
@@ -5248,29 +5873,45 @@ class TestWorkBook(unittest.TestCase):
         fs = LocalFileSystem(self.tmp_dir)
 
         # Create new workbook from scratch
-        wb_id = 'Participant_info'
+        wb_id = 'Project_Evaluation'
         user = 'me'
         wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
-                             admin_password=self.admin_pwd,
-                             manager_password=None,
-                             editor_password=self.editor_pwd,
-                             admin_user=user)
+                             admin_password=self.admin_pwd, admin_user=user)
 
-        # Create data sheet participant info (no form)
+        # Create data sheet participant status)
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002']})
         items = [FormItem({'Participant_ID' :
                    {'French':'Code Participant'}},
                           default_language='French',
                           supported_languages={'French'},
                           allow_empty=False),
+                 FormItem({'Study_Status' :
+                           {'French':'Statut du participant'}},
+                          default_language='French',
+                          supported_languages={'French'},
+                          choices={
+                              'ongoing' : {'French' : 'Etude en cours'},
+                              'drop_out' : {'French' : "Sorti.e de l'étude"},
+                              'inactive' : {'French' : "Entrée inactive"},
+                          },
+                          init_values={'Study_Status' : 'ongoing'},
+                          allow_empty=False),
         ]
         sections = {'section1' : FormSection(items, default_language='French',
                                              supported_languages={'French'})}
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
-                    title={'French':'Participant Information'})
-        sheet_label = 'Participants'
+                    title={'French':'Statut Participant'})
+        sheet_label = 'Participants_Status'
         sh_pp = DataSheet(sheet_label, form_master=form, df=pp_df, user=user)
+        class ParticipantPlugin(SheetPlugin):
+            def active_view(self, df):
+                latest = self.sheet.latest_update_df(df)
+                return latest[latest['Study_Status'] != 'inactive']
+            def views(self, views):
+                views.update({'latest_active' : self.active_view})
+                return views
+        sh_pp.set_plugin_from_code(ParticipantPlugin.get_code_str())
 
         # Create Email sheet
         items = [FormItem({'Participant_ID' :
@@ -5316,6 +5957,10 @@ class TestWorkBook(unittest.TestCase):
                                    'error':None},
                           init_values={'Email_Status' : 'to_send'},
                           allow_empty=True),
+                 FormItem(keys={'Email_Scheduled_Send_Date':None},
+                          vtype='datetime', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=False),
                  FormItem(keys={'User' : None},
                           vtype='user_name',
                           allow_empty=False,
@@ -5617,6 +6262,21 @@ class TestEncryption(unittest.TestCase):
         self.assertEqual(message, crypter2.decrypt_to_str(crypted_message))
 
 
+    def test_auto_salt(self):
+        password = "password"
+        crypter = Encrypter(password)
+
+        message = 'Secret message!!'
+        self.assertEqual(crypter.decrypt_to_str(crypter.encrypt_str(message)),
+                         message)
+
+        def give_pwd():
+            return password
+
+        crypter2 = Encrypter(password, get_password=give_pwd)
+        self.assertEqual(crypter2.decrypt_to_str(crypter.encrypt_str(message)),
+                         message)
+
 def df_to_list_of_arrays(df):
     return list(zip(*[(c,s.to_numpy()) for c,s in df.iteritems()]))
 
@@ -5697,6 +6357,8 @@ class DataSheetModel(QtCore.QAbstractTableModel):
                     return value_str
 
                 hint = self.sheet.hint(self.columns[icol], value)
+                #logger.debug2('Hint is %s for %s, value=%s', hint,
+                #              self.columns[icol], value)
                 if hint is not None:
                     if role == QtCore.Qt.ForegroundRole:
                         return hint.foreground_qcolor
@@ -5739,9 +6401,18 @@ class DataSheetModel(QtCore.QAbstractTableModel):
 
     @QtCore.pyqtSlot()
     def update_after_append(self, entry_df):
-        irow = self.view_df.index.get_loc(entry_df.index[0])
+        if self.view_df is None:
+            return
+
+        try:
+            irow = self.view_df.index.get_loc(entry_df.index[0])
+        except KeyError:
+            # Added an entry that is not in current view... nothing to do
+            return False
+
         tree_view_irow = np.where(self.sort_idx==irow)[0][0]
-        self.beginInsertRows(QtCore.QModelIndex(), tree_view_irow, tree_view_irow)
+        self.beginInsertRows(QtCore.QModelIndex(), tree_view_irow,
+                             tree_view_irow)
         # TODO: proper callback to actual data change here
         self.endInsertRows()
         return True
@@ -5778,6 +6449,9 @@ class DataSheetModel(QtCore.QAbstractTableModel):
 
     @QtCore.pyqtSlot()
     def update_after_set(self, entry_idx):
+        logger.debug('update_after_set for sheet %s', self.sheet.label)
+        if self.view_df is None:
+            return
         irow = self.view_df.index.get_loc(entry_idx)
         tree_view_irow = np.where(self.sort_idx==irow)[0][0]
         ncols = self.view_df.shape[1]
@@ -5874,6 +6548,197 @@ class EditorTabCloser:
             self.check_on_close.remove(self.editor_widget)
             self.tab_widget.removeTab(self.tab_widget.indexOf(self.editor_widget))
 
+
+
+class NewPasswordDialog(QtWidgets.QDialog,
+                        ui.main_single_centered_dialog_ui.Ui_Dialog):
+    def __init__(self, user, security_word, forbidden=None,
+                 min_length=4, parent=None):
+        super(QtWidgets.QDialog, self).__init__(parent)
+        self.setupUi(self)
+
+        self.secure_word = security_word
+        self.forbidden = if_none(forbidden, set())
+        self.min_length = min_length
+
+        self.setWindowTitle('Enter new password for user "%s"' % user)
+
+        self.main_widget = QtWidgets.QWidget()
+        self.vlayout = QtWidgets.QVBoxLayout(self.main_widget)
+
+        self.pwd_frame = QtWidgets.QFrame(self.main_widget)
+        self.formLayout = QtWidgets.QFormLayout(self.pwd_frame)
+        self.formLayout.setContentsMargins(4, 4, 9, 4)
+        self.formLayout.setObjectName("formLayout")
+
+        self.label_secure_word = QtWidgets.QLabel(self.pwd_frame)
+        self.label_secure_word.setObjectName("label_security_word")
+        self.label_secure_word.setText('Security word:')
+        self.formLayout.setWidget(1, QtWidgets.QFormLayout.LabelRole,
+                                  self.label_secure_word)
+        self.secure_word_field = PasswordEdit(self.pwd_frame)
+        self.secure_word_field.setFrame(True)
+        self.secure_word_field.setObjectName("security_word_field")
+        self.formLayout.setWidget(1, QtWidgets.QFormLayout.FieldRole,
+                                  self.secure_word_field)
+
+        self.label = QtWidgets.QLabel(self.pwd_frame)
+        self.label.setObjectName("label")
+        self.label.setText('New password:')
+        self.formLayout.setWidget(2, QtWidgets.QFormLayout.LabelRole, self.label)
+        self.pwd_field = PasswordEdit(self.pwd_frame)
+        self.pwd_field.setFrame(True)
+        self.pwd_field.setObjectName("pwd_field")
+        self.formLayout.setWidget(2, QtWidgets.QFormLayout.FieldRole,
+                                  self.pwd_field)
+
+        self.label_confirm = QtWidgets.QLabel(self.pwd_frame)
+        self.label_confirm.setObjectName("label_confirm")
+        self.label_confirm.setText('Confirm password:')
+        self.formLayout.setWidget(3, QtWidgets.QFormLayout.LabelRole,
+                                  self.label_confirm)
+        self.pwd_field_confirm = PasswordEdit(self.pwd_frame)
+        self.pwd_field_confirm.setFrame(True)
+        self.pwd_field_confirm.setObjectName("pwd_field_confirm")
+        self.formLayout.setWidget(3, QtWidgets.QFormLayout.FieldRole,
+                                  self.pwd_field_confirm)
+
+        QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
+        self.buttonBox.accepted.connect(self.accept)
+        self.buttonBox.rejected.connect(self.reject)
+
+        self.label_invalid = QtWidgets.QLabel(self.pwd_frame)
+        self.label_invalid.setObjectName("label_invalid")
+        self.label_invalid.setText('')
+        self.label_invalid.setProperty("invalidity_message", True)
+
+        self.pwd_entered_once = False
+        self.pwd_field.textChanged.connect(self.on_pwd_change)
+        self.pwd_field.editingFinished.connect(self.on_pwd_finished)
+
+        self.pwd_confirm_entered_once = False
+        self.pwd_field_confirm.textChanged.connect(self.on_pwd_confirm_change)
+        (self.pwd_field_confirm.editingFinished
+         .connect(self.on_pwd_confirm_finished))
+
+        self.secure_word_entered_once = False
+        self.secure_word_field.textChanged.connect(self.on_secure_word_change)
+        (self.secure_word_field.editingFinished
+         .connect(self.on_secure_word_finished))
+
+        self.vlayout.addWidget(self.pwd_frame)
+        self.vlayout.addWidget(self.label_invalid)
+        self.vlayout.addWidget(self.buttonBox)
+
+        self.vlayout_main.addWidget(self.main_widget)
+
+        self.invalid_color = '#FEA82F' # yellow orange
+        self.valid_color = '#c4df9b' # green
+
+    def password(self):
+        return self.pwd_field.text()
+
+    @staticmethod
+    def ask(user, security_word, forbidden=None, parent=None):
+        dialog = NewPasswordDialog(user, security_word, forbidden=forbidden,
+                                   parent=parent)
+        result = dialog.exec_()
+        if result == QtWidgets.QDialog.Accepted:
+            return dialog.password()
+        else:
+            return None
+
+    def on_pwd_change(self):
+        if self.pwd_entered_once:
+            self.check_pwd()
+
+    def on_pwd_confirm_change(self):
+        if self.pwd_confirm_entered_once:
+            self.check_pwd_confirm()
+
+    def on_secure_word_change(self):
+        if self.secure_word_entered_once:
+            self.check_secure_word()
+
+    def on_secure_word_finished(self):
+        self.secure_word_entered_once = True
+        self.check_secure_word()
+
+    def on_pwd_finished(self):
+        self.pwd_entered_once = True
+        self.check_pwd()
+
+    def on_pwd_confirm_finished(self):
+        self.pwd_confirm_entered_once = True
+        self.check_pwd_confirm()
+
+    def check_secure_word(self):
+        if self.secure_word_field.text() != self.secure_word:
+            self.label_invalid.setText('Invalid security word')
+            css = 'QLineEdit { background-color: %s }' % self.invalid_color
+            self.secure_word_field.setStyleSheet(css)
+            return False
+        else:
+            self.label_invalid.setText('')
+            css = 'QLineEdit { background-color: %s }' % self.valid_color
+            self.secure_word_field.setStyleSheet(css)
+        return True
+
+    def check_pwd(self):
+        """
+        - Length of password must not be less than min length
+        - Password must not be in given list of forbidden password
+          (eg access password)
+        """
+
+        pwd = self.pwd_field.text()
+        error = None
+        if len(pwd) < self.min_length:
+            error = 'Password too short'
+        elif pwd in self.forbidden:
+            error = 'Password not allowed'
+
+        if error is not None:
+            self.label_invalid.setText(error)
+            self.pwd_field.setStyleSheet('QLineEdit { background-color: %s }' %\
+                                         self.invalid_color)
+            return False
+        else:
+            self.label_invalid.setText('')
+            self.pwd_field.setStyleSheet('QLineEdit { background-color: %s }' %\
+                                         self.valid_color)
+        if self.pwd_confirm_entered_once:
+            self.check_pwd_confirm(change_validity_message=False)
+        return True
+
+    def check_pwd_confirm(self, change_validity_message=True):
+        """
+        - Confirmation must match
+        """
+        if self.pwd_field.text() != self.pwd_field_confirm.text():
+            if change_validity_message:
+                self.label_invalid.setText('Confirmation password '\
+                                           'does not match')
+            self.label_invalid.show()
+            (self.pwd_field_confirm
+             .setStyleSheet('QLineEdit { background-color: %s }' %\
+                            self.invalid_color))
+            return False
+        else:
+            if change_validity_message:
+                self.label_invalid.setText('')
+            (self.pwd_field_confirm
+             .setStyleSheet('QLineEdit { background-color: %s }' %\
+                            self.valid_color))
+        return True
+
+    def accept(self):
+        self.buttonBox.setFocus()
+        if self.check_pwd() and self.check_pwd_confirm() and \
+           self.check_secure_word():
+            return super().accept()
+
 class CreateWorkBookDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super(QtWidgets.QDialog, self).__init__(parent)
@@ -5908,8 +6773,6 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
 
         self.required_fields = {
             'Access password' : self.form_ui.access_pwd_field,
-            'Editor password' : self.form_ui.editor_pwd_field,
-            'Manager password' : self.form_ui.manager_pwd_field,
             'Admin password' : self.form_ui.admin_pwd_field,
             'Admin name' : self.form_ui.adminNameLineEdit
         }
@@ -5927,7 +6790,7 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
             self.form_ui.root_folder_lineEdit.setText(root_folder)
 
     @staticmethod
-    def create(self, parent=None):
+    def create(parent=None):
         dialog = CreateWorkBookDialog(parent=parent)
         result = dialog.exec_()
         if result == QtWidgets.QDialog.Accepted:
@@ -5979,8 +6842,6 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
         protected_wb_label = protect_fn(wb_label)
         fs = LocalFileSystem(root_dir)
         self.access_pwd = self.form_ui.access_pwd_field.text()
-        editor_pwd = self.form_ui.editor_pwd_field.text()
-        manager_pwd = self.form_ui.manager_pwd_field.text()
         self.admin_pwd = self.form_ui.admin_pwd_field.text()
         self.admin_name = self.form_ui.adminNameLineEdit.text()
         color = self.colors[self.form_ui.colorComboBox.currentIndex()]
@@ -5989,8 +6850,6 @@ class CreateWorkBookDialog(QtWidgets.QDialog):
             wb = WorkBook.create(wb_label, fs,
                                  access_password=self.access_pwd,
                                  admin_password=self.admin_pwd,
-                                 manager_password=manager_pwd,
-                                 editor_password=editor_pwd,
                                  admin_user=self.admin_name,
                                  color_hex_str=color)
         except Exception as e:
@@ -6153,7 +7012,8 @@ class SheetCreationDialog(QtWidgets.QDialog):
             raise Exception('Invalid sheet name')
 
         label = self.input_widget_ui.sheet_name_edit.text()
-        return DataSheet(label, self._get_form(), self._get_plugin_str())
+        return DataSheet(label, form_master=self._get_form(),
+                         plugin_code_str=self._get_plugin_str())
 
     def ask_open_fn(self, fn_format, dest_line_edit):
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open file',
@@ -6190,6 +7050,7 @@ class SheetCreationDialog(QtWidgets.QDialog):
         else:
             with open(plugin_fn, 'r') as fin:
                 plugin_str = fin.read()
+        return plugin_str
 
 class TabSorter:
     def __init__(self, tab_widget):
@@ -6267,7 +7128,8 @@ class TabSorter:
         tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet_name])
         self.tab_widget.setTabIcon(tab_idx, self.null_icon)
 
-    def add_tab_live_form(self, live_form, tab_name, origin_sheet_label):
+    def add_tab_live_form(self, live_form, tab_name, origin_sheet_label,
+                          user_role=UserRole.EDITOR):
         """
         Add tab before given origin_sheet or after if origin_sheet is first
         """
@@ -6275,6 +7137,7 @@ class TabSorter:
         #       from Dashboard
         form_widget = FormWidget(live_form, origin_sheet_label,
                                  close_callback=self.close_tab_live_form,
+                                 user_role=user_role,
                                  parent=self.tab_widget)
         sheet_widget = self.sheet_widgets[origin_sheet_label]
         origin_tab_idx = self.tab_widget.indexOf(sheet_widget)
@@ -6355,11 +7218,14 @@ class TabSorter:
         self._close_tab_editor(sheet_name, self.plugin_editors_widgets)
 
 class TextEditorWidget(QtWidgets.QWidget, ui.text_editor_ui.Ui_Form):
-    def __init__(self, text, submit, close_callback=None, parent=None):
+    def __init__(self, text, submit, close_callback=None, title='Text editor',
+                 parent=None):
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
 
-        self.close_callback = if_none(close_callback, lambda : None)
+        self.title_label.setText(title)
+
+        self.close_callback = if_none(close_callback, self.close)
         self.submit = submit
         self.textBrowser.setText(text)
 
@@ -6393,15 +7259,13 @@ class TextEditorWidget(QtWidgets.QWidget, ui.text_editor_ui.Ui_Form):
 
 class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
     def __init__(self, sheet, user_role, tab_sorter, parent=None):
+        # TODO: user_role should be determined by given sheet...
         super(QtWidgets.QWidget, self).__init__(parent)
         self.setupUi(self)
 
         self.tab_sorter = tab_sorter
 
-        self.cell_value_frame.hide()
-
-        if user_role < UserRole.MANAGER:
-            self.button_edit_entry.hide()
+        #self.cell_value_frame.hide()
 
         # button_icon = QtGui.QIcon(':/icons/refresh_icon')
         # self.button_refresh.setIcon(button_icon)
@@ -6436,7 +7300,8 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
             action_result, action_label = action_ouput
             if isinstance(action_result, Form):
                 self.tab_sorter.add_tab_live_form(action_result, action_label,
-                                                  sheet.label)
+                                                  sheet.label,
+                                                  user_role=sheet.user_role)
                 # self.make_form_tab(action_label, model, self,
                 #                    self._workbook_ui.tabWidget,
                 #                    tab_idx=max(1,self.tab_indexes[sh_name]-1),
@@ -6459,7 +7324,8 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
                          idx.row(), entry_id)
             self.tab_sorter.add_tab_live_form(sheet.form_set_entry(entry_id),
                                               sheet.label,
-                                              origin_sheet_label=sheet.label)
+                                              origin_sheet_label=sheet.label,
+                                              user_role=sheet.user_role)
 
         def f_delete_entry():
             idx = self.tableView.currentIndex()
@@ -6476,7 +7342,8 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
         def f_new_entry():
             self.tab_sorter.add_tab_live_form(sheet.form_new_entry(),
                                               tab_name=sheet.label,
-                                              origin_sheet_label=sheet.label)
+                                              origin_sheet_label=sheet.label,
+                                              user_role=sheet.user_role)
 
         if sheet.form_master is not None and \
            sheet.has_write_access: #TODO: and user is admin
@@ -6517,16 +7384,17 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
         f_form_editor = partial(self.tab_sorter.show_tab_form_editor, sheet)
         self.button_edit_form.clicked.connect(f_form_editor)
 
-        f_plugin_editor = partial(self.tab_sorter.show_tab_plugin_editor,
-                                  sheet)
-        self.button_edit_plugin.clicked.connect(f_plugin_editor)
+        # f_plugin_editor = partial(self.tab_sorter.show_tab_plugin_editor,
+        #                           sheet)
+        # self.button_edit_plugin.clicked.connect(f_plugin_editor)
 
-        if user_role < UserRole.ADMIN or sheet.form_master is None:
-            self.button_edit_plugin.hide()
         if user_role < UserRole.MANAGER:
             self.button_edit_form.hide()
-        if user_role < UserRole.ADMIN:
+            # self.button_edit_plugin.hide()
+
+        if user_role < UserRole.ADMIN or sheet.form_master is None:
             self.button_delete_entry.hide()
+            self.button_edit_entry.hide()
 
         # for form_id, form in sheet.live_forms.items():
         #     logger.info('Load pending form "%s" (%s)',
@@ -6667,18 +7535,19 @@ class AccessWindow(QtWidgets.QMainWindow,
 
 class LoginWindow(QtWidgets.QMainWindow,
                    ui.main_single_centered_widget_ui.Ui_MainWindow):
-    def __init__(self, get_user_role, login_process, login_cancel, parent=None):
+    def __init__(self, login_preload_user, login_process, login_cancel,
+                 parent=None):
         super(QtWidgets.QMainWindow, self).__init__(parent)
         self.setupUi(self)
-
-        self.get_user_role = get_user_role
 
         self.login_widget = QtWidgets.QWidget()
         self._login_ui = ui.login_widget_ui.Ui_Form()
         self._login_ui.setupUi(self.login_widget)
 
-        (self._login_ui.user_list.currentTextChanged
-         .connect(self.login_preload_user))
+        self._login_ui.other_password_label.setText('User password:')
+
+        self.login_preload_user = login_preload_user
+        self._login_ui.user_list.currentTextChanged.connect(self.on_user_change)
         self._login_ui.button_cancel.clicked.connect(login_cancel)
         self._login_ui.button_ok.clicked.connect(login_process)
         login_ok_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Return"),
@@ -6690,12 +7559,27 @@ class LoginWindow(QtWidgets.QMainWindow,
 
         self.vlayout_main.addWidget(self.login_widget)
 
-    def login_preload_user(self, user):
-        self._login_ui.other_password_label.hide()
+    def on_user_change(self, user):
+        new_pwd, user_role = self.login_preload_user(user)
+        if new_pwd is not None:
+            self._login_ui.other_password_field.setText(new_pwd)
+            logger.debug('LoginWindow: login_preload_user returned new password')
+        else:
+            logger.debug('LoginWindow: login_preload_user returned no new pwd')
+
+        self._login_ui.roleComboBox.clear()
+        for role in reversed(UserRole):
+            if role <= user_role:
+                self._login_ui.roleComboBox.addItem(role.name)
+        self._login_ui.roleComboBox.setCurrentText(user_role.name)
+
+    def ___login_preload_user(self, user):
+        self._login_ui.other_password_label.show()
         self._login_ui.other_password_field.hide()
 
         if user is not None and user != '':
             role = self.get_user_role(user)
+
             logger.debug('Role of user %s: %s', user, role.name)
             if role == UserRole.ADMIN or \
                role == UserRole.MANAGER or \
@@ -6736,8 +7620,7 @@ class LoginWindow(QtWidgets.QMainWindow,
         user = self._login_ui.user_list.currentText()
         role_pwd_input = self._login_ui.other_password_field.text()
         role_pwd = role_pwd_input if role_pwd_input != '' else None
-
-        return user, role_pwd
+        return user, role_pwd, UserRole[self._login_ui.roleComboBox.currentText()]
 
 class PiccelApp(QtWidgets.QApplication):
 
@@ -6752,7 +7635,12 @@ class PiccelApp(QtWidgets.QApplication):
         Hints.preload(self)
 
         self.sheet_icon = QtGui.QIcon(':/icons/sheet_icon')
-        self.sheet_add_icon = QtGui.QIcon(':/icons/sheet_add_icon')
+        self.sheet_add_icon = QtGui.QIcon(':/icons/add_icon')
+        self.job_add_icon = QtGui.QIcon(':/icons/add_icon')
+        self.editor_icon = QtGui.QIcon(':/icons/editor_icon')
+
+        self.delete_icon = QtGui.QIcon(':/icons/form_delete_icon')
+        self.plugin_icon = QtGui.QIcon(':/icons/plugin_icon')
 
         self.refresh_rate_ms = refresh_rate_ms
 
@@ -6776,12 +7664,13 @@ class PiccelApp(QtWidgets.QApplication):
         self.access_screen = AccessWindow(self.access_process,
                                           self.access_cancel)
 
-        self.login_screen = LoginWindow(self.logic.get_user_role,
+        self.login_screen = LoginWindow(self.login_preload_user,
                                         self.login_process,
                                         self.login_cancel)
 
         self.workbook_screen = WorkBookWindow()
         self._workbook_ui = self.workbook_screen.workbook_ui
+
         menu_icon = QtGui.QIcon(':/icons/workbook_tab_menu_icon')
         self._workbook_ui.button_menu.setIcon(menu_icon)
 
@@ -6803,13 +7692,91 @@ class PiccelApp(QtWidgets.QApplication):
                 actions.append(separator)
 
                 add_sheet_action = QtWidgets.QAction(self.sheet_add_icon,
-                                                     'Add sheet',
+                                                     'Create sheet',
                                                      self._workbook_ui.tabWidget)
                 add_sheet_action.triggered.connect(self.on_add_sheet)
                 actions.append(add_sheet_action)
 
+                add_sheets_act = QtWidgets.QAction(self.sheet_add_icon,
+                                                   'Import sheets',
+                                                   self._workbook_ui.tabWidget)
+                add_sheets_act.triggered.connect(self.on_add_sheets)
+                actions.append(add_sheets_act)
+
             for action in actions:
                 menu.addAction(action)
+
+            if self.logic.workbook.user_role >= UserRole.ADMIN:
+                sheet_del_menu = menu.addMenu(self.delete_icon,
+                                              'Delete sheet')
+                for sheet_label in self.logic.workbook.sheets:
+                    if not sheet_label.startswith('__'):
+                        del_act = QtWidgets.QAction(self.sheet_icon,
+                                                    sheet_label,
+                                                    self._workbook_ui.tabWidget)
+                        del_act.triggered.connect(partial(self.on_del_sheet,
+                                                          sheet_label))
+                        sheet_del_menu.addAction(del_act)
+
+                separator = QtWidgets.QAction('', self._workbook_ui.tabWidget)
+                separator.setSeparator(True)
+                menu.addAction(separator)
+
+                code_menu = menu.addMenu(self.plugin_icon, 'Code')
+                sheet_plugin_menu = code_menu.addMenu(self.sheet_icon,
+                                                      'Edit sheet plugin')
+                for sheet_label, sheet in self.logic.workbook.sheets.items():
+                    edit_act = QtWidgets.QAction(self.sheet_icon,
+                                                 sheet_label,
+                                                 self._workbook_ui.tabWidget)
+                    f_edit = partial(self.tab_sorter.show_tab_plugin_editor,
+                                     sheet)
+                    edit_act.triggered.connect(f_edit)
+                    sheet_plugin_menu.addAction(edit_act)
+
+                separator = QtWidgets.QAction('', self._workbook_ui.tabWidget)
+                separator.setSeparator(True)
+                code_menu.addAction(separator)
+
+                for job_name, job in self.logic.workbook.jobs.items():
+                    job_menu = code_menu.addMenu(job.icon(), job_name)
+
+                    del_act = QtWidgets.QAction(self.delete_icon,
+                                                'Delete',
+                                                self._workbook_ui.tabWidget)
+                    del_act.triggered.connect(partial(self.on_del_job,
+                                                      job_name))
+                    job_menu.addAction(del_act)
+
+                    edit_act = QtWidgets.QAction(self.editor_icon,
+                                                 'Edit',
+                                                 self._workbook_ui.tabWidget)
+                    edit_act.triggered.connect(partial(self.on_edit_job,
+                                                       job_name))
+                    job_menu.addAction(edit_act)
+
+                    edit_act = QtWidgets.QAction(self.editor_icon,
+                                                 'Rename',
+                                                 self._workbook_ui.tabWidget)
+                    edit_act.triggered.connect(partial(self.on_rename_job,
+                                                       job_name))
+                    job_menu.addAction(edit_act)
+
+                import_act = QtWidgets.QAction(self.job_add_icon,
+                                             'Import job',
+                                             self._workbook_ui.tabWidget)
+                import_act.triggered.connect(self.on_import_job)
+                code_menu.addAction(import_act)
+
+                separator = QtWidgets.QAction('', self._workbook_ui.tabWidget)
+                separator.setSeparator(True)
+                code_menu.addAction(separator)
+
+                wb_plugin_act = QtWidgets.QAction(self.plugin_icon,
+                                                  'Edit workbook plugin',
+                                                  self._workbook_ui.tabWidget)
+                wb_plugin_act.triggered.connect(self.on_wb_plugin_edit)
+                code_menu.addAction(wb_plugin_act)
 
             menu.exec_(QtGui.QCursor.pos(), actions[-1])
 
@@ -6817,6 +7784,8 @@ class PiccelApp(QtWidgets.QApplication):
 
         self._workbook_ui.button_close.setIcon(QtGui.QIcon(':/icons/close_icon'))
         self._workbook_ui.button_close.clicked.connect(self.close_workbook)
+
+        self._workbook_ui.job_list.itemClicked.connect(self.on_job_item_click)
 
         self.tab_sorter = TabSorter(self._workbook_ui.tabWidget)
 
@@ -6842,6 +7811,186 @@ class PiccelApp(QtWidgets.QApplication):
                self.role_pwd is not None:
                 self.login_process()
 
+    def on_wb_plugin_edit(self):
+        logger.debug('Edit workbook plugin')
+
+        def _set_plugin(content):
+            logger.debug('Set workbook plugin from editor')
+            self.logic.workbook.dump_common_plugin(content)
+            show_info_message_box('Close and reopen workbook to apply changes')
+            return True
+
+        plugin_code = self.logic.workbook.get_common_plugin_code()
+        self.wb_plugin_editor = TextEditorWidget(plugin_code,
+                                                 submit=_set_plugin)
+        self.wb_plugin_editor.show()
+
+    def on_del_job(self, job_name):
+        logger.info('Delete job %s', job_name)
+        ask = QtWidgets.QMessageBox(self.workbook_screen)
+        ask.setWindowTitle("Confirm deletion")
+        ask.setText("Confirm deletion of job %s" % job_name)
+        ask.setStandardButtons(QtWidgets.QMessageBox.Yes |
+                               QtWidgets.QMessageBox.No)
+        ask.setIcon(QtWidgets.QMessageBox.Question)
+        answer = ask.exec()
+        if answer == QtWidgets.QMessageBox.Yes:
+            self.logic.workbook.delete_job(job_name)
+            self.refresh_job_buttons()
+
+    def on_rename_job(self, job_name):
+        logger.info('TODO rename job %s (maybe?)', job_name)
+
+    def on_edit_job(self, job_name):
+        logger.info('Edit job %s', job_name)
+
+        def _set_job(content):
+            logger.debug('Set workbook job from editor')
+            self.logic.workbook.set_job_code(job_name, content)
+            return True
+
+        job_code = self.logic.workbook.jobs_code[job_name]
+        self.job_editor = TextEditorWidget(job_code,
+                                           submit=_set_job)
+        self.job_editor.show()
+
+    def ask_input(self, label, is_password=False):
+        ask_box = QtWidgets.QDialog(self.current_widget)
+        input_ui = ui.single_input_dialog_ui.Ui_Dialog()
+        input_ui.setupUi(ask_box)
+        input_ui.input_label.setText(label)
+        if is_password:
+            input_ui.input_field.setEchoMode(QtWidgets.QLineEdit.Password)
+        result = ask_box.exec_()
+        if result == QtWidgets.QDialog.Accepted:
+            ask_box.close()
+            return input_ui.input_field.text()
+        return None
+
+    def on_job_item_click(self, item):
+        job_name = item.data(QtCore.Qt.UserRole)[len('Job_'):]
+        try:
+            self.logic.workbook.run_job(job_name, ask_input=self.ask_input)
+        except:
+            msg = 'Error while running job %s:' % job_name
+            details = format_exc()
+            logger.error('%s\n%s', msg, details)
+            show_critical_message_box(msg, detailed_text=details)
+
+    def refresh_job_buttons(self):
+        self._workbook_ui.job_list.clear()
+
+        logger.info('Adding job buttons for %s',
+                    ', '.join(self.logic.workbook.jobs))
+
+        for job_name, job in self.logic.workbook.jobs.items():
+            job_user = job.who_can_run()
+            if ((job_user is None or
+                 job_user == self.logic.workbook.user) and
+                self.logic.workbook.user_role >= job.min_access_level()):
+                item = QtWidgets.QListWidgetItem(job.icon(), '')
+                item.setData(QtCore.Qt.UserRole, 'Job_%s' % job_name)
+                self._workbook_ui.job_list.addItem(item)
+
+    def on_import_job(self):
+        logger.info('Import job')
+        fn_format = "Piccel job file (*.py)"
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(self._workbook_ui,
+                                                      'Open file',
+                                                      '', fn_format)
+        if fn is not None and len(fn) > 0:
+            with open(fn, 'r') as fin:
+                job_code = fin.read()
+            try:
+                (self.logic.workbook
+                 .set_job_code(op.splitext(op.basename(fn))[0], job_code))
+                self.refresh_job_buttons()
+            except InvalidJobCode as e:
+                show_critical_message_box('Error in job code',
+                                          detailed_text=e.error_message)
+            except InvalidJobName as e:
+                show_critical_message_box('Invalid job name. It must be a ' \
+                                          'valid identifier  (only '\
+                                          'alpha-numeric characters and '\
+                                          'underscores, 1st character is a '\
+                                          'letter or an underscore)',
+                                          detailed_text=e.error_message)
+
+    def on_del_sheet(self, sheet_label):
+        logger.info('Delete sheet %s', sheet_label)
+        ask = QtWidgets.QMessageBox(self.workbook_screen)
+        ask.setWindowTitle("Confirm deletion")
+        ask.setText("Confirm deletion of %s" % sheet_label)
+        ask.setStandardButtons(QtWidgets.QMessageBox.Yes |
+                               QtWidgets.QMessageBox.No)
+        ask.setIcon(QtWidgets.QMessageBox.Question)
+        answer = ask.exec()
+        if answer == QtWidgets.QMessageBox.Yes:
+            print("TODO: delete sheet!")
+            # self.logic.workbook.delete_sheet(sheet_label) # TODO
+
+    def login_preload_user(self, user):
+        """ Return new password if reset has happened, or None if no reset """
+        new_pwd = None
+        if self.logic.password_reset_needed(user):
+            logger.debug('Password reset needed for user %s', user)
+            new_pwd = NewPasswordDialog.ask(user,
+                                            self.logic.get_security_word(user),
+                                            forbidden=[self.access_password])
+            if new_pwd is not None:
+                self.logic.set_user_password(user, new_pwd)
+        #
+        #         return new_pwd
+        #     else:
+        #         show_critical_message_box('Password reset not done')
+        #         return False
+
+        return new_pwd, self.logic.get_user_role(user)
+
+    def on_add_sheets(self):
+        fn_format = "Piccel sheet files (*.form *.py)"
+        fns, _ = QtWidgets.QFileDialog.getOpenFileNames(self.workbook_screen,
+                                                        'Open file',
+                                                        '', fn_format)
+        if fns is not None and len(fns) > 0:
+            form_fns = {op.splitext(op.basename(fn))[0] : fn
+                        for fn in fns if fn.endswith('.form')}
+            plugin_fns = {op.splitext(op.basename(fn))[0] : fn
+                          for fn in fns if fn.endswith('.py')}
+            errors = []
+            for sheet_label, form_fn in form_fns.items():
+                form = Form.from_json_file(form_fn)
+
+                plugin_str = None
+                plugin_fn = plugin_fns.get(sheet_label, None)
+                if plugin_fn is not None:
+                    with open(plugin_fn, 'r') as fin:
+                        plugin_str = fin.read()
+                sheet = DataSheet(sheet_label, form, plugin_str)
+                error = self.add_sheet(sheet)
+                if error is not None:
+                    errors.append(error)
+
+            if len(errors) > 0:
+                message = ('Error while adding sheet(s):\n%s' %
+                           ('\n'.join([' - %s' % e for e in errors])))
+                logger.error(message)
+                show_critical_message_box(message)
+
+    def add_sheet(self, sheet):
+        error = None
+        try:
+            self.logic.workbook.add_sheet(sheet)
+            self.tab_sorter.show_tab_sheet(sheet,
+                                           self.logic.workbook.user_role)
+        except SheetDataOverwriteError:
+            error = 'Sheet data folder already exists for %s' % \
+                sheet.label
+        except SheetLabelAlreadyUsed:
+            error = 'Sheet %s already exists' % sheet.label
+        return error
+
+
     def on_add_sheet(self):
         existing_sheet_labels = list(self.logic.workbook.sheets.keys())
 
@@ -6849,17 +7998,16 @@ class PiccelApp(QtWidgets.QApplication):
                      .new_sheet(existing_sheet_labels=existing_sheet_labels,
                                 parent=self._workbook_ui.tabWidget))
         if new_sheet is not None:
-            #edited_sheet = DataSheetSetupDialog.edit_sheet(new_sheet)
-            # TODO add an additional setup step if necessary?
-            edited_sheet = new_sheet
-            if edited_sheet is not None:
-                self.logic.workbook.add_sheet(edited_sheet)
-                self.tab_sorter.show_tab_sheet(edited_sheet,
-                                               self.logic.workbook.user_role)
+            error = self.add_sheet(new_sheet)
+            if error is not None:
+                message = ('Error while adding sheet:\n%s\nError:\n%s' %
+                           (sheet.label, error))
+                logger.error(message)
+                show_critical_message_box(message)
 
     def on_create(self):
         cfg_fn, self.access_pwd, self.default_user, self.role_pwd = \
-            CreateWorkBookDialog.create(self)
+            CreateWorkBookDialog.create()
         if cfg_fn is not None:
             self.selector_screen.hide()
             self.open_configuration_file(cfg_fn)
@@ -6938,7 +8086,8 @@ class PiccelApp(QtWidgets.QApplication):
         self.logic.cancel_login()
         self.refresh()
 
-    def login_process(self):
+    def login_process(self, button_checked=False, user=None, pwd=None,
+                      user_role=None):
         logger.debug('Start login process')
         self.login_screen.disable_inputs()
 
@@ -6949,14 +8098,18 @@ class PiccelApp(QtWidgets.QApplication):
             self.login_screen.statusBar().showMessage(msg)
             self.processEvents()
 
-        user, role_pwd = self.login_screen.login_info()
+        entered_user, entered_pwd, entered_role = self.login_screen.login_info()
+        user = if_none(user, entered_user)
+        pwd = if_none(pwd, entered_pwd)
+        user_role = if_none(user_role, entered_role)
 
-        if role_pwd is None:
+        if pwd is None:
             error_message = 'Password required'
         else:
             error_message = None
             try:
-                self.logic.login(user, role_pwd, progression_callback=progress)
+                self.logic.login(user, pwd, user_role=user_role,
+                                 progression_callback=progress)
                 if self.refresh_rate_ms > 0:
                     self.timer = QtCore.QTimer(self)
                     logger.debug('Start data refresh timer with an interval '\
@@ -6969,6 +8122,15 @@ class PiccelApp(QtWidgets.QApplication):
                 error_message = 'Unknown user: %s' % user
             except InvalidPassword:
                 error_message = 'Invalid user password'
+            except PasswordReset:
+                secure_word = self.logic.get_security_word(user)
+                new_pwd = NewPasswordDialog.ask(user, secure_word,
+                                                forbidden=[self.access_password])
+                if new_pwd is not None:
+                    self.logic.set_user_password(user, new_pwd)
+                    self.login_process(user=user, pwd=new_pwd)
+                else:
+                    error_message = 'Password reset not done'
 
         if error_message is not None:
             message_box = QtWidgets.QErrorMessage()
@@ -6998,6 +8160,7 @@ class PiccelApp(QtWidgets.QApplication):
 
     def show_login_screen(self):
         # TODO: Add option to save debug log output in workbook
+        logger.debug('Show login screen')
         user_names = self.logic.get_user_names()
         if self.default_user in user_names:
             user_names = [self.default_user] + \
@@ -7025,13 +8188,18 @@ class PiccelApp(QtWidgets.QApplication):
         self.refresh()
 
     def show_workbook_screen(self):
+
+        self.refresh_job_buttons()
         self.tab_sorter.clear()
 
         if len(self.logic.workbook.sheets) > 0:
             for isheet, (sheet_name, sheet) \
                 in enumerate(self.logic.workbook.sheets.items()):
-                if self.logic.workbook.user_role >= sheet.access_level:
-                    logger.info('Load sheet %s in UI', sheet_name)
+                if self.logic.workbook.user_role >= sheet.access_level():
+                    logger.info('Load sheet %s in UI (access_level=%s, '
+                                'user_role=%s)', sheet_name,
+                                sheet.access_level(),
+                                self.logic.workbook.user_role)
                     self.tab_sorter.show_tab_sheet(sheet,
                                                    self.logic.workbook.user_role)
                     for form_id, form in sheet.live_forms.items():
@@ -7039,12 +8207,13 @@ class PiccelApp(QtWidgets.QApplication):
                                     form.tr['title'], form_id)
                         (self.tab_sorter
                          .add_tab_live_form(form, sheet.label,
-                                            origin_sheet_label=sheet.label))
+                                            origin_sheet_label=sheet.label,
+                                            user_role=self.logic.workbook.user_role))
                 else:
                     logger.info('Sheet %s not loaded in UI because '\
                                 'user role %s < %s',
                                 sheet_name, self.logic.workbook.user_role,
-                                sheet.access_level)
+                                sheet.access_level())
             self.tab_sorter.to_first()
 
         # def on_tab_idx_change(tab_idx):

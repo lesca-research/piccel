@@ -1,10 +1,35 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-def show_critical_message_box(msg):
+def show_critical_message_box(msg, detailed_text=None):
     message_box = QtWidgets.QMessageBox()
     message_box.setIcon(QtWidgets.QMessageBox.Critical)
     message_box.setText(msg)
+    if detailed_text is not None:
+        message_box.setDetailedText(detailed_text)
     message_box.exec_()
+
+def show_info_message_box(msg):
+    message_box = QtWidgets.QMessageBox()
+    message_box.setText(msg)
+    message_box.exec_()
+
+class TextBoxDialog(QtWidgets.QDialog):
+    def __init__(self, text, parent=None):
+        super(QtWidgets.QDialog, self).__init__(parent)
+        QBtn = QtWidgets.QDialogButtonBox.Ok
+        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
+        self.buttonBox.accepted.connect(self.accept)
+
+        self.message_widget = QtWidgets.QTextEdit(text)
+        self.message_widget.setReadOnly(True)
+
+        self.layout = QtWidgets.QVBoxLayout()
+        self.layout.addWidget(self.message_widget)
+        self.layout.addWidget(self.buttonBox)
+        self.setLayout(self.layout)
+
+def show_text_box(msg):
+    TextBoxDialog(msg).exec_()
 
 class ListSelectDialog(QtWidgets.QDialog):
     def __init__(self, choices, title=None, parent=None):
@@ -64,6 +89,30 @@ class FocusTextEdit(QtWidgets.QPlainTextEdit):
     def setTextChanged(self, state=True):
         self._changed = state
 
+
+class PasswordEdit(QtWidgets.QLineEdit):
+
+    def __init__(self, parent=None):
+        super(PasswordEdit, self).__init__(parent=parent)
+
+        self.visible_icon = QtGui.QIcon(':/icons/visible_icon')
+        self.non_visible_icon = QtGui.QIcon(':/icons/non_visible_icon')
+
+        self.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.toggle_action = self.addAction(self.visible_icon,
+                                            QtWidgets.QLineEdit.TrailingPosition)
+        self.toggle_action.triggered.connect(self.on_toggle)
+        self.password_shown = False
+
+    def on_toggle(self):
+        if not self.password_shown:
+            self.setEchoMode(QtWidgets.QLineEdit.Normal)
+            self.password_shown = True
+            self.toggle_action.setIcon(self.non_visible_icon)
+        else:
+            self.setEchoMode(QtWidgets.QLineEdit.Password)
+            self.password_shown = False
+            self.toggle_action.setIcon(self.visible_icon)
 
 #############################################################################
 ##
@@ -217,5 +266,4 @@ class FreezeTableWidget(QTableView):
             self.verticalHeader().width() + self.frameWidth() - 2,
             self.frameWidth()-1, self.columnWidth(0)+2,
             self.viewport().height() + self.horizontalHeader().height())
-
 
