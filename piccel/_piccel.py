@@ -189,7 +189,7 @@ class Encrypter:
             old_format = True
 
         if not old_format and 'salt_hex' not in content:
-            from IPython import embed; embed()
+            raise IOError('Bad format')
 
         if not old_format and self.salt_bytes is not None and \
            self.salt_bytes.hex() != content['salt_hex']:
@@ -872,6 +872,7 @@ class DataSheet:
                            else inspect.getsource(sheet_plugin_template))
         self.set_plugin_from_code(plugin_code_str)
 
+    @if_plugin_valid
     def access_level(self):
         return self.plugin.access_level()
 
@@ -1112,9 +1113,9 @@ class DataSheet:
         if self.filesystem is not None:
             modified_files, new_files, deleted_files = \
                 self.filesystem.external_changes()
-            logger.debug('Files externally added: %s', new_files)
-            logger.debug('Files externally modified: %s', modified_files)
-            logger.debug('Files externally deleted: %s', deleted_files)
+            logger.debug2('Files externally added: %s', new_files)
+            logger.debug2('Files externally modified: %s', modified_files)
+            logger.debug2('Files externally deleted: %s', deleted_files)
 
             # TODO: IMPORTANT new form data is ignored here
             new_data_files = [fn for fn in new_files if fn.startswith('data')]
@@ -4544,9 +4545,6 @@ class TestWorkBook(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir)
 
-    def test_job_check(self):
-        raise NotImplementedError()
-
     def test_job(self):
         fs = LocalFileSystem(self.tmp_dir)
         wb_id = 'Participant_info'
@@ -5036,7 +5034,7 @@ class TestWorkBook(unittest.TestCase):
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE90001'],
                               'Secure_ID' : ['452164532', '5R32141']})
         items = [FormItem({'Participant_ID' :
-                   {'French':'Code Participant'}},
+                           {'French':'Code Participant'}},
                           default_language='French',
                           supported_languages={'French'},
                           allow_empty=False),
@@ -5055,6 +5053,16 @@ class TestWorkBook(unittest.TestCase):
                           },
                           init_values={'Study_Status' : 'ongoing'},
                           allow_empty=False),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem({'Timestamp_Submission' : None},
+                          vtype='datetime',
+                          default_language='French',
+                          supported_languages={'French'},
+                          generator='timestamp_submission')
         ]
         sections = {'section1' : FormSection(items, default_language='French',
                                              supported_languages={'French'})}
@@ -5104,6 +5112,38 @@ class TestWorkBook(unittest.TestCase):
                     title={'French':'Evaluation'})
         sh_eval = DataSheet(sheet_id, form, user=user)
 
+        # Create Progress note sheet
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          default_language='French',
+                          freeze_on_update=True,
+                          supported_languages={'French'}),
+                 FormItem(keys={'Note_Type':None},
+                          vtype='text', supported_languages={'French'},
+                          choices={'health' : {'French' : 'Etat de santé'},
+                                   'withdrawal' : {'French' : "Abandon"},
+                                   'exclusion' : {'French' : "Exclusion"}
+                                   },
+                          default_language='French',
+                          allow_empty=False),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Timestamp_Submission' : None},
+                          vtype='datetime',
+                          generator='timestamp_submission',
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Common progress note'})
+        sh_pnote = DataSheet('Progress_Notes', form, user=user)
+
+        wb.add_sheet(sh_pnote)
         wb.add_sheet(sh_eval)
         wb.add_sheet(sh_pp)
 
@@ -5324,7 +5364,7 @@ class TestWorkBook(unittest.TestCase):
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
                     title={'French':'Common progress note'})
-        sh_pnote = DataSheet('Progress_Note', form, user=user)
+        sh_pnote = DataSheet('Progress_Notes', form, user=user)
 
         wb.add_sheet(sh_pnote)
         wb.add_sheet(sh_pp)
@@ -5335,12 +5375,12 @@ class TestWorkBook(unittest.TestCase):
 
             def sheets_to_watch(self):
                 return super(DashboardStatus, self).sheets_to_watch() + \
-                    ['Progress_Note']
+                    ['Progress_Notes']
 
             def after_workbook_load(self):
                 self.status_tracker = \
                     ParticipantStatusTracker('Participants_Status',
-                                             'Progress_Note',
+                                             'Progress_Notes',
                                              self.workbook)
                 super(DashboardStatus, self).after_workbook_load()
 
@@ -5349,11 +5389,10 @@ class TestWorkBook(unittest.TestCase):
                 self.sheet.invalidate_cached_views()
 
             def refresh_entries(self, pids):
-                logger.debug('Dashboard refresh for: %s', pids)
-                self.status_tracker.track(self.df, pids)
+                super().refresh_entries(pids)
 
             def action(self, entry_df, selected_column):
-                return self.status_tracker.action(entry_df, selected_column)
+                return self.action_lesca(entry_df, selected_column)
 
         sh_dashboard = DataSheet('Dashboard')
         sh_dashboard.set_plugin_from_code(DashboardStatus.get_code_str())
@@ -5369,27 +5408,37 @@ class TestWorkBook(unittest.TestCase):
         pid = 'CE0001'
         logger.debug('---- Test add progress note not related to drop-out ----')
 
-        form, action = form_update_or_new('Progress_Note', wb,
-                                          {'Participant_ID' : pid},
-                                          entry_dict={'Note_Type' : 'health'})
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Progress_Notes')
+        form.set_values_from_entry({'Note_Type' : 'health'})
         form.submit()
+
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'ongoing')
 
         logger.debug('---- Test add exclusion progress note ----')
-        form, action = form_update_or_new('Progress_Note', wb,
-                                          {'Participant_ID' : pid},
-                                          entry_dict={'Note_Type' : 'exclusion'})
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Progress_Notes')
+        form.set_values_from_entry({'Note_Type' : 'exclusion'})
         form.submit()
+        self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'confirm_drop')
+
+        logger.debug('---- Test add new progress note not related to drop-out ----')
+
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Progress_Notes')
+        form.set_values_from_entry({'Note_Type' : 'health'})
+        form.submit()
+
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'confirm_drop')
 
         logger.debug('---- Test ignore exclusion from progress note ----')
+        # Update participant status, to make it more recent than any pnote
         form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
-                                                        'Study_Status')
+                                                 'Study_Status')
         self.assertTrue(action_label.endswith('Update'), action_label)
         self.assertTrue(action_label.startswith('Participants'), action_label)
-
         form.set_values_from_entry({'Study_Status' : 'ongoing'})
         form.submit()
 
@@ -5397,10 +5446,16 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'ongoing')
 
         logger.debug('---- Test add withdrawal progress note ----')
-        form, action = form_update_or_new('Progress_Note', wb,
+        form, action = form_update_or_new('Progress_Notes', wb,
                                           {'Participant_ID' : pid},
                                           entry_dict={'Note_Type' : 'withdrawal'})
         form.submit()
+        logger.debug('---- Test add exclusion progress note ----')
+        form, action = form_update_or_new('Progress_Notes', wb,
+                                          {'Participant_ID' : pid},
+                                          entry_dict={'Note_Type' : 'exclusion'})
+        form.submit()
+
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'confirm_drop')
 
@@ -5445,6 +5500,16 @@ class TestWorkBook(unittest.TestCase):
                           },
                           init_values={'Study_Status' : 'ongoing'},
                           allow_empty=False),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Timestamp_Submission':None},
+                          vtype='datetime',
+                          allow_empty=False,
+                          supported_languages={'French'},
+                          default_language='French')
         ]
         sections = {'section1' : FormSection(items, default_language='French',
                                              supported_languages={'French'})}
@@ -5592,6 +5657,38 @@ class TestWorkBook(unittest.TestCase):
                     title={'French':'Evaluation'})
         sh_eval = DataSheet(sheet_id, form, user=user)
 
+        # Create Progress note sheet
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          default_language='French',
+                          freeze_on_update=True,
+                          supported_languages={'French'}),
+                 FormItem(keys={'Note_Type':None},
+                          vtype='text', supported_languages={'French'},
+                          choices={'health' : {'French' : 'Etat de santé'},
+                                   'withdrawal' : {'French' : "Abandon"},
+                                   'exclusion' : {'French' : "Exclusion"}
+                                   },
+                          default_language='French',
+                          allow_empty=False),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Timestamp_Submission' : None},
+                          vtype='datetime',
+                          generator='timestamp_submission',
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Common progress note'})
+        sh_pnote = DataSheet('Progress_Notes', form, user=user)
+
+        wb.add_sheet(sh_pnote)
         wb.add_sheet(sh_plan)
         wb.add_sheet(sh_eval)
         wb.add_sheet(sh_pp)
@@ -5721,7 +5818,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
         wb['Dashboard'].plugin.date_now = ts + timedelta(days=1)
-        wb['Dashboard'].plugin.refresh_all()
+        wb['Dashboard'].plugin.reset_data()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_callback_%dD' % (callback_nb_days-1))
@@ -5729,7 +5826,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
         wb['Dashboard'].plugin.date_now = ts + timedelta(days=callback_nb_days+1)
-        wb['Dashboard'].plugin.refresh_all()
+        wb['Dashboard'].plugin.reset_data()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_callback_now' )
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
@@ -5896,6 +5993,16 @@ class TestWorkBook(unittest.TestCase):
                           },
                           init_values={'Study_Status' : 'ongoing'},
                           allow_empty=False),
+                 FormItem(keys={'User' : None},
+                          vtype='user_name',
+                          allow_empty=False,
+                          supported_languages={'French', 'English'},
+                          default_language='French'),
+                 FormItem(keys={'Timestamp_Submission':None},
+                          vtype='datetime',
+                          allow_empty=True,
+                          supported_languages={'French'},
+                          default_language='French')
         ]
         sections = {'section1' : FormSection(items, default_language='French',
                                              supported_languages={'French'})}
@@ -6004,6 +6111,38 @@ class TestWorkBook(unittest.TestCase):
         sheet_poll_label = 'Poll'
         sh_poll = DataSheet(sheet_poll_label, form, user=user)
 
+        # Create Progress note sheet
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          default_language='French',
+                          freeze_on_update=True,
+                          supported_languages={'French'}),
+                 FormItem(keys={'Note_Type':None},
+                          vtype='text', supported_languages={'French'},
+                          choices={'health' : {'French' : 'Etat de santé'},
+                                   'withdrawal' : {'French' : "Abandon"},
+                                   'exclusion' : {'French' : "Exclusion"}
+                                   },
+                          default_language='French',
+                          allow_empty=False),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Timestamp_Submission' : None},
+                          vtype='datetime',
+                          generator='timestamp_submission',
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Common progress note'})
+        sh_pnote = DataSheet('Progress_Notes', form, user=user)
+
+        wb.add_sheet(sh_pnote)
         wb.add_sheet(sh_email)
         wb.add_sheet(sh_poll)
         wb.add_sheet(sh_pp)
@@ -6021,10 +6160,6 @@ class TestWorkBook(unittest.TestCase):
             def sheets_to_watch(self):
                 return super(DashboardPoll, self).sheets_to_watch() + \
                     ['Poll', 'Email']
-
-            def refresh_all(self):
-                self.refresh_entries(self.df.index)
-                self.sheet.invalidate_cached_views()
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
@@ -6120,7 +6255,7 @@ class TestWorkBook(unittest.TestCase):
 
         logger.debug('--- Pid %s: Email sent, overdue ----', pid)
         wb['Dashboard'].plugin.date_now = ts + timedelta(days=overdue_nb_days+1)
-        wb['Dashboard'].plugin.refresh_all()
+        wb['Dashboard'].plugin.reset_data()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Poll'], 'poll_overdue')
 
@@ -7128,6 +7263,13 @@ class TabSorter:
         tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet_name])
         self.tab_widget.setTabIcon(tab_idx, self.null_icon)
 
+    def add_tab_report(self, report, tab_name):
+        report_widget = ReportWidget(report.content, report.header, report.footer)
+        tab_idx = self.tab_widget.insertTab(0, report_widget, tab_name)
+        tab_icon = QtGui.QIcon(':/icons/text_icon')
+        self.tab_widget.setTabIcon(tab_idx, tab_icon)
+        self.tab_widget.setCurrentIndex(tab_idx)
+
     def add_tab_live_form(self, live_form, tab_name, origin_sheet_label,
                           user_role=UserRole.EDITOR):
         """
@@ -7217,6 +7359,29 @@ class TabSorter:
     def close_tab_plugin_editor(self, sheet_name):
         self._close_tab_editor(sheet_name, self.plugin_editors_widgets)
 
+from .plugin_tools import Report
+
+class ReportWidget(QtWidgets.QWidget, ui.report_ui.Ui_Form):
+    def __init__(self, content_html, header_text=None, footer_text=None,
+                 title=None, parent=None):
+        super(QtWidgets.QWidget, self).__init__(parent)
+        self.setupUi(self)
+
+        if header_text is None:
+            self.report_header_label.hide()
+        else:
+            self.report_header_label.setText(header_text)
+
+        if footer_text is None:
+            self.report_footer_label.hide()
+        else:
+            self.report_footer_label.setText(footer_text)
+
+        self.report_content.setHtml(content_html)
+
+        if title is not None:
+            self.setWindowTitle(title)
+
 class TextEditorWidget(QtWidgets.QWidget, ui.text_editor_ui.Ui_Form):
     def __init__(self, text, submit, close_callback=None, title='Text editor',
                  parent=None):
@@ -7292,8 +7457,14 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
         resize_table_view()
 
         def f_cell_action(idx):
+
             row_df = model.entry_df(idx)
-            column = row_df.columns[idx.column()-(row_df.index.name is not None)]
+            if idx.column()==0 and row_df.index.name is not None:
+                column = row_df.index.name
+            else:
+                column = row_df.columns[idx.column()-(row_df.index.name is not None)]
+            logger.debug('f_cell_action, idx.row=%d, idx.col=%d, column=%s',
+                         idx.row(), idx.column(), column)
             action_ouput = sheet.action(row_df, column)
             if action_ouput is None:
                 return
@@ -7306,10 +7477,19 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
                 #                    self._workbook_ui.tabWidget,
                 #                    tab_idx=max(1,self.tab_indexes[sh_name]-1),
                 #                    form=action_result)
+            if isinstance(action_result, Report):
+                report = action_result
+                self.report_widget = ReportWidget(report.content, report.header,
+                                                  report.footer,
+                                                  title=action_label)
+                self.report_widget.show()
+
+                # self.tab_sorter.add_tab_report(action_result, action_label)
             else:
-                print('action result:', action_result)
+                logger.debug('action result: %s', action_result)
 
         self.tableView.doubleClicked.connect(f_cell_action)
+        self.tableView.frozenTableView.doubleClicked.connect(f_cell_action)
 
         def show_details(idx):
             self.cell_value.setText(model.data(idx))
@@ -7979,6 +8159,15 @@ class PiccelApp(QtWidgets.QApplication):
 
     def add_sheet(self, sheet):
         error = None
+
+        sheet_label = sheet.label
+        isheet = 1
+        while sheet_label in self.logic.workbook.sheets:
+            logger.warning('Sheet %s already exists', sheet_label)
+            sheet_label = '%s_%d' % (sheet.label, isheet)
+            isheet += 1
+        sheet.label = sheet_label
+
         try:
             self.logic.workbook.add_sheet(sheet)
             self.tab_sorter.show_tab_sheet(sheet,
@@ -7986,8 +8175,6 @@ class PiccelApp(QtWidgets.QApplication):
         except SheetDataOverwriteError:
             error = 'Sheet data folder already exists for %s' % \
                 sheet.label
-        except SheetLabelAlreadyUsed:
-            error = 'Sheet %s already exists' % sheet.label
         return error
 
 
@@ -8195,7 +8382,8 @@ class PiccelApp(QtWidgets.QApplication):
         if len(self.logic.workbook.sheets) > 0:
             for isheet, (sheet_name, sheet) \
                 in enumerate(self.logic.workbook.sheets.items()):
-                if self.logic.workbook.user_role >= sheet.access_level():
+                access_level = if_none(sheet.access_level(), UserRole.ADMIN)
+                if self.logic.workbook.user_role >= access_level:
                     logger.info('Load sheet %s in UI (access_level=%s, '
                                 'user_role=%s)', sheet_name,
                                 sheet.access_level(),

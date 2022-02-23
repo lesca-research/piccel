@@ -42,8 +42,30 @@ def df_index_from_value(df, value_dict):
     #     m &= (df[key] == value)
     return df_filter_from_dict(df, value_dict).index.to_list()
 
+import numpy as np
 def df_filter_from_dict(df, value_dict):
-    return df.loc[(df[list(value_dict)] == pd.Series(value_dict)).all(axis=1)]
+
+    if df.shape[0] == 0:
+        return df
+
+    single_vals = {}
+    multi_vals = {}
+    for k, v in value_dict.items():
+        if isinstance(v, list):
+            multi_vals[k] = v
+        else:
+            single_vals[k] = v
+
+    if len(single_vals) > 0:
+        df = df.loc[(df[list(single_vals)] == pd.Series(single_vals)).all(axis=1)]
+
+    if len(multi_vals) > 0:
+        multi_mask = pd.Series(np.ones(df.shape[0], dtype=bool),
+                               index=df.index)
+        for col, values in multi_vals.items():
+            multi_mask &= df[col].isin(values)
+        df = df[multi_mask]
+    return df
 
 def language_abbrev(language):
     # https://www.loc.gov/standards/iso639-2/php/code_list.php

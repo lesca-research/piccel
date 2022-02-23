@@ -3125,7 +3125,7 @@ class TestFormItem(unittest.TestCase):
                         vtype='datetime', supported_languages={'English'},
                         default_language='English')
         date = datetime(2020, 4, 24, 13, 37)
-        DATETIME_FORMAT = '%Y-%m-%d %H:%M:%S.%f'
+        DATETIME_FORMAT = '%Y-%m-%d %H:%M:%S'
         date_str = date.strftime(DATETIME_FORMAT)
         item.set_input_str(date_str)
         self.assertEqual(item.get_value(), date)

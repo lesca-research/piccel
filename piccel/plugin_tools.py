@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import pandas as pd
 import logging
 from datetime import datetime, timedelta, time
@@ -6,13 +7,27 @@ from .core import df_filter_from_dict, if_none, SheetNotFound
 
 logger = logging.getLogger('piccel')
 
+DATE_FMT = '%Y-%m-%d'
+DATETIME_FMT = '%Y-%m-%d %H:%M:%S'
+DEFAULT_INTERVIEW_PLAN_SHEET_LABEL = 'Interview_Plan'
+
 class DataDefinitionError(Exception): pass
+class ColumnsNotFound(Exception): pass
+
 class LescaDashboard(SheetPlugin):
     def __init__(self, sheet):
         super(LescaDashboard, self).__init__(sheet)
         self.df = None
 
     def after_workbook_load(self):
+        if self.workbook.has_sheet('Progress_Notes_Common'):
+            pg_sheet_label = 'Progress_Notes_Common'
+        else:
+            pg_sheet_label = 'Progress_Notes'
+        self.status_tracker = ParticipantStatusTracker('Participants_Status',
+                                                       pg_sheet_label,
+                                                       self.workbook)
+
         super(LescaDashboard, self).after_workbook_load()
         self.pp = self.workbook['Participants_Status']
         self.df = pd.DataFrame()
@@ -23,6 +38,7 @@ class LescaDashboard(SheetPlugin):
                     .has_key('Participant_ID')):
                 raise DataDefinitionError('Participant_ID not found in '\
                                           'keys of sheet %s' % sheet_label)
+
         self.reset_data()
 
     def reset_data(self):
@@ -45,8 +61,21 @@ class LescaDashboard(SheetPlugin):
         return True
 
     def refresh_entries(self, pids):
-        logger.warning('refresh_entries not implemented in plugin of sheet %s',
-                       self.sheet.label)
+        logger.debug('Common Lesca Dashboard refresh for: %s', pids)
+
+        # Reset all values to empty string
+        cols_to_clear = [c for c in self.df.columns if c != 'Participant_ID']
+        self.df.loc[pids, cols_to_clear] = ''
+
+        self.status_tracker.track(self.df, pids)
+        self.df.loc[pids, 'Progress_Notes'] = 'add_note'
+
+        # Filter drop-outs
+        df_selected = self.df.loc[pids]
+        mask_drops = df_selected['Study_Status'] != 'drop_out'
+        pids = set(pids).intersection(df_selected[mask_drops].index)
+
+        return pids
 
     def get_full_view(self, df):
         return self.df
@@ -102,9 +131,197 @@ class LescaDashboard(SheetPlugin):
                            self.sheet.label, sheet_source.label,
                            entry_df.index[0])
 
+    def action_lesca(self, entry_df, selected_column):
+        result, result_label = None, None
+        participant_id = entry_df.index[0]
+        logger.debug('action_lesca for %s, col %s' % \
+                     (participant_id, selected_column))
+        if selected_column.startswith('Progress_Notes'):
+            if selected_column == 'Progress_Notes_Common':
+                pn_sheet_label = 'Progress_Notes_Common' # project PN
+            else:
+                pn_sheet_label = 'Progress_Notes' # workbook-specific PN
+            result, result_label = form_new(pn_sheet_label, self.workbook,
+                                            entry_dict={'Participant_ID' :
+                                                        participant_id})
+        elif selected_column == 'Participant_ID':
+            result_label = 'Progress Notes %s' % participant_id
+            result = self.collect_progress_notes(participant_id,
+                                                 self.progress_note_extractions())
+        elif selected_column == 'Study_Status':
+            pkeys = {'Participant_ID' : participant_id}
+            result, result_label = form_update_or_new('Participants_Status',
+                                                      self.workbook,
+                                                      primary_keys=pkeys)
 
-    def action(self):
-        raise NotImplementedError('TODO: default action')
+        return result, result_label
+
+    def progress_note_extractions(self):
+        # TODO: handle language translations in Report?
+        return [
+            {'sheet_label' : 'Progress_Notes_Common',
+             'context' : 'Général',
+             'short_values' : ['Nature', 'Event_Date'],
+             'long_texts' : {'Détails' : "Description"},
+            },
+            {'sheet_label' : 'Progress_Notes',
+             'context' : 'Général',
+             'short_values' : ['Nature', 'Event_Date'],
+             'long_texts' : {'Détails' : "Description"},
+            },
+        ]
+
+    def collect_progress_notes(self, pid, extractions):
+        """
+        extractions is a list of dict, each defining how to extract a progress note
+        entry
+        """
+        pnotes = ParticipantProgressNotes(pid, datetime.now().strftime(DATETIME_FMT))
+        for extraction in extractions:
+            sheet_label = extraction['sheet_label']
+            if not self.workbook.has_sheet(sheet_label):
+                continue
+
+            sheet_df = self.workbook[sheet_label].latest_update_df()
+            selected_df = sheet_df[sheet_df.Participant_ID==pid]
+            if selected_df.shape[0] == 0:
+                continue
+
+            long_texts = []
+                # if not (pd.isna(text) or text == NA_STRING):
+                #     long_texts.append((title, text))
+
+            def if_na(v, default):
+                if pd.isna(v):
+                    return default
+                return v
+
+            short_values = extraction.get('short_values',[])
+            missing = set(short_values).diff(selected_df.column)
+            if len(missing) > 0:
+                raise ColumnsNotFound(missing)
+            for _, row in selected_df.iterrows():
+                for title, column in extraction.get('long_texts', {}).items():
+                    long_texts.append((title, if_na(row[column], 'Non renseigné')))
+                pnotes.add(ProgressNoteEntry(row.Timestamp_Submission,
+                                             row.get('User', 'na'),
+                                             extraction['context'],
+                                             row[short_values],
+                                             long_texts))
+        return pnotes.to_report()
+
+import copy
+from bs4 import BeautifulSoup
+
+from .ui.main_qss import progress_note_report_style
+
+class Report:
+    def __init__(self, content, header=None, footer=None):
+        self.content = content
+        self.header = header
+        self.footer = footer
+
+class ParticipantProgressNotes:
+
+    def __init__(self, participant_id, update_date_str):
+        self.participant_id = participant_id
+        self.update_date = update_date_str
+        self.progress_notes = []
+
+    def add(self, entry):
+        self.progress_notes.append(entry)
+
+    def to_report(self, title_pat='{Participant_ID}'):
+        header_text = title_pat.format(Participant_ID=self.participant_id)
+
+        pgs_soup = BeautifulSoup('<style type="text/css">%s</style>'\
+                                 '<div id="content"></div>' %
+                                 progress_note_report_style)
+        for pn in reversed(sorted(self.progress_notes,
+                                  key=lambda p: p.get_timestamp())):
+            pn.append_soup(pgs_soup)
+
+        footer_text = 'Report generated on %s' % self.update_date
+
+        return Report(pgs_soup.prettify(), header_text, footer_text)
+
+class ProgressNoteEntry:
+
+    PG_HTML = \
+"""
+<p>
+ <table>
+  <tr class="report_odd_row">
+   <th>Context:</th>
+   <td>{context}</td>
+  </tr>
+  <tr>
+   <th>Timestamp:</th>
+   <td>{timestamp}</td>
+  </tr>
+  <tr class="report_odd_row">
+   <th>Staff:</th>
+   <td>{staff}</td>
+  </tr>
+ </table>
+</p>
+"""
+    def __init__(self, timestamp, staff, context, short_values, long_texts):
+        self.timestamp = timestamp
+        self.staff = staff
+        self.context = context
+        self.short_values = short_values
+        self.long_texts = long_texts
+
+    def get_timestamp(self):
+        return self.timestamp
+
+    def append_soup(self, main_soup):
+        ts_str = self.timestamp.strftime(DATETIME_FMT)
+
+        def _append_key_val_row(_table, key, val, odd_row):
+            tr = main_soup.new_tag('tr')
+            _table.append(tr)
+            if odd_row:
+                tr['class'] = "report_odd_row"
+            th = main_soup.new_tag('th')
+            th.string = '%s' % key
+            tr.append(th)
+            td = main_soup.new_tag('td')
+            if isinstance(val, date):
+                val = val.strftime(DATE_FMT)
+            elif isinstance(val, datetime):
+                val = val.strftime(DATETIME_FMT)
+            td.string = '%s' % val
+            tr.append(td)
+
+        soup = BeautifulSoup()
+        ptag = main_soup.new_tag('p')
+        soup.body.append(ptag)
+        table = main_soup.new_tag('table')
+        ptag.append(table)
+        for irow, (key, val) in enumerate([('Context', self.context),
+                                           ('Timestamp', ts_str),
+                                           ('Staff', self.staff)]):
+            _append_key_val_row(table, key, val, irow % 2 == 0)
+
+
+        if len(self.short_values) > 0:
+            _append_key_val_row(table, '', '', False)
+            for irow, (k,v) in enumerate(self.short_values.items()):
+                _append_key_val_row(table, k, v, irow % 2 == 0)
+
+        for title, text in self.long_texts:
+            htag = main_soup.new_tag('h4')
+            htag.string = title
+            soup.body.append(htag)
+
+            ptag = main_soup.new_tag('p')
+            ptag.string = text
+            soup.body.append(ptag)
+
+        soup.append(main_soup.new_tag('hr'))
+        main_soup.find(id='content').append(soup)
 
 class InconsistentIndex(Exception): pass
 
@@ -260,8 +477,13 @@ def filter_indexes(filter_def):
 
     return src_df[mask(src_df, src_col)].index
 
-DATE_FMT = '%Y-%m-%d %H:%M:%S'
-DEFAULT_INTERVIEW_PLAN_SHEET_LABEL = 'Interview_Plan'
+def form_new(sheet_label, workbook, entry_dict=None):
+    entry_dict = {} if entry_dict is None else entry_dict
+    sheet = workbook[sheet_label]
+    form = sheet.form_new_entry()
+    form.set_values_from_entry(entry_dict)
+    action_label = '%s | New' % sheet_label
+    return form, action_label
 
 def form_update_or_new(sheet_label, workbook, primary_keys, entry_dict=None):
     primary_keys = {} if primary_keys is None else primary_keys
@@ -281,7 +503,6 @@ def form_update_or_new(sheet_label, workbook, primary_keys, entry_dict=None):
         action_label = '%s | Update' % sheet_label
     form.set_values_from_entry(entry_dict)
     return form, action_label
-
 
 def dashboard_error_if_none(df, dashboard_df, column, error):
     if df is None:
@@ -338,9 +559,22 @@ class ParticipantStatusTracker:
 
         pnotes_df = latest_sheet_data(self.workbook,
                                       self.progress_note_sheet_label,
-                                      index_column='Participant_ID')
+                                      filter_dict={'Participant_ID' : list(pids)})
 
-        if dashboard_error_if_none(pnotes_df, dashboard_df,
+        # Keep only drop-related progress notes:
+        mask_drop = pnotes_df.Note_Type.isin(['withdrawal', 'exclusion'])
+        pns_drop_df = pnotes_df[mask_drop]
+
+        # debug = False
+        # if pnotes_df.shape[0] >= 3:
+        #     debug = True
+        #     from IPython import embed; embed()
+
+        # In case there have been multi drop-related pnotes for a given subject,
+        # keep on the most recent one:
+        pns_drop_df = ts_data_latest_by_pid(pns_drop_df)
+
+        if dashboard_error_if_none(pns_drop_df, dashboard_df,
                                    self.dashboard_column_status,
                                    'error %s' % self.progress_note_sheet_label):
             return
@@ -348,22 +582,21 @@ class ParticipantStatusTracker:
         status_df = latest_sheet_data(self.workbook,
                                       self.participant_sheet_label,
                                       view='latest_active',
-                                      index_column='Participant_ID')
+                                      index_column='Participant_ID',
+                                      indexes=pids)
         if dashboard_error_if_none(status_df, dashboard_df,
                                    self.dashboard_column_status,
                                    'error %s' % self.participant_sheet_label):
             return
 
 
-        pnotes_fresher, status_fresher = df_keep_higher(pnotes_df, status_df)
+        pns_drop_fresher, status_fresher = df_keep_higher(pns_drop_df, status_df)
 
         dashboard_df.loc[status_fresher.index, self.dashboard_column_status] = \
             status_fresher.loc[:, 'Study_Status']
 
-        map_set(dashboard_df, self.dashboard_column_status,
-                conditions={'confirm_drop':
-                            (pnotes_fresher, 'Note_Type',
-                             ['withdrawal', 'exclusion'])})
+        dashboard_df.loc[pns_drop_fresher.index, self.dashboard_column_status] = \
+            'confirm_drop'
 
 class PollTracker:
     def __init__(self, poll_sheet_label, workbook, default_status,
@@ -536,14 +769,15 @@ def latest_sheet_data(workbook, sheet_label, view='latest', filter_dict=None,
     if df is None:
         return None
 
-    if filter_dict is not None:
+    if df.shape[0] > 0 and filter_dict is not None:
         df = df_filter_from_dict(df, filter_dict)
+
     if index_column is not None:
-        df = df.set_index('Participant_ID')
+        df = df.set_index(index_column)
         if not df.index.is_unique:
             logger.warning('Index of latest data from sheet %s is not unique',
                            sheet_label)
-    if indexes is not None:
+    if df.shape[0] > 0 and indexes is not None:
         df = df.loc[indexes.intersection(df.index)]
 
     return df
@@ -1461,7 +1695,7 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
 
 def ts_data_latest_by_pid(df):
     if df is None or df.shape[0]==0:
-        return None
+        return df.set_index('Participant_ID')
     max_ts = lambda x: x.loc[x['Timestamp_Submission']==x['Timestamp_Submission'].max()]
     df = df.groupby(by='Participant_ID', group_keys=False).apply(max_ts)
     df.set_index('Participant_ID', inplace=True)

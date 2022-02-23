@@ -30,5 +30,6 @@ from .generated import choice_edit_ui
 from .generated import variable_edit_ui
 from .generated import section_transition_edit_ui
 from .generated import single_input_dialog_ui
+from .generated import report_ui
 from . import widgets
 from . import main_qss

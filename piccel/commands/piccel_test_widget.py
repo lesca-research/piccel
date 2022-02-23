@@ -4,6 +4,7 @@ import time
 
 from PyQt5.QtCore import QRunnable, Qt, QThreadPool, pyqtSignal
 
+#import PyQt5.QtWidgets as qtws
 from PyQt5.QtWidgets import (
     QApplication,
     QLabel,
@@ -14,8 +15,10 @@ from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QProgressBar,
-    QMessageBox
+    QMessageBox,
+    QTextEdit
 )
+
 
 def job(progression):
 
@@ -57,7 +60,7 @@ class ProgressBarDialog(QDialog):
 from piccel import DictStrEditorWidget
 
 
-class MainWindow(QMainWindow):
+class DictEditorMainWindow(QMainWindow):
 
     closed = pyqtSignal()
 
@@ -80,6 +83,102 @@ class MainWindow(QMainWindow):
         super().show()
         self.editor.show()
 
+
+content_html = \
+"""<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.top-container {
+  background-color: #f1f1f1;
+  padding: 30px;
+  text-align: center;
+}
+
+.header {
+  padding: 10px 16px;
+  background: #ed1b29;
+  color: #ffffff;
+  position: fixed;
+  top: 0;
+  width: 100%;
+}
+
+th {
+  padding-top: 5px;
+}
+
+.content {
+  padding-top: 100px;
+}
+
+</style>
+</head>
+<body>
+
+<div class="header" id="subject_header">
+  <h2 id="participant_title">CE0001</h2>
+</div>
+
+<div class="content" id="content">
+<div class="progress_note_entry" id="progress_note_entry_template">
+  <p>
+<table>
+  <tr>
+    <th align="left">Context:</th>
+  </tr>
+  <tr>
+    <td id="context" align="left">eval</td>
+  </tr>
+</table>
+<table>
+  <tr>
+    <th align="left">Timestamp:</th>
+  </tr>
+  <tr>
+    <td id="timestamp" align="left">20 octobre 2020 &agrave; 10h00</td>
+  </tr>
+</table>
+  </p>
+</div>
+</div>
+</body>
+</html>
+"""
+from piccel.ui.main_qss import progress_note_report_style
+
+content_html = \
+"<style>%s</style>" % progress_note_report_style + \
+"""
+<p>
+ <table>
+  <tr class="report_odd_row">
+   <th align="left" >Context</th>
+   <td align="left">eval</td>
+  </tr>
+  <tr>
+  <th align="left">Timestamp</th>
+    <td id="timestamp" align="left">20 octobre 2020 &agrave; 10h00</td>
+  </tr>
+  <tr class="report_odd_row">
+  <th align="left">Staff</th>
+    <td id="timestamp" align="left">Jean Bon</td>
+  </tr>
+ </table>
+</p>
+"""
+
+from piccel import ReportWidget
+from piccel import ui
+from piccel.plugin_tools import ProgressNoteEntry, ParticipantProgressNotes
+from datetime import datetime
+
 def main():
     app = QApplication(sys.argv)
 
@@ -88,6 +187,30 @@ def main():
         job_thread = JobWrap(partial(job, progress_bar_dialog))
         pool = QThreadPool.globalInstance()
         pool.start(job_thread)
-    win = MainWindow()
-    win.show()
+    elif 0:
+        win = DictEditorMainWindow()
+        win.show()
+
+    app.setStyle('Fusion')
+    app.setStyleSheet(ui.main_qss.main_style)
+
+    pns = ParticipantProgressNotes('CE0001', '2022/02/22')
+    pns.add(ProgressNoteEntry(datetime.now(),
+                              'me',
+                              'General',
+                              {'Consent' : 'Ok', 'Tech_Tuto' : 'Yep'},
+                              [('Details 1', 'looooon details........'),
+                               ('Review', 'It was fine in the end')]))
+
+    pns.add(ProgressNoteEntry(datetime.now(),
+                              'me',
+                              'PreScreening',
+                              {'Available' : 'Yes', 'Eligible' : 'Yep'},
+                              [('Details', 'Sooo looooon prescr details........')]))
+
+    report = pns.to_report('Project Common - {Participant_ID}')
+
+    print(report.content)
+    report = ReportWidget(report.content, report.header, report.footer)
+    report.show()
     sys.exit(app.exec_())

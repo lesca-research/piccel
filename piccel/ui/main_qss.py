@@ -13,7 +13,7 @@ QLabel {{
 
 TextEditorWidget {{
    font-family: "Courier";
-   font-size : 12pt;
+   font-size : 14pt;
    color: black;
 }}
 
@@ -26,6 +26,41 @@ QLabel[title=True] {{
    font-size : 14pt;
    background-color: rgb(73, 88, 103);
 }}
+
+QLabel[item_title=True] {{
+   color: white;
+   font-size : 12pt;
+   background-color: rgb(162, 37, 34);
+}}
+
+QLabel[section_title=True] {{
+   color: white;
+   font-size : 14pt;
+   background-color: rgb(162, 37, 34);
+}}
+
+QLabel#report_header_label {{
+   color: white;
+   font-size : 14pt;
+   background-color: rgb(78, 147, 122);
+   padding: 10px;
+}}
+
+QLabel#report_footer_label {{
+   color : white;
+   font-size : 12pt;
+   font-style : italic;
+   background-color: rgb(78, 147, 122);
+   padding: 5px;
+}}
+
+
+QTextEdit#report_content {{
+   font-family: "Verdana";
+   font-size : 12pt;
+   color: black;
+}}
+
 QFrame[title=True] {{
    background-color: rgb(73, 88, 103);
 }}
@@ -55,7 +90,6 @@ QPushButton:disabled {{
     border-color: gray;
     color:lightgray;
 }}
-
 
 QPushButton#button_previous {{
     border-top-left-radius: 15px;
@@ -109,5 +143,21 @@ QTableView::item
   padding-bottom: 10px;
   padding-left: 5px;
   padding-right: 5px;
+}
+"""
+
+progress_note_report_style = \
+"""
+td {
+   padding: 4px;
+   text-align: left;
+}
+th {
+   padding: 4px;
+   text-align: left;
+}
+.report_odd_row {
+   padding: 4px;
+   background-color: #CAE2DA;
 }
 """
