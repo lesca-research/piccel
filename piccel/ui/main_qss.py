@@ -1,8 +1,16 @@
 from PyQt5 import QtGui
 
+section_bg_color_rgb = (78, 147, 122)
+section_fg_color_rgb = (255, 255, 255)
 style_defs = {
-    'default_bg_color' : (255, 248, 240)
+    'default_bg_color' : (255, 248, 240),
+    'progress_note_header_bg_color' : section_bg_color_rgb,
+    'progress_note_header_fg_color' : section_fg_color_rgb,
 }
+
+default_bg_qcolor = QtGui.QColor(*style_defs['default_bg_color'])
+section_bg_color = QtGui.QColor(*section_bg_color_rgb)
+section_fg_color = QtGui.QColor(*section_fg_color_rgb)
 
 main_style = """
 QLabel {{
@@ -11,7 +19,7 @@ QLabel {{
    color: black;
 }}
 
-TextEditorWidget {{
+QTextEdit#textBrowser {{
    font-family: "Courier";
    font-size : 14pt;
    color: black;
@@ -40,17 +48,17 @@ QLabel[section_title=True] {{
 }}
 
 QLabel#report_header_label {{
-   color: white;
+   color: rgb{progress_note_header_fg_color};
    font-size : 14pt;
-   background-color: rgb(78, 147, 122);
+   background-color: rgb{progress_note_header_bg_color};
    padding: 10px;
 }}
 
 QLabel#report_footer_label {{
-   color : white;
+   color : rgb{progress_note_header_fg_color};
    font-size : 12pt;
    font-style : italic;
-   background-color: rgb(78, 147, 122);
+   background-color: rgb{progress_note_header_bg_color};
    padding: 5px;
 }}
 

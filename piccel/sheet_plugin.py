@@ -7,20 +7,19 @@ from piccel.core import LazyFunc, SheetNotFound, strip_indent, UserRole
 import logging
 logger = logging.getLogger('piccel')
 
-
-
 plugin_source_header = \
 """
 import pandas as pd
 import numpy as np
 from piccel import UserRole
 from piccel.sheet_plugin import SheetPlugin
-from piccel.plugin_tools import map_set, And, Or
+from piccel.plugin_tools import map_set, And, Or, form_new
 from piccel.plugin_tools import (LescaDashboard, InterviewTracker,
                                  form_update_or_new,
                                  DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
                                  PollTracker, EmailledPollTracker,
                                  ParticipantStatusTracker)
+from piccel.form import Form
 from piccel.logging import logger
 """
 
@@ -47,6 +46,7 @@ class SheetPlugin:
            - df = sheet.get_df_view(view_label)
         """
         self.sheet = data_sheet
+        self.watched_sheets = set()
 
     def set_workbook(self, workbook):
         logger.debug('Plugin of sheet %s, set workbook: %s',
@@ -54,18 +54,28 @@ class SheetPlugin:
                      if workbook is not None else 'None')
         self.workbook = workbook
 
-    def check(self):
-        pass
-
     def after_workbook_load(self):
-        watched_sheets = []
+        self.update_watched_sheets()
+
+    def update_watched_sheets(self):
+        if self.workbook is None or not self.workbook.logged_in:
+            return False
+
+        new_to_watch = []
+        all_watched = True
         for sheet_label in self.sheets_to_watch():
-            sheet = self.workbook[sheet_label]
-            if sheet is None:
-                raise SheetNotFound('Sheet %s not found in workbook %s',
-                                    sheet_label, self.workbook.label)
-            watched_sheets.append(sheet)
-        self._watch_sheets(watched_sheets)
+            if sheet_label not in self.watched_sheets:
+                if self.workbook.has_sheet(sheet_label):
+                    sheet = self.workbook[sheet_label]
+                    # if sheet is None:
+                    #     raise SheetNotFound('Sheet %s not found in workbook %s',
+                    #                         sheet_label, self.workbook.label)
+                    if sheet is not None:
+                        new_to_watch.append(sheet)
+                else:
+                    all_watched = False
+        self._watch_sheets(new_to_watch)
+        return all_watched
 
     def _on_entry_append(self, sheet, entry_df=None):
         self.update(sheet, entry_df)
@@ -81,6 +91,8 @@ class SheetPlugin:
 
     def _watch_sheets(self, sheets_to_watch):
         for sheet_to_watch in sheets_to_watch:
+            logger.debug('Plugin of %s watches %s', self.sheet.label,
+                         sheet_to_watch.label)
             # Watch update
             fu = LazyFunc(self._on_entry_append, sheet_to_watch)
             sheet_to_watch.notifier.add_watcher('appended_entry', fu)
@@ -93,6 +105,7 @@ class SheetPlugin:
             # Watch clear
             fc = LazyFunc(self._on_clear, sheet_to_watch)
             sheet_to_watch.notifier.add_watcher('cleared_data', fc)
+            self.watched_sheets.add(sheet_to_watch.label)
 
     def show_index_in_ui(self):
         return False
@@ -151,8 +164,8 @@ class SheetPlugin:
     def update(self, sheet_source, changed_entry, deletion=False, clear=False):
         """
         Called when a watched sheet has been modified.
-        Watch sheets comprise the associated sheet and sheets defined by
-        method sheets_to_watch
+        Watched sheets consist of the associated sheet and
+        sheets returned by sheets_to_watch
         """
         pass
 

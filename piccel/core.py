@@ -5,6 +5,8 @@ import pandas as pd
 
 from .logging import logger
 
+from PyQt5 import QtCore, QtGui, QtWidgets
+
 def if_none(value, default_value):
     return value if value is not None else default_value
 
@@ -143,8 +145,53 @@ from enum import IntEnum
 class UserRole(IntEnum):
     VIEWER = 0
     EDITOR = 1
-    MANAGER = 2
-    ADMIN = 3
+    REVIEWER = 2
+    MANAGER = 3
+    ADMIN = 4
+
+class Hint:
+
+    def __init__(self, icon_style=None, message=None, is_link=False,
+                 background_color_hex_str=None,
+                 foreground_color_hex_str=None):
+        self.message = message
+        self.is_link = is_link
+
+        self.background_qcolor = None if background_color_hex_str is None \
+            else QtGui.QColor(background_color_hex_str)
+        self.foreground_qcolor = None if foreground_color_hex_str is None \
+            else QtGui.QColor(foreground_color_hex_str)
+
+        self.qicon_style = icon_style
+        self.qicon = None
+
+    def preload(self, qobj):
+        if self.qicon_style is not None:
+            self.qicon = qobj.style().standardIcon(self.qicon_style)
+
+class Hints:
+    WARNING = Hint(icon_style=QtWidgets.QStyle.SP_MessageBoxWarning,
+                   background_color_hex_str='#FCAF3E')
+    DONE = Hint(icon_style=QtWidgets.QStyle.SP_DialogApplyButton)
+    NOT_DONE = Hint(icon_style=QtWidgets.QStyle.SP_DialogCancelButton,
+                    background_color_hex_str='#FCE94F')
+    QUESTION = Hint(icon_style=QtWidgets.QStyle.SP_MessageBoxQuestion,
+                    background_color_hex_str='#247BA0')
+    ERROR = Hint(icon_style=QtWidgets.QStyle.SP_MessageBoxCritical,
+                 background_color_hex_str='#EF2929')
+    TEST = Hint(foreground_color_hex_str='#8F9EB7')
+    IGNORED = Hint(background_color_hex_str='#999999',
+                   foreground_color_hex_str='#FFFFFF')
+    COMPLETED = Hint(background_color_hex_str='#B6D7A8',
+                     foreground_color_hex_str='#FFFFFF')
+
+    ALL_HINTS = [WARNING, DONE, NOT_DONE, ERROR, QUESTION,
+                 TEST, IGNORED, COMPLETED]
+
+    @staticmethod
+    def preload(qobj):
+        for hint in Hints.ALL_HINTS:
+            hint.preload(qobj)
 
 class SheetNotFound(Exception): pass
 

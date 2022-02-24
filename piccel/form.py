@@ -3527,9 +3527,22 @@ class ItemPropertyEditor(QtWidgets.QWidget,
         link_combo_box(self.generatorComboBox, item_node.pdict, 'generator',
                        editable=not self.read_only)
 
+        self.typeLabel.show()
+        self.typeComboBox.show()
+        self.uniqueLabel.show()
+        self.uniqueCheckBox.show()
+        self.allowEmptyLabel.show()
+        self.allowEmptyCheckBox.show()
+        self.regExprLabel.show()
+        self.regExprLineEdit.show()
+        self.textNbLinesLabel.show()
+        self.textNbLinesSpinBox.show()
+        self.generatorLabel.show()
+        self.generatorComboBox.show()
+        self.initialValueLabel.show()
+        self.initialValueLineEdit.show()
+
         if item_node.node_type == 'item_single_var':
-            self.initialValueLineEdit.show()
-            self.initialValueLabel.show()
             try:
                 self.initialValueLineEdit.editingFinished.disconnect()
             except TypeError:
@@ -3553,13 +3566,18 @@ class ItemPropertyEditor(QtWidgets.QWidget,
         elif item_node.node_type == 'item_text':
             self.typeLabel.hide()
             self.typeComboBox.hide()
+            self.uniqueLabel.hide()
             self.uniqueCheckBox.hide()
+            self.allowEmptyLabel.hide()
             self.allowEmptyCheckBox.hide()
-            self.accessLevelComboBox.hide()
+            self.regExprLabel.hide()
+            self.regExprLineEdit.hide()
+            self.textNbLinesLabel.hide()
             self.textNbLinesSpinBox.hide()
+            self.generatorLabel.hide()
             self.generatorComboBox.hide()
-            self.initialValueLineEdit.hide()
             self.initialValueLabel.hide()
+            self.initialValueLineEdit.hide()
         else:
             self.initialValueLineEdit.hide()
             self.initialValueLabel.hide()
@@ -4710,7 +4728,7 @@ class Node(object):
                 **self.childItems[0].to_dict(),
                 **{'label' : self.label,
                    'items' : [i.to_dict() for i in self.childItems
-                              if (i.node_type == self.child_type and \
+                              if (i.node_type.startswith('item') and \
                                   (not selected_only or i.state=='sel_checked'))]}
             }
         elif self.node_type == 'transition_rules':
@@ -5673,10 +5691,10 @@ class TreeModel(QAbstractItemModel):
                 return d
             return l
 
-        keys = item_dict.pop('keys')
+        keys = if_none(item_dict.pop('keys'), {})
         init_values = item_dict.pop('init_values')
 
-        if keys == 0:
+        if len(keys) == 0:
             item_label = _if_empty(item_label, 'Text Only')
             node_type = 'item_text'
             is_container = False
@@ -5774,14 +5792,23 @@ class TreeModel(QAbstractItemModel):
         if not index.isValid():
             return None
 
-        if role != Qt.DisplayRole and role != Qt.EditRole and role != Qt.FontRole\
-           and role != QtCore.Qt.DecorationRole:
+        if role not in [Qt.DisplayRole, Qt.EditRole, role != Qt.FontRole,
+                        QtCore.Qt.DecorationRole, QtCore.Qt.BackgroundRole,
+                        QtCore.Qt.ForegroundRole]:
             return None
 
         node = self.getItem(index)
 
         if role == Qt.DisplayRole or role == Qt.EditRole:
             return node.data(0)
+
+        if role == QtCore.Qt.BackgroundRole:
+            if node.node_type == 'section':
+                return ui.main_qss.section_bg_color
+
+        if role == QtCore.Qt.ForegroundRole:
+            if node.node_type == 'section':
+                return ui.main_qss.section_fg_color
 
         if role == Qt.FontRole and node.node_type in ['variables', 'choices',
                                                       'transition_rules']:
@@ -6057,6 +6084,9 @@ class TreeModel(QAbstractItemModel):
         item_node.is_container = False
         item_node.pdict['keys'] = None
         item_node.pdict['init_values'] = None
+
+        item_node.pdict.pop('key_tr')
+        item_node.pdict.pop('init_value')
 
         self.dataChanged.emit(item_index, item_index)
 

@@ -68,6 +68,7 @@ from .ui.widgets import (show_critical_message_box, show_info_message_box,
 from .core import (LazyFunc, df_index_from_value, if_none,
                    refresh_text, strip_indent)
 
+from .core import Hint, Hints
 from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
                    FormEditionNotOpen, FormEditionLockedType,
                    FormEditionOrphanError, FormEditionCancelled, SheetNotFound)
@@ -561,49 +562,6 @@ class Unformatter:
     def __call__(self, v):
         return self.form.unformat(self.key, v) if v!='' else self.na_value 
 
-class Hint:
-
-    def __init__(self, icon_style=None, message=None, is_link=False,
-                 background_color_hex_str=None,
-                 foreground_color_hex_str=None):
-        self.message = message
-        self.is_link = is_link
-
-        self.background_qcolor = None if background_color_hex_str is None \
-            else QtGui.QColor(background_color_hex_str)
-        self.foreground_qcolor = None if foreground_color_hex_str is None \
-            else QtGui.QColor(foreground_color_hex_str)
-
-        self.qicon_style = icon_style
-        self.qicon = None
-
-    def preload(self, qobj):
-        if self.qicon_style is not None:
-            self.qicon = qobj.style().standardIcon(self.qicon_style)
-
-class Hints:
-    WARNING = Hint(icon_style=QtWidgets.QStyle.SP_MessageBoxWarning,
-                   background_color_hex_str='#FCAF3E')
-    DONE = Hint(icon_style=QtWidgets.QStyle.SP_DialogApplyButton)
-    NOT_DONE = Hint(icon_style=QtWidgets.QStyle.SP_DialogCancelButton,
-                    background_color_hex_str='#FCE94F')
-    QUESTION = Hint(icon_style=QtWidgets.QStyle.SP_MessageBoxQuestion,
-                    background_color_hex_str='#247BA0')
-    ERROR = Hint(icon_style=QtWidgets.QStyle.SP_MessageBoxCritical,
-                 background_color_hex_str='#EF2929')
-    TEST = Hint(foreground_color_hex_str='#8F9EB7')
-    IGNORED = Hint(background_color_hex_str='#999999',
-                   foreground_color_hex_str='#FFFFFF')
-    COMPLETED = Hint(background_color_hex_str='#B6D7A8',
-                     foreground_color_hex_str='#FFFFFF')
-
-    ALL_HINTS = [WARNING, DONE, NOT_DONE, ERROR, QUESTION,
-                 TEST, IGNORED, COMPLETED]
-
-    @staticmethod
-    def preload(qobj):
-        for hint in Hints.ALL_HINTS:
-            hint.preload(qobj)
 
 from .sheet_plugin import SheetPlugin, UserSheetPlugin
 
@@ -975,6 +933,11 @@ class DataSheet:
                 self.plugin = (module_from_code_str(code_str)
                                .CustomSheetPlugin(self))
 
+            self.plugin.set_workbook(self.workbook)
+            self.plugin.access_level()
+            self.plugin.update_watched_sheets()
+            self.plugin.update(self, self.df)
+
             # cached views invalidated there:
             views = self.plugin.views(self.base_views())
             logger.debug('Sheet %s, load plugin views: %s',
@@ -990,9 +953,6 @@ class DataSheet:
             default_view = self.plugin.default_view()
             if default_view is not None:
                 self.set_default_view(default_view)
-
-            self.plugin.set_workbook(self.workbook)
-            self.plugin.access_level()
 
         except Exception as e:
             if first_attempt and self.label == '__users__':
@@ -1550,10 +1510,11 @@ class DataSheet:
         try:
             self.plugin.after_workbook_load()
         except Exception as e:
+            code = '\n'.join('%03d: %s'%(i,l)
+                             for i,l in enumerate(self.plugin_code_str.split('\n')))
             logger.error('Error in after_workbook_load for sheet %s. '\
                          'Plugin code:\n%s\nException:\n%s\nStack:\n%s',
-                         self.label, self.plugin_code_str, repr(e),
-                         format_exc())
+                         self.label, code, repr(e), format_exc())
             logger.error('Disable plugin of sheet %s', self.label)
             self.indicate_invalid_plugin(reporting=repr(e))
 
@@ -1650,10 +1611,7 @@ class DataSheet:
                 logger.debug2('df_to_str: format column %s', col)
                 f = lambda v: (self.form_master.format(col,v) \
                                if not pd.isna(v) else '')
-                try:
-                    df[[col]] = df[[col]].applymap(f)
-                except AttributeError:
-                    from IPython import embed; embed()
+                df[[col]] = df[[col]].applymap(f)
 
         df = df.reset_index()
         df['__entry_id__'] = df['__entry_id__'].apply(lambda x: hex(x))
@@ -1663,6 +1621,7 @@ class DataSheet:
         return content
 
     def invalidate_cached_views(self):
+        logger.debug('Sheet %s - invalidate cached views', self.label)
         for view in self.views:
             self.cached_views[view] = None
             self.cached_validity[view] = None
@@ -1857,12 +1816,9 @@ class DataSheet:
         if not self.has_write_access:
             return None
         entry_dict = self.df.loc[[entry_idx]].to_dict('record')[0]
-        try:
-            form = self._new_form('set', entry_dict=entry_dict, form_id=form_id,
-                                  entry_id=entry_idx[0], update_idx=entry_idx[1],
-                                  conflict_idx=entry_idx[2])
-        except IndexError:
-            from IPython import embed; embed()
+        form = self._new_form('set', entry_dict=entry_dict, form_id=form_id,
+                              entry_id=entry_idx[0], update_idx=entry_idx[1],
+                              conflict_idx=entry_idx[2])
         return form
 
     def _new_form(self, submission, entry_dict=None, entry_id=None,
@@ -2921,6 +2877,51 @@ def foo():
         self.assertTrue(sheet2.plugin is not None)
         self.assertTrue(sheet2.get_df_view() is not None)
 
+    def test_plugin_reload(self):
+
+        class Plugin1(SheetPlugin):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                logger.debug('Plugin 1.init')
+                self.df = pd.DataFrame(['init p1'], columns=['Field'])
+
+            def update(self, sheet_source, changed_entry,
+                       deletion=False, clear=False):
+                logger.debug('Plugin 1.update(sheet_source=%s,\n' \
+                             '                changed_entry=%s,\n' \
+                             '                deletion=%s,\n' \
+                             '                clear=%s)',
+                             sheet_source, changed_entry, deletion, clear)
+                self.df.iat[0,0] = 'plugin 1 was here'
+
+            def views(self, views):
+                return {'full' : lambda df: self.df}
+        self.sheet_ts.set_plugin_from_code(Plugin1.get_code_str())
+
+        self.assertEqual(self.sheet_ts.get_df_view().iat[0,0], 'plugin 1 was here')
+
+
+        class Plugin2(SheetPlugin):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                logger.debug('Plugin 2.init')
+                self.df = pd.DataFrame(['init p2'], columns=['Field'])
+
+            def update(self, sheet_source, changed_entry,
+                       deletion=False, clear=False):
+                logger.debug('Plugin 2.update(sheet_source=%s,\n' \
+                             '                changed_entry=%s,\n' \
+                             '                deletion=%s,\n' \
+                             '                clear=%s)',
+                             sheet_source, changed_entry, deletion, clear)
+                self.df.iat[0,0] = 'plugin 2 was here'
+
+            def views(self, views):
+                return {'full' : lambda df: self.df}
+        self.sheet_ts.set_plugin_from_code(Plugin2.get_code_str())
+
+        self.assertEqual(self.sheet_ts.get_df_view().iat[0,0], 'plugin 2 was here')
+
     def test_plugin_views(self):
         # TODO: test against all versions of plugin API (may change overtime)
 
@@ -3875,7 +3876,6 @@ class WorkBook:
 
         self.decrypted = False
         self.logged_in = False
-
 
     @staticmethod
     def create(label, filesystem, access_password, admin_password,
@@ -5179,6 +5179,8 @@ class TestWorkBook(unittest.TestCase):
                                 (eval_df, 'Outcome', ['FAIL']))
                              })
             def action(self, entry_df, selected_column):
+                super().action(entry_df, selected_column)
+
                 logger.debug('action: entry_df=%s, selected_column=%s',
                              entry_df, selected_column)
                 form, action_label = None, None
@@ -5369,33 +5371,8 @@ class TestWorkBook(unittest.TestCase):
         wb.add_sheet(sh_pnote)
         wb.add_sheet(sh_pp)
 
-        class DashboardStatus(LescaDashboard):
-            def __init__(self, *args, **kwargs):
-                super(DashboardStatus, self).__init__(*args, **kwargs)
-
-            def sheets_to_watch(self):
-                return super(DashboardStatus, self).sheets_to_watch() + \
-                    ['Progress_Notes']
-
-            def after_workbook_load(self):
-                self.status_tracker = \
-                    ParticipantStatusTracker('Participants_Status',
-                                             'Progress_Notes',
-                                             self.workbook)
-                super(DashboardStatus, self).after_workbook_load()
-
-            def refresh_all(self):
-                self.refresh_entries(self.df.index)
-                self.sheet.invalidate_cached_views()
-
-            def refresh_entries(self, pids):
-                super().refresh_entries(pids)
-
-            def action(self, entry_df, selected_column):
-                return self.action_lesca(entry_df, selected_column)
-
         sh_dashboard = DataSheet('Dashboard')
-        sh_dashboard.set_plugin_from_code(DashboardStatus.get_code_str())
+        sh_dashboard.set_plugin_from_code(LescaDashboard.get_code_str())
 
         wb.add_sheet(sh_dashboard)
         wb.after_workbook_load()
@@ -5717,6 +5694,7 @@ class TestWorkBook(unittest.TestCase):
                 self.eval_tracker.track(self.df, pids, date_now=self.date_now)
 
             def action(self, entry_df, selected_column):
+                super().action(entry_df, selected_column)
                 return self.eval_tracker.action(entry_df, selected_column)
 
         sh_dashboard = DataSheet('Dashboard')
@@ -6153,19 +6131,22 @@ class TestWorkBook(unittest.TestCase):
                 self.date_now = None
 
             def after_workbook_load(self):
+                logger.debug('Dashboard after_workbook_load')
+                logger.debug('Dashboard create poll_tracker')
                 self.poll_tracker = EmailledPollTracker('Poll', 'Email',
                                                         self.workbook)
-                super(DashboardPoll, self).after_workbook_load()
+                logger.debug('Dashboard after_workbook_load call super()')
+                super().after_workbook_load()
 
             def sheets_to_watch(self):
-                return super(DashboardPoll, self).sheets_to_watch() + \
-                    ['Poll', 'Email']
+                return super().sheets_to_watch() + ['Poll', 'Email']
 
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
                 self.poll_tracker.track(self.df, pids, date_now=self.date_now)
 
             def action(self, entry_df, selected_column):
+                super().action(entry_df, selected_column)
                 return self.poll_tracker.action(entry_df, selected_column)
 
         sh_dashboard = DataSheet('Dashboard')
@@ -6441,6 +6422,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.headerDataChanged.emit(QtCore.Qt.Horizontal, O, 1)
 
     def refresh_view(self):
+        self.beginResetModel()
         self.view_df = self.sheet.get_df_view()
         # assert(self.view_df.index.is_lexsorted())
 
@@ -6467,6 +6449,9 @@ class DataSheetModel(QtCore.QAbstractTableModel):
             self.sort_idx = np.argsort(self.view[self.sort_icol])
             if not self.sort_ascending:
                 self.sort_idx = self.sort_idx[::-1]
+
+        self.endResetModel()
+        self.layoutChanged.emit()
 
     def rowCount(self, parent=None):
         return self.nb_rows
@@ -6613,11 +6598,7 @@ class SheetViewChanger:
 
     def __call__(self, combox_index):
         view_label = self.combobox.currentText()
-        self.sheet_model.beginResetModel()
-        self.sheet_model.sheet.set_default_view(view_label)
         self.sheet_model.refresh_view()
-        self.sheet_model.endResetModel()
-        self.sheet_model.layoutChanged.emit()
 
 
 #!/usr/bin/python3
@@ -7983,6 +7964,8 @@ class PiccelApp(QtWidgets.QApplication):
         self.access_pwd = access_pwd
         self.tab_indexes = {}
 
+        self.form_editor = None
+
         self.open_file(fn)
         if self.logic.workbook is not None and \
            self.access_pwd is not None:
@@ -8209,8 +8192,7 @@ class PiccelApp(QtWidgets.QApplication):
             if fn.endswith('.psh'):
                 self.open_configuration_file(fn)
             elif fn.endswith('.form'):
-                form_editor = FormFileEditor(fn)
-                form_editor.show()
+                self.form_editor = FormFileEditor(fn)
             else:
                 show_critical_message_box('Cannot open %s' % fn)
 
@@ -8417,6 +8399,8 @@ class PiccelApp(QtWidgets.QApplication):
 
     def show(self):
         self.current_widget.show()
+        if self.form_editor is not None:
+            self.form_editor.show()
 
     def refresh(self):
         self.current_widget.hide()

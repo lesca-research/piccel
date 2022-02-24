@@ -1,15 +1,22 @@
 # -*- coding: utf-8 -*-
-import pandas as pd
 import logging
-from datetime import datetime, timedelta, time
+import re
+from datetime import date, datetime, timedelta, time
+
+import numpy as np
+import pandas as pd
+
 from .sheet_plugin import SheetPlugin
-from .core import df_filter_from_dict, if_none, SheetNotFound
+from .core import df_filter_from_dict, if_none, SheetNotFound, Hint, Hints
+from .form import Form
 
 logger = logging.getLogger('piccel')
 
 DATE_FMT = '%Y-%m-%d'
 DATETIME_FMT = '%Y-%m-%d %H:%M:%S'
 DEFAULT_INTERVIEW_PLAN_SHEET_LABEL = 'Interview_Plan'
+
+test_participant_ID_re = re.compile(".+[^0-9]9[0-9]+$")
 
 class DataDefinitionError(Exception): pass
 class ColumnsNotFound(Exception): pass
@@ -18,17 +25,33 @@ class LescaDashboard(SheetPlugin):
     def __init__(self, sheet):
         super(LescaDashboard, self).__init__(sheet)
         self.df = None
+        self.progress_notes_sheets = []
+
+    def sheets_to_watch(self):
+        to_watch = ['Participants_Status']
+        for sheet_label in ['Progress_Notes_Common', 'Progress_Notes']:
+            if self.workbook.has_sheet(sheet_label):
+                to_watch.append(sheet_label)
+                self.progress_notes_sheets.append(sheet_label)
+        return super(LescaDashboard, self).sheets_to_watch() + to_watch
 
     def after_workbook_load(self):
-        if self.workbook.has_sheet('Progress_Notes_Common'):
-            pg_sheet_label = 'Progress_Notes_Common'
-        else:
-            pg_sheet_label = 'Progress_Notes'
+        # TODO: utest proper status tracking scenarios
+        # with multiple progress note sheets
+        super().after_workbook_load()
+        self.init()
+
+    def init(self):
+        if not self.update_watched_sheets():
+            return
+
+        pg_sheet_label = self.progress_notes_sheets[0]
+        logger.info('Tracking of participant status watches %s '\
+                    'to get drop events', pg_sheet_label)
         self.status_tracker = ParticipantStatusTracker('Participants_Status',
                                                        pg_sheet_label,
                                                        self.workbook)
 
-        super(LescaDashboard, self).after_workbook_load()
         self.pp = self.workbook['Participants_Status']
         self.df = pd.DataFrame()
 
@@ -54,28 +77,8 @@ class LescaDashboard(SheetPlugin):
         logger.debug('LescaDashboard.reset_data - df: %s', self.df.shape)
         self.sheet.invalidate_cached_views()
 
-    def sheets_to_watch(self):
-        return ['Participants_Status']
-
     def show_index_in_ui(self):
         return True
-
-    def refresh_entries(self, pids):
-        logger.debug('Common Lesca Dashboard refresh for: %s', pids)
-
-        # Reset all values to empty string
-        cols_to_clear = [c for c in self.df.columns if c != 'Participant_ID']
-        self.df.loc[pids, cols_to_clear] = ''
-
-        self.status_tracker.track(self.df, pids)
-        self.df.loc[pids, 'Progress_Notes'] = 'add_note'
-
-        # Filter drop-outs
-        df_selected = self.df.loc[pids]
-        mask_drops = df_selected['Study_Status'] != 'drop_out'
-        pids = set(pids).intersection(df_selected[mask_drops].index)
-
-        return pids
 
     def get_full_view(self, df):
         return self.df
@@ -87,6 +90,13 @@ class LescaDashboard(SheetPlugin):
         return 'full'
 
     def update(self, sheet_source, entry_df, deletion=False, clear=False):
+        logger.debug('Lesca Dashboard update from sheet %s', sheet_source.label)
+
+        if self.df is None:
+            self.init()
+            return # self.df initialized only after full load of workbook
+                   # cannot do much here anyway...
+
         if sheet_source.label == self.pp.label:
             if clear:
                 self.df = (pd.DataFrame(columns=['Participant_ID'])
@@ -131,7 +141,25 @@ class LescaDashboard(SheetPlugin):
                            self.sheet.label, sheet_source.label,
                            entry_df.index[0])
 
-    def action_lesca(self, entry_df, selected_column):
+    def refresh_entries(self, pids):
+        logger.debug('Common Lesca Dashboard refresh for: %s', pids)
+
+        # Reset all values to empty string
+        cols_to_clear = [c for c in self.df.columns if c != 'Participant_ID']
+        self.df.loc[pids, cols_to_clear] = ''
+
+        self.status_tracker.track(self.df, pids)
+        for progress_notes_sheet_label in self.progress_notes_sheets:
+            self.df.loc[pids, progress_notes_sheet_label] = 'add_note'
+
+        # Filter drop-outs
+        df_selected = self.df.loc[pids]
+        mask_drops = df_selected['Study_Status'] != 'drop_out'
+        pids = set(pids).intersection(df_selected[mask_drops].index)
+
+        return pids
+
+    def action(self, entry_df, selected_column):
         result, result_label = None, None
         participant_id = entry_df.index[0]
         logger.debug('action_lesca for %s, col %s' % \
@@ -154,6 +182,12 @@ class LescaDashboard(SheetPlugin):
                                                       self.workbook,
                                                       primary_keys=pkeys)
 
+        if result is not None and isinstance(result, Form):
+            form = result
+            section0 = form[form.first_section()]
+            if section0.has_key('Participant_ID'):
+                section0['Participant_ID'].set_editable(False)
+
         return result, result_label
 
     def progress_note_extractions(self):
@@ -161,12 +195,12 @@ class LescaDashboard(SheetPlugin):
         return [
             {'sheet_label' : 'Progress_Notes_Common',
              'context' : 'Général',
-             'short_values' : ['Nature', 'Event_Date'],
+             'short_values' : ['Note_Type', 'Event_Date'],
              'long_texts' : {'Détails' : "Description"},
             },
             {'sheet_label' : 'Progress_Notes',
              'context' : 'Général',
-             'short_values' : ['Nature', 'Event_Date'],
+             'short_values' : ['Note_Type', 'Event_Date'],
              'long_texts' : {'Détails' : "Description"},
             },
         ]
@@ -187,7 +221,7 @@ class LescaDashboard(SheetPlugin):
             if selected_df.shape[0] == 0:
                 continue
 
-            long_texts = []
+
                 # if not (pd.isna(text) or text == NA_STRING):
                 #     long_texts.append((title, text))
 
@@ -197,10 +231,11 @@ class LescaDashboard(SheetPlugin):
                 return v
 
             short_values = extraction.get('short_values',[])
-            missing = set(short_values).diff(selected_df.column)
+            missing = set(short_values).difference(selected_df.columns)
             if len(missing) > 0:
                 raise ColumnsNotFound(missing)
             for _, row in selected_df.iterrows():
+                long_texts = []
                 for title, column in extraction.get('long_texts', {}).items():
                     long_texts.append((title, if_na(row[column], 'Non renseigné')))
                 pnotes.add(ProgressNoteEntry(row.Timestamp_Submission,
@@ -209,6 +244,24 @@ class LescaDashboard(SheetPlugin):
                                              row[short_values],
                                              long_texts))
         return pnotes.to_report()
+
+    def hint(self, column, value):
+        if pd.isna(value):
+            return None
+
+        if column=='Study_Status':
+            if value.startswith('confirm'):
+                return Hints.QUESTION
+            elif value == "study_over":
+                return Hints.COMPLETED
+            elif value == "drop_out":
+                return Hints.IGNORED
+        elif column=='Participant_ID' and \
+             test_participant_ID_re.match(value) is not None:
+                return Hints.TEST
+        else:
+            if value.lower().endswith('fail'):
+                return Hints.IGNORED
 
 import copy
 from bs4 import BeautifulSoup
@@ -288,10 +341,11 @@ class ProgressNoteEntry:
             th.string = '%s' % key
             tr.append(th)
             td = main_soup.new_tag('td')
-            if isinstance(val, date):
-                val = val.strftime(DATE_FMT)
-            elif isinstance(val, datetime):
+            if isinstance(val, datetime):
                 val = val.strftime(DATETIME_FMT)
+            elif isinstance(val, date):
+                val = val.strftime(DATE_FMT)
+
             td.string = '%s' % val
             tr.append(td)
 
@@ -512,10 +566,10 @@ def dashboard_error_if_none(df, dashboard_df, column, error):
     return False
 
 class ParticipantStatusTracker:
-    def __init__(self, participant_sheet_label, progress_note_sheet_label,
+    def __init__(self, participant_sheet_label, progress_notes_sheet_label,
                  workbook, dashboard_column_status='Study_Status'):
         self.participant_sheet_label = participant_sheet_label
-        self.progress_note_sheet_label = progress_note_sheet_label
+        self.progress_notes_sheet_label = progress_notes_sheet_label
         self.workbook = workbook
         self.dashboard_column_status = dashboard_column_status
 
@@ -540,7 +594,7 @@ class ParticipantStatusTracker:
             'User' : 'user_name',
             'Timestamp_Submission' : 'datetime'
         }
-        errors.extend(check_sheet(self.workbook, self.progress_note_sheet_label,
+        errors.extend(check_sheet(self.workbook, self.progress_notes_sheet_label,
                                   expected_fields=expected_fields))
         return errors
 
@@ -558,17 +612,12 @@ class ParticipantStatusTracker:
         # dashboard_df.loc[:, self.dashboard_column_status] = 'error'
 
         pnotes_df = latest_sheet_data(self.workbook,
-                                      self.progress_note_sheet_label,
+                                      self.progress_notes_sheet_label,
                                       filter_dict={'Participant_ID' : list(pids)})
 
         # Keep only drop-related progress notes:
         mask_drop = pnotes_df.Note_Type.isin(['withdrawal', 'exclusion'])
         pns_drop_df = pnotes_df[mask_drop]
-
-        # debug = False
-        # if pnotes_df.shape[0] >= 3:
-        #     debug = True
-        #     from IPython import embed; embed()
 
         # In case there have been multi drop-related pnotes for a given subject,
         # keep on the most recent one:
@@ -576,7 +625,7 @@ class ParticipantStatusTracker:
 
         if dashboard_error_if_none(pns_drop_df, dashboard_df,
                                    self.dashboard_column_status,
-                                   'error %s' % self.progress_note_sheet_label):
+                                   'error %s' % self.progress_notes_sheet_label):
             return
 
         status_df = latest_sheet_data(self.workbook,
@@ -635,6 +684,41 @@ class PollTracker:
                 dashboard_df.loc[poll_df.index, self.dashboard_column] = \
                     self.answered_tag
 
+def filter_pids(df, pids, column, sheet_label=None, workbook=None,
+                not_equal=None, equal=None):
+
+    if sheet_label is not None:
+        df_selected = latest_sheet_data(workbook, sheet_label,
+                                        index_column='Participant_ID',
+                                        indexes=pids)
+    else:
+        df_selected = df.loc[pids]
+
+    mask = pd.Series(np.ones(df_selected.shape[0], dtype=bool),
+                     index=df_selected.index)
+
+    if not_equal is not None:
+        mask &= df_selected[column] != not_equal
+
+    if equal is not None:
+        mask &= df_selected[column] == equal
+
+    return set(pids).intersection(df_selected[mask].index)
+
+def conditional_tag(dest_df, pids, dest_column, tag, workbook,
+                    source_sheet_label, source_column, source_values):
+    source_df = latest_sheet_data(workbook, source_sheet_label,
+                                  index_column='Participant_ID',
+                                  indexes=pids)
+
+    if (dashboard_error_if_none(source_df, dest_df, dest_column,
+                                'error') or
+        source_df.shape[0]==0):
+        return
+
+    map_set(dest_df, dest_column,
+            {tag : (source_df, source_column, source_values)})
+
 
 def ___track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
                         workbook, pids, date_now=None):
@@ -664,7 +748,6 @@ def ___track_emailled_poll(dashboard_df, poll_label, email_sheet_label,
         try:
             def od_ts(email_df, email_col):
                 f_ts = lambda x: date_now - timedelta(days=x)
-                # from IPython import embed; embed()
                 return email_df['Overdue_Days'].apply(f_ts)
 
             map_set(dashboard_df, column_status,
@@ -938,7 +1021,6 @@ class EmailledPollTracker:
             try:
                 def od_ts(email_df, email_col):
                     f_ts = lambda x: date_now - timedelta(days=x)
-                    # from IPython import embed; embed()
                     return email_df['Overdue_Days'].apply(f_ts)
 
                 map_set(dashboard_df, column_status,
