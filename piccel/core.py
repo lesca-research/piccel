@@ -140,7 +140,7 @@ def strip_indent(code):
         return code
     return '\n'.join(line[indent_size:] for line in code.split('\n'))
 
-from enum import IntEnum
+from enum import IntEnum, Enum
 
 class UserRole(IntEnum):
     VIEWER = 0
@@ -148,6 +148,8 @@ class UserRole(IntEnum):
     REVIEWER = 2
     MANAGER = 3
     ADMIN = 4
+
+InputType = Enum('InputType', 'TEXT PASSWORD FOLDER FILE_OUT FILE_IN')
 
 class Hint:
 

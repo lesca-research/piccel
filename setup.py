@@ -33,7 +33,7 @@ def make_resources():
         cmd = ['pyrcc5', op.join('resources', 'resources.qrc'), '-o', dest_py_fn]
         subprocess.run(cmd)
     except FileNotFoundError:
-        print('PyQT5 not found')
+        print('pyrcc5 command (PyQT5) not found')
         sys.exit(1)
 
 make_resources()
@@ -47,11 +47,16 @@ setup(name='piccel', version=version['__version__'],
                    'Intended Audience :: Information Technology',
                    'Intended Audience :: End Users/Desktop',
                    'License :: OSI Approved :: MIT License',
-                   'Environment :: Console',
+                   'Environment :: X11 Applications :: Qt'
                    'Natural Language :: English',
-                   'Operating System :: OS Independent',
+                   'Natural Language :: French',
+                   'Operating System :: POSIX :: Linux',
+                   'Operating System :: MacOS',
+                   'Operating System :: Microsoft :: Windows',
+                   'Topic :: Office/Business :: Groupware',
+                   'Topic :: Database',
                    'Programming Language :: Python :: 3.8',],
-      keywords='piccel spreadsheet data collection encryption',
+      keywords='piccel spreadsheet form data capture encryption cloud',
       packages=find_packages(exclude=['test']),
       python_requires='>=3',
       install_requires=['packaging', 'numpy', 'pandas', 'cryptography', 'appdirs',

@@ -58,6 +58,7 @@ class SheetPlugin:
         self.update_watched_sheets()
 
     def update_watched_sheets(self):
+        logger.debug('update_watched_sheets in plugin of %s', self.sheet.label)
         if self.workbook is None or not self.workbook.logged_in:
             return False
 
@@ -66,6 +67,7 @@ class SheetPlugin:
         for sheet_label in self.sheets_to_watch():
             if sheet_label not in self.watched_sheets:
                 if self.workbook.has_sheet(sheet_label):
+                    logger.debug('wb have %s, watching it', sheet_label)
                     sheet = self.workbook[sheet_label]
                     # if sheet is None:
                     #     raise SheetNotFound('Sheet %s not found in workbook %s',
@@ -73,6 +75,7 @@ class SheetPlugin:
                     if sheet is not None:
                         new_to_watch.append(sheet)
                 else:
+                    logger.debug('wb does not have %s', sheet_label)
                     all_watched = False
         self._watch_sheets(new_to_watch)
         return all_watched

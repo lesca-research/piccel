@@ -93,9 +93,12 @@ class LescaDashboard(SheetPlugin):
         logger.debug('Lesca Dashboard update from sheet %s', sheet_source.label)
 
         if self.df is None:
+            logger.debug('df is none... call init')
             self.init()
             return # self.df initialized only after full load of workbook
                    # cannot do much here anyway...
+
+        logger.debug('df.shape: %s', self.df.shape)
 
         if sheet_source.label == self.pp.label:
             if clear:

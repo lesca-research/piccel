@@ -38,5 +38,6 @@
         <file alias="visible_icon">eye.svg</file>
         <file alias="non_visible_icon">eye-off.svg</file>
         <file alias="plugin_icon">settings.svg</file>
+        <file alias="settings_export_icon">settings-export.svg</file>
     </qresource>
 </RCC>

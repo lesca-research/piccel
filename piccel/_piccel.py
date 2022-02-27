@@ -68,13 +68,13 @@ from .ui.widgets import (show_critical_message_box, show_info_message_box,
 from .core import (LazyFunc, df_index_from_value, if_none,
                    refresh_text, strip_indent)
 
+from .core import UserRole, nexts, InputType
 from .core import Hint, Hints
 from .core import (FormEditionBlockedByPendingLiveForm, FormEditionLocked,
                    FormEditionNotOpen, FormEditionLockedType,
                    FormEditionOrphanError, FormEditionCancelled, SheetNotFound)
 
 from appdirs import user_data_dir
-
 
 from .logging import logger, debug2, debug3
 
@@ -316,7 +316,6 @@ class PasswordVault:
         return encrypter
 
 
-from .core import UserRole, nexts
 
 class IndexedPattern:
     def __init__(self, pattern, index_start=0):
@@ -496,11 +495,14 @@ class LocalFileSystem:
         logger.debug2('Remove folder %s', full_folder)
         shutil.rmtree(full_folder)
 
-    def copy_to_tmp(self, fn, decrypt=False, tmp_dir=None):
+    def copy_to_tmp(self, fn, decrypt=False, tmp_dir=None, dest_afn=None):
         """ Return destination temporary file """
-        if tmp_dir is None:
-            tmp_dir = tempfile.mkdtemp()
-        tmp_fn = op.join(tmp_dir, op.basename(fn))
+        if dest_afn is None:
+            if tmp_dir is None:
+                tmp_dir = tempfile.mkdtemp()
+            tmp_fn = op.join(tmp_dir, op.basename(fn))
+        else:
+            tmp_fn = dest_afn
         if not decrypt:
             shutil.copy(op.join(self.root_folder, fn), tmp_fn)
         else:
@@ -1275,6 +1277,21 @@ class DataSheet:
 
         self.save_form_master(overwrite=overwrite)
         self.save_plugin_code(overwrite=overwrite)
+
+    def export_logic(self, output_dir):
+        if self.plugin_code_str is not None:
+            plugin_fn = '%s.py' % self.label
+            logger.info('Export plugin of sheet %s to %s', self.label,
+                        op.join(output_dir, plugin_fn))
+            self.filesystem.copy_to_tmp('plugin.py', decrypt=True,
+                                        dest_afn=op.join(output_dir, plugin_fn))
+
+        if self.form_master is not None:
+            form_fn = '%s.form' % self.label
+            logger.info('Export form of sheet %s to %s', self.label,
+                        op.join(output_dir, form_fn))
+            self.filesystem.copy_to_tmp('master.form', decrypt=True,
+                                        dest_afn=op.join(output_dir, form_fn))
 
     def save_plugin_code(self, overwrite=False):
         if self.plugin_code_str is not None:
@@ -3441,9 +3458,6 @@ class ConfigurationNotLoaded(Exception): pass
 
 class PiccelLogic:
     """
-    State: workbook selector
-        * get_recent_files
-        - load -> Decrypt
     State: Decrypt
         - decrypt workbook with password -> Login
     State: Login
@@ -3766,6 +3780,8 @@ USERS_FORM = Form(UF_SECTIONS, default_language='French',
                   supported_languages={'French', 'English'},
                   title={'French': 'Utilisateur du classeur',
                          'English': 'Workbook user'})
+
+class InvalidWorbookLabel(Exception): pass
 class InvalidJobName(Exception): pass
 class JobDisabled(Exception): pass
 class JobNotFound(Exception): pass
@@ -3813,11 +3829,18 @@ class WorkBook:
         wb.set_password(UserRole.ADMIN, 'admin_pwd')
         wb.save_configuration_file('../my_wb.psh')
         """
+        if not label.isidentifier():
+            raise InvalidWorbookLabel(label)
+
         self.label = label
         # TODO: validate color format
         self.color_hex_str = color_hex_str
 
         self.filesystem = filesystem
+
+        self.has_write_access = filesystem.test_write_access()
+        # TODO: obviously in case no write access, the following will crash...
+
         if self.filesystem.encrypter is not None:
             logger.warning('Init of workbook %s: Encrypter already associated '\
                            'with filesystem but will be reset after login',
@@ -3827,7 +3850,7 @@ class WorkBook:
                         self.label, data_folder)
             filesystem.makedirs(data_folder)
 
-        self.has_write_access = filesystem.test_write_access()
+        self.data_folder = data_folder
 
         sheet_folder = op.join(data_folder, WorkBook.SHEET_FOLDER)
         if not filesystem.exists(sheet_folder):
@@ -3852,11 +3875,11 @@ class WorkBook:
         self.user = None
         self.user_role = None
 
-        self.data_folder = data_folder
         self.linked_book_fns = (linked_book_fns if linked_book_fns is not None \
                                 else {})
-        # TODO: user role retrieval can only be done while decrypting!
         self.linked_books = []
+        self.linked_sheets = []
+
         # TODO: utest linked workbook!
         for linked_workbook_fn in self.linked_book_fns.keys():
             self.preload_linked_workbook(linked_workbook_fn)
@@ -3910,6 +3933,7 @@ class WorkBook:
 
     def set_job_code(self, job_name, job_code_str):
         logger.debug('Set code of job %s', job_name)
+        success = True
         if not job_name.isidentifier():
             raise InvalidJobName(job_name)
 
@@ -3920,6 +3944,8 @@ class WorkBook:
             self.jobs[job_name] = self.job_from_code(job_name, job_code_str)
         except InvalidJobCode as e:
             self.jobs_invalidity[job_name] = e.args[0]
+            success = False
+        return success
 
     def delete_job(self, job_name):
         logger.debug('Save code of job %s', job_name)
@@ -3956,9 +3982,38 @@ class WorkBook:
                 errors.append('job %s does not implement function %s' % \
                               (job_name, func))
 
-        if not isinstance(job.min_access_level(), UserRole):
-            errors.append('%s.%s does not return a UserRole' % \
-                          (job_name, func))
+        def _check_func(job, fname, check_result, expected_result_descr):
+            error_message = None
+            try:
+                result = eval('job.%s()' % fname)
+            except:
+                error_message = 'Error in function %s of job %s' % (fname, job_name)
+                details = format_exc()
+                logger.error('%s\n%s', error_message, details)
+                return error_message
+
+            if not check_result(result):
+                error_message =  ('%s.%s does not return %s' % \
+                                  (job_name, fname, expected_result_descr))
+                logger.error('%s\n%s', error_message)
+            return error_message
+
+        for func, validation, rdescr in [('who_can_run',
+                                          lambda r: (r is None or
+                                                     isinstance(r, str)),
+                                          'string or None'),
+                                         ('min_access_level',
+                                          lambda r: (r is None or
+                                                     isinstance(r, UserRole)),
+                                          'UserRole or None'),
+                                         ('icon',
+                                          lambda r: (r is None or
+                                                     isinstance(r, QtGui.QIcon)),
+                                          'QIcon or None')]:
+            err_msg = _check_func(job, func, validation, rdescr)
+            if err_msg is not None:
+                errors.append(err_msg)
+
 
         if len(errors) > 0:
             message = ('Error while setting job %s:\n%s' %
@@ -3968,13 +4023,13 @@ class WorkBook:
 
         return job
 
-    def run_job(self, job_name, ask_input=None):
+    def run_job(self, job_name, ask_input=None, **job_kwargs):
         if job_name not in self.jobs:
             if job_name in self.jobs_invalidity:
                 raise JobDisabled(job_name)
             elif job_name not in self.jobs:
                 raise JobNotFound(job_name)
-        self.jobs[job_name].run(self, ask_input)
+        self.jobs[job_name].run(self, ask_input, **job_kwargs)
 
     def add_linked_workbook(self, cfg_fn, sheet_filters):
         self.linked_book_fns[cfg_fn] = sheet_filters
@@ -4050,6 +4105,24 @@ class WorkBook:
                         linked_book_fns=cfg['linked_sheets'],
                         color_hex_str=cfg.get('color_hex_str', None))
 
+    def export_all_logic(self, output_dir, export_linked=False):
+        assert(self.logged_in)
+        plugin_fn = op.join(self.data_folder, 'plugin_common.py')
+        self.filesystem.copy_to_tmp(plugin_fn, decrypt=True, tmp_dir=output_dir)
+        jobs_folder = op.join(self.data_folder, WorkBook.JOBS_FOLDER)
+        job_output_dir = op.join(output_dir, WorkBook.JOBS_FOLDER)
+        if not op.exists(job_output_dir):
+            os.makedirs(job_output_dir)
+        for job_name in self.jobs_code:
+            if not job_name.startswith('__'):
+                self.filesystem.copy_to_tmp(op.join(jobs_folder, '%s.py' % job_name),
+                                            decrypt=True, tmp_dir=job_output_dir)
+
+        for sheet in self.sheets.values():
+            if (sheet.label != '__users__' and
+                (export_linked or sheet.label not in self.linked_sheets)):
+                sheet.export_logic(output_dir)
+
     def set_user_password(self, user, new_pwd):
         assert(self.decrypted)
         users_sheet = self.request_read_only_sheet('__users__', user=user)
@@ -4105,6 +4178,12 @@ class WorkBook:
             self.filesystem.set_encrypter(encrypter)
 
         self.decrypted = True
+
+        plugin_fn = op.join(self.data_folder, 'plugin_common.py')
+        if not self.filesystem.exists(plugin_fn):
+            logger.info('WorkBook %s: plugin file "%s" does not exist. '\
+                        'Dump default one', self.label, plugin_fn)
+            self.dump_common_plugin()
 
         # Check __users__ sheet - remove when all fixed
         # try:
@@ -4317,11 +4396,6 @@ class WorkBook:
             logger.error('WorkBook %s: user not logged in, cannot reload.')
             return
 
-        plugin_fn = op.join(self.data_folder, 'plugin_common.py')
-        if not self.filesystem.exists(plugin_fn):
-            logger.info('WorkBook %s: plugin file "%s" does not exist. '\
-                        'Dump default one', self.label, plugin_fn)
-            self.dump_common_plugin()
         self.load_plugin()
         self.load_jobs()
 
@@ -4330,25 +4404,78 @@ class WorkBook:
         self.sheets = self.load_sheets(parent_workbook=self)
         logger.debug('WorkBook %s: Load linked workbooks: %s',
                      self.label, ','.join('"%s"'%l for l,b in self.linked_books))
+        self.linked_sheets = []
         for linked_book, sheet_regexp in self.linked_books:
             progress_callback('Load sheets from linked workbook %s' \
                               % linked_book.label)
-            self.sheets.update(linked_book.load_sheets(sheet_regexp,
-                                                       progress_callback,
-                                                       parent_workbook=self))
+            linked_sheets = linked_book.load_sheets(sheet_regexp,
+                                                    progress_callback,
+                                                    parent_workbook=self)
+            self.sheets.update(linked_sheets)
+            self.linked_sheets.extent(linked_sheets)
         self.after_workbook_load()
 
-    def load_jobs(self):
+    def dump_default_job(self, export_job_name):
+        assert(export_job_name == '__job_export_logic__')
+
+        def who_can_run():
+            return None
+
+        def min_access_level():
+            return UserRole.MANAGER
+
+        def icon():
+            return QtGui.QIcon(':/icons/settings_export_icon')
+
+        def run(workbook, ask_input, export_root_dir=None):
+            if export_root_dir is None:
+                export_root_dir = ask_input('Output folder',
+                                            input_type=InputType.FOLDER)
+            if export_root_dir is None:
+                return
+
+            date_fmt = '%Y_%m_%d_%Hh%Mm%Ss'
+            export_dir = op.join(export_root_dir,
+                                 "%s_%s" % (workbook.label,
+                                            datetime.now().strftime(date_fmt)))
+            if op.exists(export_dir):
+                show_critical_message_box("Don't spam this button so hard!")
+                return
+            else:
+                os.makedirs(export_dir)
+
+            workbook.export_all_logic(export_dir)
+            show_info_message_box('Logic successfully exported to %s' % export_dir)
+
+        job_code = (job_code_header + '\n\n' +
+                    '\n\n'.join(strip_indent(inspect.getsource(f))
+                                for f in (who_can_run, min_access_level,
+                                          icon, run)))
+
+        self.set_job_code(export_job_name, job_code)
+
+    def load_jobs(self, first_attempt=True):
+
+        jobs_folder = op.join(self.data_folder, WorkBook.JOBS_FOLDER)
+        export_job_name = '__job_export_logic__'
+        if not self.filesystem.exists(op.join(jobs_folder,
+                                              '%s.py' % export_job_name)):
+            self.dump_default_job(export_job_name)
+
         self.jobs.clear()
         self.jobs_invalidity.clear()
 
-        jobs_folder = op.join(self.data_folder, WorkBook.JOBS_FOLDER)
         for job_fn in self.filesystem.listdir(jobs_folder):
             if job_fn.endswith(WorkBook.JOB_EXT):
                 job_name = op.splitext(job_fn)[0]
                 job_code_str = self.filesystem.load(op.join(jobs_folder,
                                                             job_fn))
-                self.set_job_code(job_name, job_code_str)
+
+                if (first_attempt and
+                    not self.set_job_code(job_name, job_code_str) and
+                    job_name.startswith('__')):
+                    self.dump_default_job(job_name)
+                    self.load_jobs(first_attempt=False)
 
     def after_workbook_load(self):
         logger.debug('Workbook %s: call after_workbook_load on all sheets',
@@ -4528,10 +4655,17 @@ class WorkBook:
 
 job_code_header = \
 """
+import sys
+import os
+import os.path as op
 import pandas as pd
 import numpy as np
-from piccel import UserRole
+from piccel import (UserRole, InputType, show_critical_message_box,
+                    show_info_message_box)
 from piccel.logging import logger
+from datetime import datetime
+
+from PyQt5 import QtGui
 """
 
 class TestWorkBook(unittest.TestCase):
@@ -4619,6 +4753,174 @@ class TestWorkBook(unittest.TestCase):
         wb2.set_job_code('a_job', job_code)
         self.assertEqual(wb2.get_job_code('a_job'), job_code)
         wb2.run_job('a_job')
+
+    def test_export_all_logic(self):
+
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'A_Workbook'
+        data_folder = 'workbook_files'
+        user = 'TV'
+        logger.debug('-----------------------')
+        logger.debug('utest: create workbook')
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
+
+        sheet_id = 'Sheet_With_Form'
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                        default_language='French',
+                        supported_languages={'French'}),]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Evaluation'})
+        sh1 = DataSheet(sheet_id, form, user=user)
+
+        sheet_id = 'Sheet_With_No_Form'
+        sh2 = DataSheet(sheet_id, None, user=user)
+
+        sheet_id = 'Sheet_With_Plugin'
+        sh3 = DataSheet(sheet_id, None, user=user)
+        class Plugin1(SheetPlugin):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.df = pd.DataFrame(['init p1'], columns=['Field'])
+
+            def update(self, sheet_source, changed_entry,
+                       deletion=False, clear=False):
+                self.df.iat[0,0] = 'plugin 1 was here'
+
+            def views(self, views):
+                return {'full' : lambda df: self.df}
+        sh3.set_plugin_from_code(Plugin1.get_code_str())
+
+        wb.add_sheet(sh1)
+        wb.add_sheet(sh2)
+        wb.add_sheet(sh3)
+
+        def who_can_run():
+            return None
+
+        def min_access_level():
+            return UserRole.ADMIN
+
+        def icon():
+            return None
+
+        def run(workbook, ask_password):
+            workbook.hack_report = 'Job done'
+
+        job_code = (job_code_header + '\n\n' +
+                    '\n\n'.join(strip_indent(inspect.getsource(f))
+                                for f in (who_can_run, min_access_level,
+                                          icon, run)))
+        wb.set_job_code('a_job', job_code)
+
+        export_folder = op.join(self.tmp_dir, 'wb_logic')
+        os.makedirs(export_folder)
+        wb.export_all_logic(export_folder, export_linked=False)
+        expected_fns = [op.join(export_folder, 'plugin_common.py'),
+                        op.join(export_folder, 'jobs', 'a_job.py'),
+                        op.join(export_folder, 'sheets', 'Sheet_With_Form.form'),
+                        op.join(export_folder, 'sheets', 'Sheet_With_Form.py'),
+                        op.join(export_folder, 'sheets', 'Sheet_With_No_Form.py'),
+                        op.join(export_folder, 'sheets', 'Sheet_With_Plugin.py')]
+        for fn in expected_fns:
+            self.assertTrue(op.exists(fn), '%s does not exist' % fn)
+        not_expected_fns = [op.join(export_folder, '__users__.form'),
+                            op.join(export_folder, '__users__.py'),
+                            op.join(export_folder, 'sheets',
+                                    'Sheet_With_No_Form.form'),
+                            op.join(export_folder, 'sheets',
+                                    'Sheet_With_Plugin.form')]
+        for fn in not_expected_fns:
+            self.assertFalse(op.exists(fn), '%s must not exist' % fn)
+
+        # TODO check that no exported file starts with "__"
+
+    def test_export_logic_job(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'A_Workbook'
+        data_folder = 'workbook_files'
+        user = 'TV'
+        logger.debug('-----------------------')
+        logger.debug('utest: create workbook')
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
+
+        sheet_id = 'Sheet_With_Form'
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                        default_language='French',
+                        supported_languages={'French'}),]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Evaluation'})
+        sh1 = DataSheet(sheet_id, form, user=user)
+
+        sheet_id = 'Sheet_With_No_Form'
+        sh2 = DataSheet(sheet_id, None, user=user)
+
+        sheet_id = 'Sheet_With_Plugin'
+        sh3 = DataSheet(sheet_id, None, user=user)
+        class Plugin1(SheetPlugin):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.df = pd.DataFrame(['init p1'], columns=['Field'])
+
+            def update(self, sheet_source, changed_entry,
+                       deletion=False, clear=False):
+                self.df.iat[0,0] = 'plugin 1 was here'
+
+            def views(self, views):
+                return {'full' : lambda df: self.df}
+        sh3.set_plugin_from_code(Plugin1.get_code_str())
+
+        wb.add_sheet(sh1)
+        wb.add_sheet(sh2)
+        wb.add_sheet(sh3)
+
+        def who_can_run():
+            return None
+
+        def min_access_level():
+            return UserRole.ADMIN
+
+        def icon():
+            return None
+
+        def run(workbook, ask_password):
+            workbook.hack_report = 'Job done'
+
+        job_code = (job_code_header + '\n\n' +
+                    '\n\n'.join(strip_indent(inspect.getsource(f))
+                                for f in (who_can_run, min_access_level,
+                                          icon, run)))
+        wb.set_job_code('a_job', job_code)
+
+        export_folder = op.join(self.tmp_dir, 'wb_logic')
+        os.makedirs(export_folder)
+        wb.export_all_logic(export_folder, export_linked=False)
+        expected_fns = [op.join(export_folder, 'plugin_common.py'),
+                        op.join(export_folder, 'jobs', 'a_job.py'),
+                        op.join(export_folder, 'Sheet_With_Form.form'),
+                        op.join(export_folder, 'Sheet_With_Form.py'),
+                        op.join(export_folder, 'Sheet_With_No_Form.py'),
+                        op.join(export_folder, 'Sheet_With_Plugin.py')]
+        for fn in expected_fns:
+            self.assertTrue(op.exists(fn), '%s does not exist' % fn)
+        not_expected_fns = [op.join(export_folder, '__users__.form'),
+                            op.join(export_folder, '__users__.py'),
+                            op.join(export_folder, 'jobs', '__export__.py'),
+                            op.join(export_folder, 'Sheet_With_No_Form.form'),
+                            op.join(export_folder, 'Sheet_With_Plugin.form')]
+        for fn in not_expected_fns:
+            self.assertFalse(op.exists(fn), '%s must not exist' % fn)
 
     def test_delete_good_job(self):
         fs = LocalFileSystem(self.tmp_dir)
@@ -5323,8 +5625,6 @@ class TestWorkBook(unittest.TestCase):
         form = Form(sections, default_language='French',
                     supported_languages={'French'},
                     title={'French':'Participant Status'})
-
-
 
         sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
 
@@ -7802,6 +8102,7 @@ class PiccelApp(QtWidgets.QApplication):
 
         self.delete_icon = QtGui.QIcon(':/icons/form_delete_icon')
         self.plugin_icon = QtGui.QIcon(':/icons/plugin_icon')
+        self.warning_icon = QtGui.QIcon(':/icons/alert_icon')
 
         self.refresh_rate_ms = refresh_rate_ms
 
@@ -7899,8 +8200,17 @@ class PiccelApp(QtWidgets.QApplication):
                 separator.setSeparator(True)
                 code_menu.addAction(separator)
 
-                for job_name, job in self.logic.workbook.jobs.items():
-                    job_menu = code_menu.addMenu(job.icon(), job_name)
+                job_defs = [(job_name, job.icon())
+                            for job_name, job
+                            in self.logic.workbook.jobs.items()]
+                job_defs.extend((job_name, self.warning_icon)
+                                for job_name in self.logic.workbook.jobs_invalidity)
+
+                for job_name, job_icon in job_defs:
+                    if (job_name.startswith('__') and
+                        self.logic.workbook.user_role < UserRole.ADMIN):
+                        continue
+                    job_menu = code_menu.addMenu(job_icon, job_name)
 
                     del_act = QtWidgets.QAction(self.delete_icon,
                                                 'Delete',
@@ -8017,18 +8327,41 @@ class PiccelApp(QtWidgets.QApplication):
                                            submit=_set_job)
         self.job_editor.show()
 
-    def ask_input(self, label, is_password=False):
+    def ask_input(self, label, input_type=InputType.TEXT):
         ask_box = QtWidgets.QDialog(self.current_widget)
         input_ui = ui.single_input_dialog_ui.Ui_Dialog()
         input_ui.setupUi(ask_box)
         input_ui.input_label.setText(label)
-        if is_password:
+        input_ui.select_button.hide()
+        if input_type==InputType.PASSWORD:
             input_ui.input_field.setEchoMode(QtWidgets.QLineEdit.Password)
+        elif input_type in [InputType.FOLDER, InputType.FILE_OUT, InputType.FILE_IN]:
+            input_ui.select_button.show()
+            f_select = partial(self.ask_file, input_type, input_ui.input_field)
+            input_ui.select_button.clicked.connect(f_select)
         result = ask_box.exec_()
         if result == QtWidgets.QDialog.Accepted:
             ask_box.close()
             return input_ui.input_field.text()
         return None
+
+    def ask_file(self, file_type, dest_field):
+        path = None
+        if file_type==InputType.FOLDER:
+            path = (QtWidgets.QFileDialog
+                    .getExistingDirectory(None, 'Select directory', '',
+                                          QtWidgets.QFileDialog.ShowDirsOnly))
+        elif file_type==InputType.FILE_OUT:
+            path, _ = (QtWidgets.QFileDialog
+                       .getSaveFileName(None, 'Select file', '',
+                                        QtWidgets.QFileDialog.ShowDirsOnly))
+        elif file_type==InputType.FILE_IN:
+            path, _ = (QtWidgets.QFileDialog
+                       .getOpenFileName(None, 'Select file', '',
+                                        QtWidgets.QFileDialog.ShowDirsOnly))
+
+        if path is not None and path != '':
+            dest_field.setText(path)
 
     def on_job_item_click(self, item):
         job_name = item.data(QtCore.Qt.UserRole)[len('Job_'):]
@@ -8045,13 +8378,13 @@ class PiccelApp(QtWidgets.QApplication):
 
         logger.info('Adding job buttons for %s',
                     ', '.join(self.logic.workbook.jobs))
-
         for job_name, job in self.logic.workbook.jobs.items():
             job_user = job.who_can_run()
             if ((job_user is None or
                  job_user == self.logic.workbook.user) and
                 self.logic.workbook.user_role >= job.min_access_level()):
-                item = QtWidgets.QListWidgetItem(job.icon(), '')
+                icon = job.icon()
+                item = QtWidgets.QListWidgetItem(icon, '')
                 item.setData(QtCore.Qt.UserRole, 'Job_%s' % job_name)
                 self._workbook_ui.job_list.addItem(item)
 
@@ -8125,11 +8458,21 @@ class PiccelApp(QtWidgets.QApplication):
                 form = Form.from_json_file(form_fn)
 
                 plugin_str = None
-                plugin_fn = plugin_fns.get(sheet_label, None)
+                plugin_fn = plugin_fns.pop(sheet_label, None)
                 if plugin_fn is not None:
                     with open(plugin_fn, 'r') as fin:
                         plugin_str = fin.read()
-                sheet = DataSheet(sheet_label, form, plugin_str)
+                sheet = DataSheet(sheet_label, form, plugin_code_str=plugin_str)
+                error = self.add_sheet(sheet)
+                if error is not None:
+                    errors.append(error)
+
+            # Add sheet with only plugin, no form
+            for sheet_label, plugin_fn in plugin_fns.items():
+                with open(plugin_fn, 'r') as fin:
+                    plugin_str = fin.read()
+                sheet = DataSheet(sheet_label, form_master=None,
+                                  plugin_code_str=plugin_str)
                 error = self.add_sheet(sheet)
                 if error is not None:
                     errors.append(error)
@@ -8156,8 +8499,8 @@ class PiccelApp(QtWidgets.QApplication):
             self.tab_sorter.show_tab_sheet(sheet,
                                            self.logic.workbook.user_role)
         except SheetDataOverwriteError:
-            error = 'Sheet data folder already exists for %s' % \
-                sheet.label
+            error = 'Sheet data folder already exists for %s' % sheet.label
+
         return error
 
 
@@ -8306,6 +8649,14 @@ class PiccelApp(QtWidgets.QApplication):
             message_box.showMessage(error_message)
             message_box.exec_()
 
+        if len(self.logic.workbook.jobs_invalidity) > 0:
+            jobs_invalidity = self.logic.workbook.jobs_invalidity
+            msg = ('Failed to load job(s): %s' %
+                             ', '.join(jobs_invalidity))
+            details = '\n'.join('## %s ##\n%s\n' % (jn,e)
+                                for jn,e in jobs_invalidity.items())
+            show_critical_message_box(msg, detailed_text=details)
+
         logger.debug('End login process')
         self.refresh()
 
@@ -8354,6 +8705,7 @@ class PiccelApp(QtWidgets.QApplication):
 
     def close_workbook(self):
         self.logic.close_workbook()
+        self.timer.stop()
         self.refresh()
 
     def show_workbook_screen(self):
