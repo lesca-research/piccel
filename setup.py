@@ -59,7 +59,7 @@ setup(name='piccel', version=version['__version__'],
       keywords='piccel spreadsheet form data capture encryption cloud',
       packages=find_packages(exclude=['test']),
       python_requires='>=3',
-      install_requires=['packaging', 'numpy', 'pandas', 'cryptography', 'appdirs',
+      install_requires=['packaging', 'numpy', 'pandas<1.0.6', 'cryptography', 'appdirs',
                         'beautifulsoup4', 'bcrypt', 'html5lib'],
       extras_require={"PDF":  ['weasyprint', 'PyPDF2']},
       entry_points={
