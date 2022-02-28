@@ -70,7 +70,8 @@ class LescaDashboard(SheetPlugin):
                        .sort_values(by='Participant_ID')
                        .reset_index(drop=True))
             self.df.set_index('Participant_ID', inplace=True)
-            self.refresh_entries(self.df.index)
+            if len(self.df.index) > 0:
+                self.refresh_entries(self.df.index)
         else:
             self.df = (pd.DataFrame(columns=['Participant_ID'])
                        .set_index('Participant_ID'))

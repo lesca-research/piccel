@@ -5996,10 +5996,6 @@ class TestWorkBook(unittest.TestCase):
                 return super(DashboardInterview, self).sheets_to_watch() + \
                     [DEFAULT_INTERVIEW_PLAN_SHEET_LABEL, 'Eval']
 
-            def refresh_all(self):
-                self.refresh_entries(self.df.index)
-                self.sheet.invalidate_cached_views()
-
             def refresh_entries(self, pids):
                 logger.debug('Dashboard refresh for: %s', pids)
                 self.eval_tracker.track(self.df, pids, date_now=self.date_now)
