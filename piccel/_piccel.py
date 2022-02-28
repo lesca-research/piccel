@@ -5345,7 +5345,8 @@ class TestWorkBook(unittest.TestCase):
         # Create data sheet participant info (no form)
         sheet_id = 'Participants_Status'
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE90001'],
-                              'Secure_ID' : ['452164532', '5R32141']})
+                              'Secure_ID' : ['452164532', '5R32141'],
+                              'Study_Status' : ['ongoing', 'ongoing']})
         items = [FormItem({'Participant_ID' :
                            {'French':'Code Participant'}},
                           default_language='French',
@@ -5472,6 +5473,7 @@ class TestWorkBook(unittest.TestCase):
                 super(DashboardEval, self).after_workbook_load()
 
             def refresh_entries(self, pids):
+                super().refresh_entries(pids)
                 logger.debug('Dashboard refresh for: %s', pids)
 
                 self.df.loc[pids, 'Eval'] = 'eval_todo'
@@ -5581,8 +5583,7 @@ class TestWorkBook(unittest.TestCase):
 
         sh_pp.delete_entry(sh_pp.df.index[1])
         dashboard_df = sh_dashboard.get_df_view()
-
-        self.assertEqual(dashboard_df.shape, (2,1))
+        self.assertEqual(dashboard_df.shape, (2,3))
 
     def test_dashboard_status_track(self):
         # Create empty workbook
