@@ -30,6 +30,7 @@ import csv
 from . import sheet_plugin_template
 from . import workbook_plugin_template
 from .plugin_tools import map_set, And, Or #, Less, LessEqual, Greater, GreaterEqual
+from .plugin_tools import DATE_FMT, DATETIME_FMT
 from .plugin_tools import (LescaDashboard, InterviewTracker,
                            form_update_or_new,
                            DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
@@ -1816,6 +1817,8 @@ class DataSheet:
             form = self._new_form('append', entry_dict=entry_dict,
                                   form_id=form_id, entry_id=entry_idx[0],
                                   update_idx=new_update_idx)
+            # TODO: this should be an internal behavior of form,
+            #       not managed outside
             for item in form.to_freeze_on_update:
                 item.set_editable(False)
             return form
@@ -3570,7 +3573,7 @@ class TestPiccelLogic(unittest.TestCase):
         self.access_pwd = '1234'
         self.admin_pwd = '5425'
         self.admin_user = 'thomas'
-        wb_label = 'Test WB'
+        wb_label = 'Test_WB'
         wb = WorkBook.create(wb_label, filesystem,
                              access_password=self.access_pwd,
                              admin_password=self.admin_pwd,
@@ -4111,17 +4114,18 @@ class WorkBook:
         self.filesystem.copy_to_tmp(plugin_fn, decrypt=True, tmp_dir=output_dir)
         jobs_folder = op.join(self.data_folder, WorkBook.JOBS_FOLDER)
         job_output_dir = op.join(output_dir, WorkBook.JOBS_FOLDER)
-        if not op.exists(job_output_dir):
-            os.makedirs(job_output_dir)
+        if not op.exists(job_output_dir): os.makedirs(job_output_dir)
         for job_name in self.jobs_code:
             if not job_name.startswith('__'):
                 self.filesystem.copy_to_tmp(op.join(jobs_folder, '%s.py' % job_name),
                                             decrypt=True, tmp_dir=job_output_dir)
 
+        sheet_output_dir = op.join(output_dir, 'sheets')
+        if not op.exists(sheet_output_dir): os.makedirs(sheet_output_dir)
         for sheet in self.sheets.values():
             if (sheet.label != '__users__' and
                 (export_linked or sheet.label not in self.linked_sheets)):
-                sheet.export_logic(output_dir)
+                sheet.export_logic(sheet_output_dir)
 
     def set_user_password(self, user, new_pwd):
         assert(self.decrypted)
@@ -4292,6 +4296,7 @@ class WorkBook:
         users = users_sheet.get_df_view('latest').set_index('User_Name')
 
         if user not in users.index:
+            logger.error('User "%s" not in: %s', user, ', '.join(users.index))
             raise UnknownUser(user)
 
         return (users.loc[user, 'Password_Reset'] or
@@ -4908,17 +4913,23 @@ class TestWorkBook(unittest.TestCase):
         wb.export_all_logic(export_folder, export_linked=False)
         expected_fns = [op.join(export_folder, 'plugin_common.py'),
                         op.join(export_folder, 'jobs', 'a_job.py'),
-                        op.join(export_folder, 'Sheet_With_Form.form'),
-                        op.join(export_folder, 'Sheet_With_Form.py'),
-                        op.join(export_folder, 'Sheet_With_No_Form.py'),
-                        op.join(export_folder, 'Sheet_With_Plugin.py')]
+                        op.join(export_folder, 'sheets',
+                                'Sheet_With_Form.form'),
+                        op.join(export_folder, 'sheets',
+                                'Sheet_With_Form.py'),
+                        op.join(export_folder, 'sheets',
+                                'Sheet_With_No_Form.py'),
+                        op.join(export_folder, 'sheets',
+                                'Sheet_With_Plugin.py')]
         for fn in expected_fns:
             self.assertTrue(op.exists(fn), '%s does not exist' % fn)
         not_expected_fns = [op.join(export_folder, '__users__.form'),
                             op.join(export_folder, '__users__.py'),
                             op.join(export_folder, 'jobs', '__export__.py'),
-                            op.join(export_folder, 'Sheet_With_No_Form.form'),
-                            op.join(export_folder, 'Sheet_With_Plugin.form')]
+                            op.join(export_folder, 'sheets',
+                                    'Sheet_With_No_Form.form'),
+                            op.join(export_folder, 'sheets',
+                                    'Sheet_With_Plugin.form')]
         for fn in not_expected_fns:
             self.assertFalse(op.exists(fn), '%s must not exist' % fn)
 
@@ -6008,7 +6019,6 @@ class TestWorkBook(unittest.TestCase):
                          set(pp_df['Participant_ID']))
         self.assertTrue((df['Eval'] == 'eval_not_done').all())
 
-        from .plugin_tools import DATE_FMT
         pid = 'CE0001'
         logger.debug('---- Test most recent entry in plan sheet ----')
 
@@ -6053,7 +6063,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(df.loc[pid, 'Eval'], 'eval_scheduled')
         self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
         self.assertEqual(df.loc[pid, 'Eval_Plan'],
-                         idate.strftime(DATE_FMT))
+                         idate.strftime(DATETIME_FMT))
 
         logger.debug('-- Pid %s: No planned date, availability, no callback --',
                      pid)
@@ -6100,11 +6110,14 @@ class TestWorkBook(unittest.TestCase):
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_callback_%dD' % (callback_nb_days-1))
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
+                         'Thomas Vincent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
-        wb['Dashboard'].plugin.date_now = ts + timedelta(days=callback_nb_days+1)
+        wb['Dashboard'].plugin.date_now = (ts +
+                                           timedelta(days=callback_nb_days+1))
         wb['Dashboard'].plugin.reset_data()
+
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_callback_now' )
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
@@ -6127,7 +6140,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_email_pending')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
-                         idate.strftime(DATE_FMT))
+                         idate.strftime(DATETIME_FMT))
 
         logger.debug('------- Interview email sent for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
@@ -6139,14 +6152,46 @@ class TestWorkBook(unittest.TestCase):
         form.set_values_from_entry({'Email_Status' : 'sent',
                                     'Timestamp_Submission' : ts})
         form.submit()
+
+        date_now = idate - timedelta(days=2.1)
+        logger.debug('------- Check dashboard when 2 days before (date_now=%s) --------' %
+                     date_now)
+        wb['Dashboard'].plugin.date_now = date_now
+        wb['Dashboard'].plugin.reset_data()
+
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
-                         'eval_email_sent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_2D')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
-                         idate.strftime(DATE_FMT))
+                         idate.strftime(DATETIME_FMT))
 
+        date_now = (datetime(idate.year,
+                             idate.month,
+                             idate.day) -
+                    timedelta(minutes=5))
+        logger.debug('------- Check dashboard when night before (date_now=%s) --------' %
+                     date_now)
+        wb['Dashboard'].plugin.date_now = date_now
+        wb['Dashboard'].plugin.reset_data()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_1D')
+
+        date_now = idate - timedelta(hours=1)
+        logger.debug('------- Check dashboard when one hour before (date_now=%s) --------' %
+                     date_now)
+        wb['Dashboard'].plugin.date_now = date_now
+        wb['Dashboard'].plugin.reset_data()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_today')
+
+        date_now = idate + timedelta(minutes=30)
+        logger.debug('------- Check dashboard when 30 mins after (date_now=%s) --------' %
+                     date_now)
+        wb['Dashboard'].plugin.date_now = date_now
+        wb['Dashboard'].plugin.reset_data()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_overdue')
 
         logger.debug('------- Interview email error for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
@@ -6164,7 +6209,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Thomas Vincent')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
-                         idate.strftime(DATE_FMT))
+                         idate.strftime(DATETIME_FMT))
 
         logger.debug('------- Interview done for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
@@ -6184,7 +6229,7 @@ class TestWorkBook(unittest.TestCase):
         # Overriding User field does not work:
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
-                         ts.strftime(DATE_FMT))
+                         ts.strftime(DATETIME_FMT))
 
         logger.debug('------- Interview to redo for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
@@ -6202,7 +6247,7 @@ class TestWorkBook(unittest.TestCase):
                          'eval_redo')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
-                         ts.strftime(DATE_FMT))
+                         ts.strftime(DATETIME_FMT))
 
         logger.debug('------- Interview cancelled for %s --------' % pid)
         idate = datetime(2021,10,11,10,10)
@@ -6241,7 +6286,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
                          'Catherine-Alexandra Grégoire')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
-                         idate.strftime(DATE_FMT))
+                         idate.strftime(DATETIME_FMT))
 
     def test_dashboard_emailled_poll_track(self):
         # Create empty workbook
@@ -6467,9 +6512,7 @@ class TestWorkBook(unittest.TestCase):
                                                  'Poll')
         self.assertTrue(action_label.endswith('New'))
         self.assertTrue(action_label.startswith('Email'))
-        form.set_values_from_entry({'Email_Action' : 'plan',
-                                    'Staff' : 'Catherine-Alexandra Grégoire',
-                                    'Email_Template' : 'Poll',
+        form.set_values_from_entry({'Staff' : 'Catherine-Alexandra Grégoire',
                                     'Email_Scheduled_Send_Date' : \
                                     datetime.now()})
         form.submit()
@@ -6492,9 +6535,7 @@ class TestWorkBook(unittest.TestCase):
                                                  'Poll')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Email'))
-        form.set_values_from_entry({'Email_Action' : 'plan',
-                                    'Staff' : 'Thomas Vincent',
-                                    'Email_Template' : 'Poll',
+        form.set_values_from_entry({'Staff' : 'Thomas Vincent',
                                     'Email_Scheduled_Send_Date' : \
                                     datetime.now()})
         form.submit()
@@ -6506,9 +6547,7 @@ class TestWorkBook(unittest.TestCase):
                                                  'Poll')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Email'))
-        form.set_values_from_entry({'Email_Action' : 'plan',
-                                    'Staff' : 'Script',
-                                    'Email_Template' : 'Poll',
+        form.set_values_from_entry({'Staff' : 'Script',
                                     'Email_Status' : 'error',
                                     'Email_Scheduled_Send_Date' : \
                                     datetime.now()})
@@ -6524,9 +6563,7 @@ class TestWorkBook(unittest.TestCase):
         ts = datetime(2021,9,10,10,29)
         wb['Dashboard'].plugin.date_now = ts
         overdue_nb_days = 2
-        form.set_values_from_entry({'Email_Action' : 'plan',
-                                    'Staff' : 'Script',
-                                    'Email_Template' : 'Poll',
+        form.set_values_from_entry({'Staff' : 'Script',
                                     'Email_Status' : 'sent',
                                     'Overdue_Days' : overdue_nb_days,
                                     'Timestamp_Submission' : ts})
@@ -8021,14 +8058,16 @@ class LoginWindow(QtWidgets.QMainWindow,
         self.vlayout_main.addWidget(self.login_widget)
 
     def on_user_change(self, user):
+        self._login_ui.roleComboBox.clear()
+        self._login_ui.other_password_field.clear()
+        if user == '':
+            return
         new_pwd, user_role = self.login_preload_user(user)
         if new_pwd is not None:
             self._login_ui.other_password_field.setText(new_pwd)
             logger.debug('LoginWindow: login_preload_user returned new password')
         else:
             logger.debug('LoginWindow: login_preload_user returned no new pwd')
-
-        self._login_ui.roleComboBox.clear()
         for role in reversed(UserRole):
             if role <= user_role:
                 self._login_ui.roleComboBox.addItem(role.name)

@@ -343,6 +343,12 @@ function snakeCaseToCamelCase(s) {
         self.set_language(default_language)
         self.to_next_section()
 
+    def freeze_key_on_update(self, key):
+        for item in self.key_to_items[key]:
+            if not item.freeze_on_update:
+                item.freeze_on_update = True
+                self.to_freeze_on_update.add(item)
+
     def is_empty(self):
         return len(self.sections) == 0
 

@@ -557,8 +557,18 @@ def form_update_or_new(sheet_label, workbook, primary_keys, entry_dict=None):
             logger.warning('Multiple entries matching %s: %s',
                            primary_keys, entry_index)
         form = sheet.form_update_entry(entry_index[-1])
+        logger.debug('form_update_or_new - got update form from sheet %s',
+                     sheet.label)
         action_label = '%s | Update' % sheet_label
+
     form.set_values_from_entry(entry_dict)
+    # TODO: maybe integrate in form behavior,
+    #       maybe add the notion of primary key?
+    for pkey in primary_keys:
+        for item in form.key_to_items[pkey]:
+            logger.debug('Make %s not editable (freeze on update)', pkey)
+            item.set_editable(False)
+
     return form, action_label
 
 def dashboard_error_if_none(df, dashboard_df, column, error):
@@ -1255,7 +1265,7 @@ class InterviewTracker:
                                    (plan_sel_df['Date_Is_Set']))]
 
             dates = (planned.loc[planned.index, 'Interview_Date']
-                     .apply(lambda x: x.strftime(DATE_FMT)))
+                     .apply(lambda x: x.strftime(DATETIME_FMT)))
             dashboard_df.loc[planned.index, column_date] = dates
 
         def set_date_from_interview(int_sel_df):
@@ -1263,7 +1273,7 @@ class InterviewTracker:
                                ((int_sel_df['Session_Status']=='done') | \
                                 (int_sel_df['Session_Status']=='redo')))]
             dates = (done.loc[done.index, 'Timestamp_Submission']
-                     .apply(lambda x: x.strftime(DATE_FMT)))
+                     .apply(lambda x: x.strftime(DATETIME_FMT)))
             dashboard_df.loc[done.index, column_date] = dates
 
             cancelled = int_sel_df[((int_sel_df['Session_Action']=='cancel_session') | \
@@ -1328,7 +1338,7 @@ class InterviewTracker:
         # Status
         dashboard_df.loc[pids, column_status] = default_status
 
-        if 1:
+        if 0:
             print('dashboard_df before map_set')
             print(dashboard_df)
 
@@ -1366,12 +1376,22 @@ class InterviewTracker:
                              (plan_df_fresher, 'Date_Is_Set', [True]),
                              (plan_df_fresher, 'Send_Email', [True]),
                              (plan_df_fresher, 'Email_Status', ['to_send'])),
-                         '%s_email_sent' % interview_tag:
+                         '%s_tbd' % interview_tag:
                          And((plan_df_fresher, 'Plan_Action', ['plan']),
                              (plan_df_fresher, 'Interview_Date', IsNotNA()),
                              (plan_df_fresher, 'Date_Is_Set', [True]),
                              (plan_df_fresher, 'Send_Email', [True]),
-                             (plan_df_fresher, 'Email_Status', ['sent'])),
+                             (plan_df_fresher, 'Email_Status', ['sent']),
+                             (plan_df_fresher, 'Interview_Date',
+                              GreaterEqual(date_now))),
+                        '%s_overdue' % interview_tag:
+                         And((plan_df_fresher, 'Plan_Action', ['plan']),
+                             (plan_df_fresher, 'Interview_Date', IsNotNA()),
+                             (plan_df_fresher, 'Date_Is_Set', [True]),
+                             (plan_df_fresher, 'Send_Email', [True]),
+                             (plan_df_fresher, 'Email_Status', ['sent']),
+                             (plan_df_fresher, 'Interview_Date',
+                              Lower(date_now))),
                          '%s_email_error' % interview_tag:
                          And((plan_df_fresher, 'Plan_Action', ['plan']),
                              (plan_df_fresher, 'Interview_Date', IsNotNA()),
@@ -1399,7 +1419,26 @@ class InterviewTracker:
                            - date_now).dt.days
                 dashboard_df.loc[pids_callback_tbd, column_status] = \
                     cb_days.apply(lambda d : '%s_callback_%dD' % (interview_tag,d))
-        if 1:
+
+            mask_interview_tbd = (dashboard_df
+                                  .loc[plan_df_fresher.index, column_status] \
+                                  == '%s_tbd' % interview_tag)
+            pids_interview_tbd = mask_interview_tbd[mask_interview_tbd].index
+            if len(pids_interview_tbd) > 0:
+                plan_df_for_tbd = plan_df_fresher.loc[pids_interview_tbd]
+                date_today = datetime(date_now.year, date_now.month,
+                                      date_now.day)
+                def format_delay(d):
+                    if d < date_today:
+                        return '%s_%dD' % (interview_tag, (d - date_today).days)
+                    elif (d - date_today).days == 0 and date_now < d:
+                        return '%s_today' % interview_tag
+                    else:
+                        return '%s_%dD' % (interview_tag, (d - date_today).days)
+                dashboard_df.loc[pids_interview_tbd, column_status] = \
+                    plan_df_for_tbd['Interview_Date'].apply(format_delay)
+
+        if 0:
             print('dashboard_df after map_set from plan_df')
             print(dashboard_df)
 
@@ -1424,7 +1463,7 @@ class InterviewTracker:
                 msg = 'Column %s not found in dashboard df' % e.message
                 raise DestColumnNotFound(msg) from e
 
-        if 1:
+        if 0:
             print('dashboard_df after map_set from interview_df')
             print(dashboard_df)
 
@@ -1604,7 +1643,7 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
                                (plan_sel_df['Date_Is_Set']))]
 
         dates = (planned.loc[planned.index, 'Interview_Date']
-                 .apply(lambda x: x.strftime(DATE_FMT)))
+                 .apply(lambda x: x.strftime(DATETIME_FMT)))
         dashboard_df.loc[planned.index, column_date] = dates
 
     def set_date_from_interview(int_sel_df):
@@ -1612,7 +1651,7 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
                            ((int_sel_df['Session_Status']=='done') | \
                             (int_sel_df['Session_Status']=='redo')))]
         dates = (done.loc[done.index, 'Timestamp_Submission']
-                 .apply(lambda x: x.strftime(DATE_FMT)))
+                 .apply(lambda x: x.strftime(DATETIME_FMT)))
         dashboard_df.loc[done.index, column_date] = dates
 
         cancelled = int_sel_df[((int_sel_df['Session_Action']=='cancel_session') | \
