@@ -4473,6 +4473,8 @@ class WorkBook:
         for job_fn in self.filesystem.listdir(jobs_folder):
             if job_fn.endswith(WorkBook.JOB_EXT):
                 job_name = op.splitext(job_fn)[0]
+                logger.debug('Load job from %s', op.join(jobs_folder,
+                                                            job_fn))
                 job_code_str = self.filesystem.load(op.join(jobs_folder,
                                                             job_fn))
 
@@ -5527,6 +5529,7 @@ class TestWorkBook(unittest.TestCase):
                          set(pp_df['Participant_ID']))
         self.assertTrue((dashboard_df['Eval'] == 'eval_todo').all())
 
+        pp
         logger.debug('utest: Add new participant CE90002')
         # Add new pp
         form = sh_pp.form_new_entry()
@@ -6754,9 +6757,9 @@ class DataSheetModel(QtCore.QAbstractTableModel):
     def on_header_changed(self):
         self.headerDataChanged.emit(QtCore.Qt.Horizontal, O, 1)
 
-    def refresh_view(self):
+    def refresh_view(self, view_label=None):
         self.beginResetModel()
-        self.view_df = self.sheet.get_df_view()
+        self.view_df = self.sheet.get_df_view(view_label)
         # assert(self.view_df.index.is_lexsorted())
 
         self.nb_rows = 0
@@ -6930,8 +6933,7 @@ class SheetViewChanger:
         self.combobox = combobox
 
     def __call__(self, combox_index):
-        view_label = self.combobox.currentText()
-        self.sheet_model.refresh_view()
+        self.sheet_model.refresh_view(self.combobox.currentText())
 
 
 #!/usr/bin/python3
