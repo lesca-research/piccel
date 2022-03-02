@@ -7,7 +7,9 @@ import numpy as np
 import pandas as pd
 
 from .sheet_plugin import SheetPlugin
-from .core import df_filter_from_dict, if_none, SheetNotFound, Hint, Hints
+from .ui.widgets import (show_critical_message_box, show_info_message_box)
+from .core import (df_filter_from_dict, if_none, SheetNotFound,
+                   Hint, Hints, UserRole)
 from .form import Form
 
 logger = logging.getLogger('piccel')
@@ -181,10 +183,14 @@ class LescaDashboard(SheetPlugin):
             result = self.collect_progress_notes(participant_id,
                                                  self.progress_note_extractions())
         elif selected_column == 'Study_Status':
-            pkeys = {'Participant_ID' : participant_id}
-            result, result_label = form_update_or_new('Participants_Status',
-                                                      self.workbook,
-                                                      primary_keys=pkeys)
+            if self.workbook.user_role < UserRole.MANAGER:
+                show_info_message_box('Only a MANAGER user can change '\
+                                      'the study status')
+            else:
+                pkeys = {'Participant_ID' : participant_id}
+                result, result_label = form_update_or_new('Participants_Status',
+                                                          self.workbook,
+                                                          primary_keys=pkeys)
 
         if result is not None and isinstance(result, Form):
             form = result

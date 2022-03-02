@@ -1182,7 +1182,7 @@ class FormSection:
                 if not i.is_valid():
                     logger.debug2('item %s is invalid', i)
         signal = ['section_invalid', 'section_valid'][self.validity]
-        logger.debug('%s notifies %s', self, signal)
+        logger.debug2('%s notifies %s', self, signal)
         self.notifier.notify(signal)
 
     def to_dict(self):
@@ -1887,7 +1887,7 @@ class FormItem:
 
     def set_input_str(self, s, key=None, use_callback=True,
                       force=False):
-        logger.debug('%s: set input str of key %s', self, key)
+        logger.debug2('%s: set input str of key %s', self, key)
 
         if key is None:
             assert(len(self.keys)==1)
@@ -3615,7 +3615,7 @@ class VariablePropertyEditor(QtWidgets.QWidget,
                                        var_node.pdict['key_tr'], 'English'),
                                       (self.initValueLineEdit,
                                        var_node.pdict, 'init_value')]:
-            logger.debug('link line edit for %s', key)
+            logger.debug2('link line edit for %s', key)
             link_line_edit(field, dest_dict, key, read_only=self.read_only)
 
 class SectionTransitionPropertyEditor(QtWidgets.QWidget,
@@ -4548,10 +4548,17 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
             self.selector.open()
 
     def variable_is_locked(self, node):
+        if node.node_type not in ['item_single_var', 'variable', 'item']:
+            return
+
         if node.node_type in ['item_single_var', 'variable']:
-            var_name = node.label
+            var_names = [node.label]
         else:
-            return False
+            var_names = (child.label for child in node.childItems
+                         if child.node_type == node.child_type)
+
+        return any(v in self.locked_variable_types for v in var_names)
+
     def open_menu(self, position):
         # indexes = self.sender().selectedIndexes()
         model_index = self.tree_view.indexAt(position)
@@ -4569,7 +4576,8 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
             f = partial(self.model.convert_item_to_multi_var, model_index)
             action.triggered.connect(on_act(f))
 
-        if model_item.node_type in ['item_single_var', 'item']:
+        if (model_item.node_type in ['item_single_var', 'item'] and
+            model_item.label not in self.locked_variable_types):
             action = right_click_menu.addAction(self.text_item_icon,
                                                 self.tr("To text-only"))
             f = partial(self.model.convert_item_to_text_only, model_index)
@@ -4607,8 +4615,7 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         #                                        model_index))
 
         if model_item.node_type not in ['add_button', 'form', 'transition_rules']\
-            and (model_item.node_type not in ['item_single_var', 'variable'] or \
-                 model_item.label not in self.locked_variable_types):
+            and not self.variable_is_locked(model_item):
             act_del = right_click_menu.addAction(self.delete_icon,
                                                  self.tr("Delete"))
             act_del.triggered.connect(on_act(partial(self.model.removeRow,
@@ -5089,7 +5096,7 @@ class SectionTransitionNode(Node):
     def transition_rule(self):
         return (self.cfg['predicate'], self.cfg['next_section'])
 
-class ItemNode(Node):
+class ___ItemNode(Node):
     def __init__(self, label, locked_variable_types=None, parent=None):
         self.locked_variable_types = (locked_variable_types
                                       if locked_variable_types is not None
@@ -5574,8 +5581,8 @@ class TreeModel(QAbstractItemModel):
                           parent_node.childItems[-1].node_type == 'add_button')
         default_irow = self.rowCount(parent_index) - int(has_add_button)
         irow = if_none(irow, default_irow)
-        logger.debug('Add node %s of type %s to %s at irow=%d', label, node_type,
-                     parent_node.label, irow)
+        logger.debug2('Add node %s of type %s to %s at irow=%d', label, node_type,
+                      parent_node.label, irow)
 
         child_type = None
         if is_container:
@@ -5616,8 +5623,8 @@ class TreeModel(QAbstractItemModel):
         for child in section_node.childItems:
             if child.node_type in ['item', 'item_single_var']:
                 all_keys.extend(self.all_item_keys(child))
-        logger.debug('All keys of section %s: %s', section_node.label,
-                     all_keys)
+        logger.debug2('All keys of section %s: %s', section_node.label,
+                      all_keys)
         return all_keys
 
     def all_sibling_keys(self, node):
@@ -5855,7 +5862,11 @@ class TreeModel(QAbstractItemModel):
         elif item.node_type in ['choice', 'variable',
                                 'item', 'item_single_var', 'item_text',
                                 'section']:
-            return Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled | \
+            if (item.node_type in ['item', 'item_single_var'] and
+                item.label in self.locked_variable_types):
+                return Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled | default_flags
+            else:
+                return Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled | \
                 Qt.ItemIsEditable | default_flags
         elif item.node_type == 'form':
             return Qt.ItemIsDropEnabled | Qt.ItemIsEditable | default_flags

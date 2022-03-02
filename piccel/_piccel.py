@@ -171,7 +171,8 @@ class Encrypter:
         if self.salt_bytes is not None:
             salt_hex = self.salt_bytes.hex()
         else:
-            salt_hex = None
+            raise Exception('salt undefined')
+        logger.debug2('Encryption - save salt %s', salt_hex)
         return json.dumps({
             'salt_hex' : salt_hex,
             'crypted_content' :  (self.fernet.encrypt(content_str.encode())
@@ -195,8 +196,12 @@ class Encrypter:
 
         if not old_format and self.salt_bytes is not None and \
            self.salt_bytes.hex() != content['salt_hex']:
-            logger.warning('Different salt found in content to decrypt. '\
-                           'Resquest password to build encryption key again.')
+            if self.salt_bytes is None:
+                logger.warning('Different salt found in content to decrypt. '\
+                               'Resquest password to build encryption key again.')
+            else:
+                logger.warning('No salt found in content to decrypt. '\
+                               'Resquest password to build encryption key again.')
             if self.get_password is None:
                 raise IOError('Cannot decrypt because cannot get password again')
             else:
@@ -311,8 +316,11 @@ class PasswordVault:
         if key is None:
             self.check(user, password_str)
             salt = bytes.fromhex(self.vault[PasswordVault.SALT_HEX_KEY])
+            logger.debug('Return encrypter using password and salt %s',
+                         salt)
             encrypter = Encrypter(password_str, salt)
         else:
+            logger.debug('Return encrypter from key')
             encrypter = Encrypter.from_key(key)
         return encrypter
 
@@ -952,6 +960,10 @@ class DataSheet:
                 last_key = next(iter(first_section.items[-1].keys))
                 self.plugin.hint(last_key, '')
 
+            df_test = self.empty_df_from_master()
+            for view in views.values():
+                view(df_test)
+
             self.set_views(views)
             default_view = self.plugin.default_view()
             if default_view is not None:
@@ -966,7 +978,9 @@ class DataSheet:
                          'from code:\n%s\nException:\n%s\nStack:\n%s',
                          self.label, code_str, repr(e),
                          format_exc())
-            self.indicate_invalid_plugin(repr(e))
+            message = ('Could load plugin of sheet %s, exception: %s' %
+                       (self.label, repr(e)))
+            self.indicate_invalid_plugin(message)
             return
 
         # There has been an exception during first call but second call
@@ -3795,6 +3809,81 @@ class InvalidJobCode(Exception):
 class InvalidJobs(Exception):
     def __init__(self, invalid_jobs):
         self.invalid_jobs = invalid_jobs
+class NoJobInputDefined(Exception): pass
+
+job_source_header = \
+"""
+import sys
+import os
+import os.path as op
+import pandas as pd
+import numpy as np
+from piccel import (Job, UserRole, InputType, show_critical_message_box,
+                    show_info_message_box)
+from piccel.logging import logger
+from datetime import datetime
+
+from PyQt5 import QtGui
+"""
+class JobBase:
+    def __init__(self, workbook):
+        self.workbook = workbook
+
+    def who_can_run(self):
+        return None
+
+    def min_access_level(self):
+        return UserRole.ADMIN
+
+    def icon(self):
+        return QtGui.QIcon(':/icons/bolt_icon')
+
+    def description(self):
+        return None
+
+    def run(self, ask_input, **kwargs):
+        pass
+
+class Job(JobBase):
+
+    @classmethod
+    def get_code_str(cls):
+        return (job_source_header + \
+                strip_indent(inspect.getsource(cls)
+                             .replace(cls.__name__, 'CustomJob')))
+
+class ExportJob(Job):
+    def who_can_run(self):
+        return None
+
+    def min_access_level(self):
+        return UserRole.MANAGER
+
+    def description(self):
+        return 'Export plugin code and form for all sheets'
+
+    def icon(self):
+        return QtGui.QIcon(':/icons/settings_export_icon')
+
+    def run(self, ask_input, export_root_dir=None):
+        if export_root_dir is None:
+            export_root_dir = ask_input('Output folder',
+                                        input_type=InputType.FOLDER)
+        if export_root_dir is None:
+            return
+
+        date_fmt = '%Y_%m_%d_%Hh%Mm%Ss'
+        export_dir = op.join(export_root_dir,
+                             "%s_%s" % (self.workbook.label,
+                                        datetime.now().strftime(date_fmt)))
+        if op.exists(export_dir):
+            show_critical_message_box("Don't spam this button so hard!")
+            return
+        else:
+            os.makedirs(export_dir)
+
+        self.workbook.export_all_logic(export_dir)
+        show_info_message_box('Logic successfully exported to %s' % export_dir)
 
 class WorkBook:
     """
@@ -3934,7 +4023,7 @@ class WorkBook:
         wb.save_configuration_file(cfg_bfn)
         return wb
 
-    def set_job_code(self, job_name, job_code_str):
+    def set_job_code(self, job_name, job_code_str, save=False):
         logger.debug('Set code of job %s', job_name)
         success = True
         if not job_name.isidentifier():
@@ -3942,16 +4031,19 @@ class WorkBook:
 
         # TODO also consider job.check() to invalidate it
         self.jobs_code[job_name] = job_code_str
-        self.save_job_code(job_name, job_code_str)
+        if save:
+            self.save_job_code(job_name, job_code_str)
+        self.jobs_invalidity.pop(job_name, None)
         try:
             self.jobs[job_name] = self.job_from_code(job_name, job_code_str)
         except InvalidJobCode as e:
+            logger.warning('Code of job %s is invalid', job_name)
             self.jobs_invalidity[job_name] = e.args[0]
             success = False
         return success
 
     def delete_job(self, job_name):
-        logger.debug('Save code of job %s', job_name)
+        logger.debug('Delete code of job %s', job_name)
         if job_name not in self.jobs_code:
             raise JobNotFound(job_name)
 
@@ -3962,6 +4054,7 @@ class WorkBook:
         self.filesystem.remove(op.join(jobs_folder, '%s.py' % job_name))
 
     def save_job_code(self, job_name, job_code_str):
+        assert(self.logged_in)
         logger.debug('Save code of job %s', job_name)
         jobs_folder = op.join(self.data_folder, WorkBook.JOBS_FOLDER)
         self.filesystem.save(op.join(jobs_folder, '%s.py' % job_name),
@@ -3971,26 +4064,30 @@ class WorkBook:
         return self.jobs_code[job_name]
 
     def job_from_code(self, job_name, job_code_str):
+        logger.debug('Import code of job %s', job_name)
         try:
-            job = module_from_code_str(job_code_str)
+            job_module = module_from_code_str(job_code_str)
         except:
             raise InvalidJobCode('Error during code import:\n %s' % format_exc())
 
-        errors = []
-        for func in ('who_can_run', 'min_access_level', 'icon', 'run'):
-            try:
-                if not eval('callable(job.%s)' % func):
-                    errors.append('%s is not a function' % func)
-            except AttributeError:
-                errors.append('job %s does not implement function %s' % \
-                              (job_name, func))
+        logger.debug('Create instance of job %s', job_name)
+        try:
+            job = job_module.CustomJob(self)
+        except AttributeError:
+            raise InvalidJobCode('Class CustomJob not found in job %s' % job_name)
+
+        logger.debug('Check instance of job %s', job_name)
+        if not isinstance(job, Job):
+            raise InvalidJobCode('job %s does not use a subclass of piccel.Job' %
+                                 job_name)
 
         def _check_func(job, fname, check_result, expected_result_descr):
             error_message = None
             try:
                 result = eval('job.%s()' % fname)
             except:
-                error_message = 'Error in function %s of job %s' % (fname, job_name)
+                error_message = ('Error in function %s of job %s' %
+                                 (fname, job_name))
                 details = format_exc()
                 logger.error('%s\n%s', error_message, details)
                 return error_message
@@ -4001,7 +4098,12 @@ class WorkBook:
                 logger.error('%s\n%s', error_message)
             return error_message
 
+        errors = []
         for func, validation, rdescr in [('who_can_run',
+                                          lambda r: (r is None or
+                                                     isinstance(r, str)),
+                                          'string or None'),
+                                         ('description',
                                           lambda r: (r is None or
                                                      isinstance(r, str)),
                                           'string or None'),
@@ -4013,10 +4115,10 @@ class WorkBook:
                                           lambda r: (r is None or
                                                      isinstance(r, QtGui.QIcon)),
                                           'QIcon or None')]:
+            logger.debug('Check method %s of job %s', func, job_name)
             err_msg = _check_func(job, func, validation, rdescr)
             if err_msg is not None:
                 errors.append(err_msg)
-
 
         if len(errors) > 0:
             message = ('Error while setting job %s:\n%s' %
@@ -4032,7 +4134,10 @@ class WorkBook:
                 raise JobDisabled(job_name)
             elif job_name not in self.jobs:
                 raise JobNotFound(job_name)
-        self.jobs[job_name].run(self, ask_input, **job_kwargs)
+        def error_input(*args, **kwargs):
+            raise NoJobInputDefined()
+        ask_input = if_none(ask_input, error_input)
+        self.jobs[job_name].run(ask_input, **job_kwargs)
 
     def add_linked_workbook(self, cfg_fn, sheet_filters):
         self.linked_book_fns[cfg_fn] = sheet_filters
@@ -4423,41 +4528,7 @@ class WorkBook:
     def dump_default_job(self, export_job_name):
         assert(export_job_name == '__job_export_logic__')
 
-        def who_can_run():
-            return None
-
-        def min_access_level():
-            return UserRole.MANAGER
-
-        def icon():
-            return QtGui.QIcon(':/icons/settings_export_icon')
-
-        def run(workbook, ask_input, export_root_dir=None):
-            if export_root_dir is None:
-                export_root_dir = ask_input('Output folder',
-                                            input_type=InputType.FOLDER)
-            if export_root_dir is None:
-                return
-
-            date_fmt = '%Y_%m_%d_%Hh%Mm%Ss'
-            export_dir = op.join(export_root_dir,
-                                 "%s_%s" % (workbook.label,
-                                            datetime.now().strftime(date_fmt)))
-            if op.exists(export_dir):
-                show_critical_message_box("Don't spam this button so hard!")
-                return
-            else:
-                os.makedirs(export_dir)
-
-            workbook.export_all_logic(export_dir)
-            show_info_message_box('Logic successfully exported to %s' % export_dir)
-
-        job_code = (job_code_header + '\n\n' +
-                    '\n\n'.join(strip_indent(inspect.getsource(f))
-                                for f in (who_can_run, min_access_level,
-                                          icon, run)))
-
-        self.set_job_code(export_job_name, job_code)
+        self.set_job_code(export_job_name, ExportJob.get_code_str(), save=True)
 
     def load_jobs(self, first_attempt=True):
 
@@ -4465,6 +4536,7 @@ class WorkBook:
         export_job_name = '__job_export_logic__'
         if not self.filesystem.exists(op.join(jobs_folder,
                                               '%s.py' % export_job_name)):
+            logger.debug('Dump default job %s', export_job_name)
             self.dump_default_job(export_job_name)
 
         self.jobs.clear()
@@ -4479,8 +4551,10 @@ class WorkBook:
                                                             job_fn))
 
                 if (first_attempt and
-                    not self.set_job_code(job_name, job_code_str) and
+                    not self.set_job_code(job_name, job_code_str, save=False) and
                     job_name.startswith('__')):
+                    logger.debug('Error while setting %s. Dump it again.',
+                                 job_name)
                     self.dump_default_job(job_name)
                     self.load_jobs(first_attempt=False)
 
@@ -4660,20 +4734,9 @@ class WorkBook:
         return self.filesystem.dir_is_empty(form_folder)
 
 
-job_code_header = \
-"""
-import sys
-import os
-import os.path as op
-import pandas as pd
-import numpy as np
-from piccel import (UserRole, InputType, show_critical_message_box,
-                    show_info_message_box)
-from piccel.logging import logger
-from datetime import datetime
-
-from PyQt5 import QtGui
-"""
+class InputTestJob(Job):
+    def run(self, ask_input):
+        self.workbook.hack_report = ask_input('Report')
 
 class TestWorkBook(unittest.TestCase):
 
@@ -4689,27 +4752,15 @@ class TestWorkBook(unittest.TestCase):
     def test_job(self):
         fs = LocalFileSystem(self.tmp_dir)
         wb_id = 'Participant_info'
-        data_folder = 'pinfo_files'
-        wb = WorkBook(wb_id, data_folder, fs)
+        wb = WorkBook.create(wb_id, fs, access_password='HIOgb',
+                             admin_password='6789341', admin_user='TV')
 
-        def who_can_run():
-            return None
+        wb.set_job_code('a_job', InputTestJob.get_code_str(), save=True)
 
-        def min_access_level():
-            return UserRole.ADMIN
+        def fake_input(prompt):
+            return 'Job done'
+        wb.run_job('a_job', fake_input)
 
-        def icon():
-            return None
-
-        def run(workbook, ask_password):
-            workbook.hack_report = 'Job done'
-
-        job_code = (job_code_header + '\n\n' +
-                    '\n\n'.join(strip_indent(inspect.getsource(f))
-                                for f in (who_can_run, min_access_level,
-                                          icon, run)))
-        wb.set_job_code('a_job', job_code)
-        wb.run_job('a_job')
         self.assertEqual(wb.hack_report, 'Job done')
 
     def test_job_bad_name(self):
@@ -4729,7 +4780,7 @@ class TestWorkBook(unittest.TestCase):
         cfg_bfn = protect_fn(wb_id) + '.psh'
 
         code = 'baaad code'
-        wb.set_job_code('a_job', code)
+        wb.set_job_code('a_job', code, save=True)
         self.assertTrue('a_job' in wb.jobs_invalidity)
         self.assertRaises(JobDisabled, wb.run_job, 'a_job')
         self.assertEqual(wb.get_job_code('a_job'), code)
@@ -4740,24 +4791,12 @@ class TestWorkBook(unittest.TestCase):
 
         self.assertRaises(JobDisabled, wb2.run_job, 'a_job')
 
-        def who_can_run():
-            return None
+        class NewJob(Job):
+            def run(self, ask_input):
+                self.workbook.hack_report = 'Job done'
 
-        def min_access_level():
-            return UserRole.ADMIN
-
-        def icon():
-            return None
-
-        def run(workbook, ask_password):
-            workbook.hack_report = 'Job done'
-
-        job_code = (job_code_header + '\n\n' +
-                    '\n\n'.join(strip_indent(inspect.getsource(f))
-                                for f in (who_can_run, min_access_level,
-                                          icon, run)))
-
-        wb2.set_job_code('a_job', job_code)
+        job_code = NewJob.get_code_str()
+        wb2.set_job_code('a_job', job_code, save=True)
         self.assertEqual(wb2.get_job_code('a_job'), job_code)
         wb2.run_job('a_job')
 
@@ -4807,23 +4846,12 @@ class TestWorkBook(unittest.TestCase):
         wb.add_sheet(sh2)
         wb.add_sheet(sh3)
 
-        def who_can_run():
-            return None
+        class AJob(Job):
+            def run(self, ask_input):
+                self.workbook.hack_report = 'Job done'
 
-        def min_access_level():
-            return UserRole.ADMIN
-
-        def icon():
-            return None
-
-        def run(workbook, ask_password):
-            workbook.hack_report = 'Job done'
-
-        job_code = (job_code_header + '\n\n' +
-                    '\n\n'.join(strip_indent(inspect.getsource(f))
-                                for f in (who_can_run, min_access_level,
-                                          icon, run)))
-        wb.set_job_code('a_job', job_code)
+        job_code = AJob.get_code_str()
+        wb.set_job_code('a_job', job_code, save=True)
 
         export_folder = op.join(self.tmp_dir, 'wb_logic')
         os.makedirs(export_folder)
@@ -4892,23 +4920,12 @@ class TestWorkBook(unittest.TestCase):
         wb.add_sheet(sh2)
         wb.add_sheet(sh3)
 
-        def who_can_run():
-            return None
+        class AJob(Job):
+            def run(self, ask_input):
+                self.workbook.hack_report = 'Job done'
 
-        def min_access_level():
-            return UserRole.ADMIN
-
-        def icon():
-            return None
-
-        def run(workbook, ask_password):
-            workbook.hack_report = 'Job done'
-
-        job_code = (job_code_header + '\n\n' +
-                    '\n\n'.join(strip_indent(inspect.getsource(f))
-                                for f in (who_can_run, min_access_level,
-                                          icon, run)))
-        wb.set_job_code('a_job', job_code)
+        job_code = AJob.get_code_str()
+        wb.set_job_code('a_job', job_code, save=True)
 
         export_folder = op.join(self.tmp_dir, 'wb_logic')
         os.makedirs(export_folder)
@@ -4944,23 +4961,13 @@ class TestWorkBook(unittest.TestCase):
                              admin_password=self.admin_pwd, admin_user=user)
         cfg_bfn = protect_fn(wb_id) + '.psh'
 
-        def who_can_run():
-            return None
+        class AJob(Job):
+            def run(self, ask_input):
+                self.workbook.hack_report = 'Job done'
 
-        def min_access_level():
-            return UserRole.ADMIN
+        job_code = AJob.get_code_str()
+        wb.set_job_code('a_job', job_code, save=True)
 
-        def icon():
-            return None
-
-        def run(workbook, ask_password):
-            workbook.hack_report = 'Job done'
-
-        job_code = (job_code_header + '\n\n' +
-                    '\n\n'.join(strip_indent(inspect.getsource(f))
-                                for f in (who_can_run, min_access_level,
-                                          icon, run)))
-        wb.set_job_code('a_job', job_code)
         wb.delete_job('a_job')
 
         wb2 = WorkBook.from_configuration_file(op.join(self.tmp_dir, cfg_bfn))
@@ -4978,7 +4985,7 @@ class TestWorkBook(unittest.TestCase):
                              admin_password=self.admin_pwd, admin_user=user)
         cfg_bfn = protect_fn(wb_id) + '.psh'
 
-        wb.set_job_code('a_job', 'baaad code')
+        wb.set_job_code('a_job', 'baaad code', save=True)
         wb.delete_job('a_job')
         self.assertFalse('a_job' in wb.jobs_code)
         self.assertFalse('a_job' in wb.jobs_invalidity)
@@ -4993,30 +5000,21 @@ class TestWorkBook(unittest.TestCase):
     def test_job_ask_password(self):
         fs = LocalFileSystem(self.tmp_dir)
         wb_id = 'Participant_info'
-        data_folder = 'pinfo_files'
-        wb = WorkBook(wb_id, data_folder, fs)
+        wb = WorkBook.create(wb_id, fs, access_password='HIOgb',
+                             admin_password='6789341', admin_user='TV')
 
-        def who_can_run():
-            return None
+        class AskJob(Job):
+            def run(self, ask_input):
+                self.workbook.hack_pwd = ask_input('Gimme',
+                                                   input_type=InputType.PASSWORD)
 
-        def min_access_level():
-            return UserRole.ADMIN
+        wb.set_job_code('a_job', AskJob.get_code_str(), save=True)
 
-        def icon():
-            return None
-
-        def run(workbook, ask_password):
-            workbook.hack_pwd = ask_password('Gimme')
-
-        job_code = (job_code_header + '\n\n' +
-                    '\n\n'.join(strip_indent(inspect.getsource(f))
-                                for f in (who_can_run, min_access_level,
-                                          icon, run)))
-        wb.set_job_code('a_job', job_code)
-
-        def _ask_password(prompt):
+        def _ask_input(prompt, input_type):
+            assert(input_type == InputType.PASSWORD)
             return 'pwd'
-        wb.run_job('a_job', _ask_password)
+
+        wb.run_job('a_job', _ask_input)
 
         self.assertEqual(wb.hack_pwd, 'pwd')
 
@@ -5029,23 +5027,11 @@ class TestWorkBook(unittest.TestCase):
                              admin_password=self.admin_pwd, admin_user=user)
         cfg_bfn = protect_fn(wb_id) + '.psh'
 
-        def who_can_run():
-            return None
+        class AJob(Job):
+            def run(self, ask_input):
+                self.workbook.hack_report = 'Job done'
 
-        def min_access_level():
-            return UserRole.ADMIN
-
-        def icon():
-            return None
-
-        def run(workbook, ask_password):
-            workbook.hack_report = 'Job done'
-
-        job_code = (job_code_header + '\n\n' +
-                    '\n\n'.join(strip_indent(inspect.getsource(f))
-                                for f in (who_can_run, min_access_level,
-                                          icon, run)))
-        wb.set_job_code('a_job', job_code)
+        wb.set_job_code('a_job', AJob.get_code_str(), save=True)
 
         wb2 = WorkBook.from_configuration_file(op.join(self.tmp_dir, cfg_bfn))
         wb2.decrypt(self.access_pwd)
@@ -5531,7 +5517,6 @@ class TestWorkBook(unittest.TestCase):
                          set(pp_df['Participant_ID']))
         self.assertTrue((dashboard_df['Eval'] == 'eval_todo').all())
 
-        pp
         logger.debug('utest: Add new participant CE90002')
         # Add new pp
         form = sh_pp.form_new_entry()
@@ -8243,7 +8228,7 @@ class PiccelApp(QtWidgets.QApplication):
                             in self.logic.workbook.jobs.items()]
                 job_defs.extend((job_name, self.warning_icon)
                                 for job_name in self.logic.workbook.jobs_invalidity)
-
+                logger.debug('job_defs to show in menu: %s', job_defs)
                 for job_name, job_icon in job_defs:
                     if (job_name.startswith('__') and
                         self.logic.workbook.user_role < UserRole.ADMIN):
@@ -8357,7 +8342,8 @@ class PiccelApp(QtWidgets.QApplication):
 
         def _set_job(content):
             logger.debug('Set workbook job from editor')
-            self.logic.workbook.set_job_code(job_name, content)
+            self.logic.workbook.set_job_code(job_name, content, save=True)
+            self.refresh_job_buttons()
             return True
 
         job_code = self.logic.workbook.jobs_code[job_name]
@@ -8365,15 +8351,26 @@ class PiccelApp(QtWidgets.QApplication):
                                            submit=_set_job)
         self.job_editor.show()
 
-    def ask_input(self, label, input_type=InputType.TEXT):
-        ask_box = QtWidgets.QDialog(self.current_widget)
+    def on_job_item_click(self, item):
+        job_name = item.data(QtCore.Qt.UserRole)[len('Job_'):]
+        try:
+            self.logic.workbook.run_job(job_name, self.ask_input)
+        except:
+            msg = 'Error while running job %s:' % job_name
+            details = format_exc()
+            logger.error('%s\n%s', msg, details)
+            show_critical_message_box(msg, detailed_text=details)
+
+    def ask_input(self, label, input_type=InputType.TEXT, parent_widget=None):
+        ask_box = QtWidgets.QDialog(parent=parent_widget)
         input_ui = ui.single_input_dialog_ui.Ui_Dialog()
         input_ui.setupUi(ask_box)
         input_ui.input_label.setText(label)
         input_ui.select_button.hide()
         if input_type==InputType.PASSWORD:
             input_ui.input_field.setEchoMode(QtWidgets.QLineEdit.Password)
-        elif input_type in [InputType.FOLDER, InputType.FILE_OUT, InputType.FILE_IN]:
+        elif input_type in [InputType.FOLDER, InputType.FILE_OUT,
+                            InputType.FILE_IN]:
             input_ui.select_button.show()
             f_select = partial(self.ask_file, input_type, input_ui.input_field)
             input_ui.select_button.clicked.connect(f_select)
@@ -8401,16 +8398,6 @@ class PiccelApp(QtWidgets.QApplication):
         if path is not None and path != '':
             dest_field.setText(path)
 
-    def on_job_item_click(self, item):
-        job_name = item.data(QtCore.Qt.UserRole)[len('Job_'):]
-        try:
-            self.logic.workbook.run_job(job_name, ask_input=self.ask_input)
-        except:
-            msg = 'Error while running job %s:' % job_name
-            details = format_exc()
-            logger.error('%s\n%s', msg, details)
-            show_critical_message_box(msg, detailed_text=details)
-
     def refresh_job_buttons(self):
         self._workbook_ui.job_list.clear()
 
@@ -8424,6 +8411,11 @@ class PiccelApp(QtWidgets.QApplication):
                 icon = job.icon()
                 item = QtWidgets.QListWidgetItem(icon, '')
                 item.setData(QtCore.Qt.UserRole, 'Job_%s' % job_name)
+                description = job.description()
+                if description is not None and len(description) > 0:
+                    item.setData(QtCore.Qt.ToolTipRole, description)
+                else:
+                    item.setData(QtCore.Qt.ToolTipRole, job_name)
                 self._workbook_ui.job_list.addItem(item)
 
     def on_import_job(self):
@@ -8437,7 +8429,8 @@ class PiccelApp(QtWidgets.QApplication):
                 job_code = fin.read()
             try:
                 (self.logic.workbook
-                 .set_job_code(op.splitext(op.basename(fn))[0], job_code))
+                 .set_job_code(op.splitext(op.basename(fn))[0], job_code,
+                               save=True))
                 self.refresh_job_buttons()
             except InvalidJobCode as e:
                 show_critical_message_box('Error in job code',
@@ -8574,6 +8567,7 @@ class PiccelApp(QtWidgets.QApplication):
                 self.open_configuration_file(fn)
             elif fn.endswith('.form'):
                 self.form_editor = FormFileEditor(fn)
+                self.refresh()
             else:
                 show_critical_message_box('Cannot open %s' % fn)
 
@@ -8788,12 +8782,16 @@ class PiccelApp(QtWidgets.QApplication):
         return self.workbook_screen
 
     def show(self):
-        self.current_widget.show()
-        if self.form_editor is not None:
-            self.form_editor.show()
+        self.refresh()
+        # self.current_widget.show()
+        # if self.form_editor is not None:
+        #     self.form_editor.show()
 
     def refresh(self):
         self.current_widget.hide()
         logger.debug('Current logic state: %s',
                      PiccelLogic.STATES[self.logic.state])
         self.current_widget = self.screen_show[self.logic.state]()
+        if self.form_editor is not None:
+            self.form_editor.hide()
+            self.form_editor.show()
