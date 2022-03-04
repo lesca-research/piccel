@@ -26,6 +26,8 @@
         <file alias="form_import_icon">database-import.svg</file>
         <file alias="form_delete_icon">trash.svg</file>
         <file alias="text_icon">file-text.svg</file>
+        <file alias="form_unchecked_text_icon">file-text_unchecked.svg</file>
+        <file alias="form_checked_text_icon">file-text_checked.svg</file>
         <file alias="file_open_icon">file-download.svg</file>
         <file alias="file_create_icon">file-plus.svg</file>
         <file alias="workbook_icon">book.svg</file>

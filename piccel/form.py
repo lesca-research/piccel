@@ -4602,7 +4602,8 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
             test_menu = right_click_menu.addMenu(self.tr('Test'))
             for role in UserRole:
                 act_test = test_menu.addAction(self.tr('As %s') % role.name)
-                act_test.triggered.connect(on_act(partial(self.test_form, role)))
+                act_test.triggered.connect(on_act(partial(self.test_form,
+                                                          role)))
 
             act_test = right_click_menu.addAction(self.import_icon,
                                                   self.tr('Import'))

@@ -146,8 +146,6 @@ class Encrypter:
     # TODO: deprecate key -- not safe to store it
     #       Always rely on password, use password manager if needed
     def __init__(self, password, salt_bytes=None, key=None, get_password=None):
-
-        self.salt_bytes = None
         self.get_password = get_password
 
         if key is None:
@@ -155,6 +153,7 @@ class Encrypter:
             self.key = derive_key(password, self.salt_bytes)
         else:
             self.key = key
+            self.salt_bytes = salt_bytes
         self.fernet = Fernet(self.key)
 
     def set_password_input_func(self, password_func):
@@ -164,8 +163,8 @@ class Encrypter:
         return self.key.decode()
 
     @staticmethod
-    def from_key(key_str):
-        return Encrypter(None, None, key_str.encode())
+    def from_key(key_str, salt_bytes):
+        return Encrypter(None, salt_bytes, key_str.encode())
 
     def encrypt_str(self, content_str):
         if self.salt_bytes is not None:
@@ -313,18 +312,17 @@ class PasswordVault:
             raise UnknownUser(user)
 
     def get_encrypter(self, user, password_str, key=None):
+        salt = bytes.fromhex(self.vault[PasswordVault.SALT_HEX_KEY])
         if key is None:
             self.check(user, password_str)
-            salt = bytes.fromhex(self.vault[PasswordVault.SALT_HEX_KEY])
+
             logger.debug('Return encrypter using password and salt %s',
                          salt)
             encrypter = Encrypter(password_str, salt)
         else:
             logger.debug('Return encrypter from key')
-            encrypter = Encrypter.from_key(key)
+            encrypter = Encrypter.from_key(key, salt_bytes=salt)
         return encrypter
-
-
 
 class IndexedPattern:
     def __init__(self, pattern, index_start=0):
@@ -4029,7 +4027,6 @@ class WorkBook:
         if not job_name.isidentifier():
             raise InvalidJobName(job_name)
 
-        # TODO also consider job.check() to invalidate it
         self.jobs_code[job_name] = job_code_str
         if save:
             self.save_job_code(job_name, job_code_str)
