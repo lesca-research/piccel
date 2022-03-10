@@ -31,21 +31,27 @@ class LescaDashboard(SheetPlugin):
 
     def sheets_to_watch(self):
         to_watch = ['Participants_Status']
-        for sheet_label in ['Progress_Notes_Common', 'Progress_Notes']:
-            if self.workbook.has_sheet(sheet_label):
-                to_watch.append(sheet_label)
-                self.progress_notes_sheets.append(sheet_label)
+        if self.workbook is None:
+            to_watch.extend(['Progress_Notes_Common', 'Progress_Notes'])
+        else:
+            for sheet_label in ['Progress_Notes_Common', 'Progress_Notes']:
+                if self.workbook.has_sheet(sheet_label):
+                    to_watch.append(sheet_label)
+                    self.progress_notes_sheets.append(sheet_label)
         return super(LescaDashboard, self).sheets_to_watch() + to_watch
 
     def after_workbook_load(self):
         # TODO: utest proper status tracking scenarios
         # with multiple progress note sheets
+        logger.info('LescaDashboard plugin, after_workbook_load...')
         super().after_workbook_load()
-        self.init()
+        if self.all_watched():
+            logger.info('LescaDashboard plugin, watched sheets OK, call init...')
+            self.init()
+        else:
+            logger.info('LescaDashboard plugin, watched sheets NOT ok')
 
     def init(self):
-        if not self.update_watched_sheets():
-            return
 
         pg_sheet_label = self.progress_notes_sheets[0]
         logger.info('Tracking of participant status watches %s '\
@@ -96,8 +102,12 @@ class LescaDashboard(SheetPlugin):
         logger.debug('Lesca Dashboard update from sheet %s', sheet_source.label)
 
         if self.df is None:
-            logger.debug('df is none... call init')
-            self.init()
+            if self.all_watched():
+                logger.debug('df is none... call init')
+                self.init()
+            else:
+                logger.debug('df is none but not all watched sheets available, '\
+                             'cannot call init')
             return # self.df initialized only after full load of workbook
                    # cannot do much here anyway...
 
@@ -606,6 +616,7 @@ class ParticipantStatusTracker:
             'User' : 'user_name',
             'Timestamp_Submission' : 'datetime'
         }
+        logger.debug('ParticipantStatusTracker: check sheets')
         errors = check_sheet(self.workbook, self.participant_sheet_label,
                              expected_fields=expected_fields)
         expected_fields = {
@@ -681,6 +692,7 @@ class PollTracker:
     def check(self):
         # TODO insure that poll_answer_column is in fields
         #      (field can have any type)
+        logger.debug('PollTracker: check sheets')
         return check_sheet(self.workbook, self.interview_label,
                            expected_fields={'Participant_ID' : 'text'})
 
@@ -904,15 +916,23 @@ class Choice:
         self.vtype = vtype
         self.choices = choices
 
-def check_sheet(workbook, sheet_label, expected_fields=None):
+def check_sheet(workbook, sheet_label, expected_fields=None,
+                expected_views=None):
 
     errors = []
     expected_fields = if_none(expected_fields, {})
     expected_columns = set(expected_fields.keys())
-    try:
-        sheet = workbook[sheet_label]
-    except SheetNotFound:
+    expected_views = if_none(expected_views, [])
+
+    if not workbook.has_sheet(sheet_label):
         return ['Sheet %s not found' % sheet_label]
+
+    sheet = workbook[sheet_label]
+
+    missing_views = set(expected_views).difference(sheet.views)
+    if len(missing_views) > 0:
+        errors.append('Missing views in sheet %s: %s' % \
+                      (sheet_label, ', '.join(missing_views)))
     # missing_columns = ', '.join(sorted(expected_columns
     #                                    .difference(sheet.df.columns)))
     # if len(missing_columns) > 0:
@@ -1001,6 +1021,7 @@ class EmailledPollTracker:
             'User' : 'user_name',
             'Timestamp_Submission' : 'datetime'
         }
+        logger.debug('EmailledPollTracker: check sheets')
         errors = check_sheet(self.workbook, self.email_sheet_label,
                              expected_fields=expected_fields)
         errors.extend(check_sheet(self.workbook, self.poll_label,
@@ -1123,6 +1144,8 @@ class InterviewTracker:
             raise DataConsistencyError(errors)
 
     def check(self):
+
+        logger.debug('InterviewTracker: check sheets...')
 
         errors = []
         expected_fields = {

@@ -46,7 +46,13 @@ class SheetPlugin:
            - df = sheet.get_df_view(view_label)
         """
         self.sheet = data_sheet
+        self._all_watched = None
         self.watched_sheets = set()
+
+    def all_watched(self):
+        if self._all_watched is None:
+            self.update_watched_sheets()
+        return self._all_watched
 
     def set_workbook(self, workbook):
         logger.debug('Plugin of sheet %s, set workbook: %s',
@@ -58,16 +64,28 @@ class SheetPlugin:
         self.update_watched_sheets()
 
     def update_watched_sheets(self):
-        logger.debug('update_watched_sheets in plugin of %s', self.sheet.label)
+        logger.debug('update_watched_sheets for plugin of %s', self.sheet.label)
+        to_watch = self.sheets_to_watch()
+
+        if len(to_watch) == 0:
+            if not self._all_watched:
+                self._all_watched = True
+                self.sheet.invalidate_cached_views()
+            return True
+
         if self.workbook is None or not self.workbook.logged_in:
             return False
 
+        if self._all_watched:
+            return True
+
         new_to_watch = []
-        all_watched = True
-        for sheet_label in self.sheets_to_watch():
+        _all_watched = True
+        for sheet_label in to_watch:
             if sheet_label not in self.watched_sheets:
                 if self.workbook.has_sheet(sheet_label):
-                    logger.debug('wb have %s, watching it', sheet_label)
+                    logger.debug('Plugin of %s will watch sheet %s',
+                                 self.sheet.label, sheet_label)
                     sheet = self.workbook[sheet_label]
                     # if sheet is None:
                     #     raise SheetNotFound('Sheet %s not found in workbook %s',
@@ -75,10 +93,23 @@ class SheetPlugin:
                     if sheet is not None:
                         new_to_watch.append(sheet)
                 else:
-                    logger.debug('wb does not have %s', sheet_label)
-                    all_watched = False
+                    logger.debug('Plugin of %s cannot watch unavailable sheet %s',
+                                 self.sheet.label, sheet_label)
+                    _all_watched = False
         self._watch_sheets(new_to_watch)
-        return all_watched
+
+        if _all_watched:
+            for sheet_label in self.watched_sheets:
+                if not self.workbook[sheet_label].plugin.all_watched():
+                    logger.debug('Plugin of %s: watch chain not fully ok because of %s',
+                                 self.sheet.label, sheet_label)
+                    _all_watched = False
+                    break
+
+        if not self._all_watched and _all_watched:
+            self._all_watched = True
+            self.sheet.invalidate_cached_views()
+        self._all_watched = _all_watched
 
     def _on_entry_append(self, sheet, entry_df=None):
         self.update(sheet, entry_df)

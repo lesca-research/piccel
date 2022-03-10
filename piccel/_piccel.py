@@ -910,9 +910,10 @@ class DataSheet:
             df = self.df
             # fm = lambda x : x.loc[[x.index.max()]]
             # latest = df.groupby(level=0, group_keys=False).apply(fm)
-        latest = df.groupby(level=0, group_keys=False).tail(1).sort_index()
-        if latest.empty:
-            latest = self.empty_df_from_master()
+
+        latest = self.empty_df_from_master()
+        if df is not None:
+            latest = df.groupby(level=0, group_keys=False).tail(1).sort_index()
         return latest
 
     def get_plugin_code(self):
@@ -1535,7 +1536,6 @@ class DataSheet:
                                     label)
         return label
 
-    @if_plugin_valid
     def after_workbook_load(self):
         try:
             self.plugin.after_workbook_load()
@@ -1661,6 +1661,12 @@ class DataSheet:
     @if_plugin_valid
     def get_df_view(self, view_label=None):
 
+        if not self.plugin.all_watched():
+            logger.debug('Cannot retrieve view %s for sheet %s because of '\
+                         'missing sheets to watch', view_label, self.label)
+            from IPython import embed; embed()
+            return pd.DataFrame(['Missing watched sheets'], columns=['Error'])
+
         if view_label is None:
             view_label = self.default_view
         cached_views = self.cached_views
@@ -1675,7 +1681,8 @@ class DataSheet:
                 if '__fn__' in view_df.columns:
                     view_df = view_df.drop(columns=['__fn__'])
             else:
-                logger.debug('Update cached view "%s": None', view_label)
+                logger.debug('Sheet %s: Update cached view "%s": None', self.label,
+                             view_label)
             cached_views[view_label] = view_df
 
         return view_df
@@ -4684,6 +4691,8 @@ class WorkBook:
 
         self.sheets[sheet.label] = sheet
 
+        self.after_workbook_load()
+
     @check_role(UserRole.EDITOR)
     def save_sheet_entry(self, sheet_label, entry_df):
         assert(self.encrypter is not None)
@@ -5442,10 +5451,6 @@ class TestWorkBook(unittest.TestCase):
                     title={'French':'Common progress note'})
         sh_pnote = DataSheet('Progress_Notes', form, user=user)
 
-        wb.add_sheet(sh_pnote)
-        wb.add_sheet(sh_eval)
-        wb.add_sheet(sh_pp)
-
         # Create dashboard sheet that gets list of participants from p_info
         # and compute evaluation status. Action is a string report.
         class DashboardEval(LescaDashboard):
@@ -5454,8 +5459,11 @@ class TestWorkBook(unittest.TestCase):
                     ['Evaluation']
 
             def after_workbook_load(self):
-                self.eval = self.workbook['Evaluation']
                 super(DashboardEval, self).after_workbook_load()
+
+            def init(self):
+                self.eval = self.workbook['Evaluation']
+                super().init()
 
             def refresh_entries(self, pids):
                 super().refresh_entries(pids)
@@ -5505,9 +5513,14 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('utest: Create dashboard')
         sh_dashboard = DataSheet('Dashboard')
         sh_dashboard.set_plugin_from_code(DashboardEval.get_code_str())
-        wb.add_sheet(sh_dashboard)
 
-        wb.after_workbook_load()
+        wb.add_sheet(sh_dashboard)
+        wb.add_sheet(sh_pnote)
+        wb.add_sheet(sh_eval)
+        wb.add_sheet(sh_pp)
+
+        print('after add pp sheet')
+        # from IPython import embed; embed()
 
         dashboard_df = sh_dashboard.get_df_view()
         self.assertEqual(set(dashboard_df.index.values),
@@ -5962,11 +5975,6 @@ class TestWorkBook(unittest.TestCase):
                     title={'French':'Common progress note'})
         sh_pnote = DataSheet('Progress_Notes', form, user=user)
 
-        wb.add_sheet(sh_pnote)
-        wb.add_sheet(sh_plan)
-        wb.add_sheet(sh_eval)
-        wb.add_sheet(sh_pp)
-
         # Create dashboard sheet that gets list of participants from p_info
         # and compute evaluation status.
         class DashboardInterview(LescaDashboard):
@@ -5975,8 +5983,11 @@ class TestWorkBook(unittest.TestCase):
                 self.date_now = None
 
             def after_workbook_load(self):
-                self.eval_tracker = InterviewTracker('Eval', self.workbook)
                 super(DashboardInterview, self).after_workbook_load()
+
+            def init(self):
+                self.eval_tracker = InterviewTracker('Eval', self.workbook)
+                super().init()
 
             def sheets_to_watch(self):
                 return super(DashboardInterview, self).sheets_to_watch() + \
@@ -5994,11 +6005,15 @@ class TestWorkBook(unittest.TestCase):
         sh_dashboard.set_plugin_from_code(DashboardInterview.get_code_str())
         wb.add_sheet(sh_dashboard)
 
-        wb.after_workbook_load()
+        wb.add_sheet(sh_pnote)
+        wb.add_sheet(sh_plan)
+        wb.add_sheet(sh_eval)
+        wb.add_sheet(sh_pp)
+
+        # wb.after_workbook_load()
 
         df = wb['Dashboard'].get_df_view()
-        self.assertEqual(set(df.index.values),
-                         set(pp_df['Participant_ID']))
+        self.assertEqual(set(df.index.values), set(pp_df['Participant_ID']))
         self.assertTrue((df['Eval'] == 'eval_not_done').all())
 
         pid = 'CE0001'
