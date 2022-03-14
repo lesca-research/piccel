@@ -89,6 +89,7 @@ class FormJsonHook:
         return parsed_dict
 
 class InconsistentForms(Exception): pass
+class UnknownSection(Exception): pass
 
 class Form:
     """
@@ -689,6 +690,8 @@ function snakeCaseToCamelCase(s) {
                 raise InvalidSection(self.section_path[-1])
             next_section_name = self.current_section.next()
             if next_section_name is not None:
+                if next_section_name not in self.sections:
+                    raise UnknownSection(next_section_name)
                 self.section_path.append(next_section_name)
                 self.current_section = self[next_section_name]
                 self.current_section_name = next_section_name
@@ -802,7 +805,7 @@ function snakeCaseToCamelCase(s) {
                 return self.format(k,v)
         if not html:
             pat = '%s (%s): %s'
-            nb = '\n'
+            nl = '\n'
         else:
             pat = '<b>%s</b> (<i>%s</i>): %s'
             nl = '<br>'
@@ -1287,7 +1290,7 @@ class Translator():
         self.check_translations(key, translations)
         self.trs[key].update(translations)
 
-    def register(self, key, translations):
+    def register(self, key, translations, auto_fix_unknown_language=True):
         """
         key (str)
         translations (dict langague_str:translation_str)
@@ -1299,7 +1302,7 @@ class Translator():
         elif translations=='':
             translations = {l:'' for l in self.supported_languages}
 
-        self.check_translations(key, translations)
+        self.check_translations(key, translations, auto_fix=auto_fix_unknown_language)
 
         self.trs[key] = translations
 
@@ -1323,9 +1326,13 @@ class Translator():
             else:
                 logger.warning('Fixing supported language %s to include ' \
                                'languages in translation of key %s: %s',
-                               (', '.join(self.supported_languages), key,
-                                ', '.join(translations.keys())))
-                self.supported_languages.update(diff)
+                               ', '.join(self.supported_languages), key,
+                               ', '.join(translations.keys()))
+                for language in diff:
+                    self.add_supported_language(language)
+        for language in self.supported_languages:
+            if language not in translations:
+                translations[language] = ''
 
     def set_language(self, language):
         if language not in self.supported_languages:
@@ -2920,7 +2927,7 @@ class TestFormItem(unittest.TestCase):
             ('Agree_participation', [False, True, False])
         ]))
 
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel('DEBUG2')
 
     def test_no_key(self):
         item = FormItem(None, supported_languages={'English'},
@@ -3055,6 +3062,20 @@ class TestFormItem(unittest.TestCase):
         item.set_input_str(int_str)
         self.assertFalse(item.is_valid())
 
+    def test_integer_with_choices(self):
+        item = FormItem({'Grade':None}, vtype='int', title='',
+                        choices={
+                            '1' : {'English' : 'One'},
+                            '3' : {'English' : 'Three'}
+                        },
+                        supported_languages={'English'},
+                        default_language='English')
+        item.set_input_str('Three')
+        self.assertEqual(item.get_value(), 3)
+
+        item.set_input_str('Four')
+        self.assertFalse(item.is_valid())
+
     def test_number_unformat(self):
         item = FormItem({'Weight_kg':None},
                         vtype='number', supported_languages={'English'},
@@ -3132,7 +3153,7 @@ class TestFormItem(unittest.TestCase):
                         default_language='English')
         date = datetime(2020, 4, 24, 13, 37)
         DATETIME_FORMAT = '%Y-%m-%d %H:%M:%S'
-        date_str = date.strftime(DATETIME_FORMAT)
+        date_str = date.strftime(FormItem.DATETIME_FORMAT)
         item.set_input_str(date_str)
         self.assertEqual(item.get_value(), date)
         item.set_input_str('2020--9/1 13:50')
@@ -3152,6 +3173,19 @@ class TestFormItem(unittest.TestCase):
         self.assertEqual(item.get_value(), True)
         item.set_input_str('Nope')
         self.assertEqual(item.get_value(), False)
+
+    # TODO test that bad choices values are detected at init
+    def test_boolean_bad_choices(self):
+        item = FormItem({'exclude':None},
+                        vtype='boolean',
+                        choices={'Faaalse':{'English':'Nope'},
+                                 'True':{'English':'Yep'}},
+                        supported_languages={'English'},
+                        default_language='English')
+        item.set_input_str('Nope')
+        self.assertFalse(item.is_valid())
+        item.set_input_str('Yep')
+        self.assertEqual(item.get_value(), True)
 
     def test_boolean(self):
         item = FormItem({'exclude':None},
@@ -3328,15 +3362,26 @@ class TestTranslator(unittest.TestCase):
     def test_unsupported_language_register(self):
         tr = Translator(default_language='English',
                         supported_languages={'English'})
-        tr.register('keyword1', '')
+        tr.register('keyword1', {'English' : 'yep'})
         self.assertRaises(LanguageError, tr.register, 'keyword2',
-                          {'French' : 'un mot'})
+                          {'French' : 'un mot'},
+                          auto_fix_unknown_language=False)
+
+        tr.register('keyword2', {'German' : 'ein...'},
+                    auto_fix_unknown_language=True)
+        tr.set_language('German')
+        self.assertEqual(tr['keyword2'], 'ein...')
+        self.assertEqual(tr['keyword1'], '')
+        tr.set_language('English')
+        self.assertEqual(tr['keyword2'], '')
+        self.assertEqual(tr['keyword1'], 'yep')
 
     def test_extra_translation(self):
         tr = Translator(default_language='English',
                         supported_languages={'English'})
         self.assertRaises(LanguageError, tr.register, 'keyword1',
-                          {'English': 'a word', 'French' : 'un mot'})
+                          {'English': 'a word', 'French' : 'un mot'},
+                          auto_fix_unknown_language=False)
 
     def test_unsupported_language(self):
         tr = Translator(default_language='English',
@@ -3541,6 +3586,8 @@ class ItemPropertyEditor(QtWidgets.QWidget,
         self.allowEmptyCheckBox.show()
         self.regExprLabel.show()
         self.regExprLineEdit.show()
+        self.regExprInvalidHintLabel.show()
+        self.regExprInvalidHintLineEdit.show()
         self.textNbLinesLabel.show()
         self.textNbLinesSpinBox.show()
         self.generatorLabel.show()
@@ -3578,6 +3625,8 @@ class ItemPropertyEditor(QtWidgets.QWidget,
             self.allowEmptyCheckBox.hide()
             self.regExprLabel.hide()
             self.regExprLineEdit.hide()
+            self.regExprInvalidHintLabel.hide()
+            self.regExprInvalidHintLineEdit.hide()
             self.textNbLinesLabel.hide()
             self.textNbLinesSpinBox.hide()
             self.generatorLabel.hide()
@@ -3628,12 +3677,13 @@ class SectionTransitionPropertyEditor(QtWidgets.QWidget,
     def attach(self, transition_node):
         link_line_edit(self.criterionLineEdit, transition_node.pdict, 'predicate',
                        read_only=self.read_only)
-        next_section_choices = ['__submit__'] + \
+        next_section_choices = ['', '__submit__'] + \
                                 [s for s in (transition_node.parent().parent()
                                              .parent().child_labels())
                                  if s != transition_node.parent().parent().label]
         link_combo_box(self.nextSectionComboBox, transition_node.pdict,
                        'next_section', choices=next_section_choices,
+                       empty_str_is_None=True,
                        editable=not self.read_only)
 
 import traceback, sys
@@ -4090,6 +4140,7 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
             radio_button.toggled.connect(ChoiceProcess(language))
             if language == form.current_section.tr.language:
                 radio_language_group.button(idx).setChecked(True)
+
         # Set button actions
         def prev_sec():
             # gen_section = lambda : set_section_ui(form.previous_section(),
@@ -4100,8 +4151,15 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
             logger.debug('Prev_sec, hide widget of %s, ',
                          form.current_section_name)
             section_widgets[form.current_section_name].hide()
-            set_section_ui(form.previous_section(),
-                           form.to_previous_section())
+            try:
+                set_section_ui(form.previous_section(),
+                               form.to_previous_section())
+            except:
+                msg = 'Error while getting previous section'
+                details = format_exc()
+                logger.error('%s\n%s', msg, details)
+                show_critical_message_box(msg, detailed_text=details)
+
             self.scroll_section.ensureVisible(0, 0)
         self.button_previous.clicked.connect(prev_sec)
 
@@ -4115,8 +4173,19 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
             logger.debug('Next_sec, hide widget of %s',
                          form.current_section_name)
             section_widgets[form.current_section_name].hide()
-            set_section_ui(form.next_section(),
-                           form.to_next_section())
+            try:
+                set_section_ui(form.next_section(),
+                               form.to_next_section())
+            except UnknownSection as e:
+                show_critical_message_box('Cannot find destination section <b>%s</b> '\
+                                          'as defined in transitions of %s' % \
+                                          (e.args[0], form.current_section_name))
+            except:
+                msg = 'Error while getting next section'
+                details = format_exc()
+                logger.error('%s\n%s', msg, details)
+                show_critical_message_box(msg, detailed_text=details)
+
             self.scroll_section.ensureVisible(0, 0)
 
         self.button_next.clicked.connect(next_sec)
@@ -4148,11 +4217,11 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
             self.button_submit.setFocus()
             try:
                 form.submit()
-            except Exception as e:
-                msg = 'Error occured while submitting:\n%s' % repr(e)
-                logger.error(msg)
-                logger.error(format_exc())
-                show_critical_message_box(msg)
+            except:
+                msg = 'Error while submitting form'
+                details = format_exc()
+                logger.error('%s\n%s', msg, details)
+                show_critical_message_box(msg, detailed_text=details)
             close_callback(self)
 
         self.button_submit.clicked.connect(submit)
@@ -4228,10 +4297,22 @@ class FormFileEditor(QtWidgets.QWidget, ui.form_editor_file_ui.Ui_Form):
             self._end_tmp_form_session()
 
     def on_save(self):
-        self.save_form(self.form_editor.get_form(), ask_as=False)
+        try:
+            self.save_form(self.form_editor.get_form(), ask_as=False)
+        except:
+            msg = 'Error while saving form'
+            details = format_exc()
+            logger.error('%s\n%s', msg, details)
+            show_critical_message_box(msg, detailed_text=details)
 
     def on_save_as(self):
-        self.save_form(self.form_editor.get_form(), ask_as=True)
+        try:
+            self.save_form(self.form_editor.get_form(), ask_as=True)
+        except:
+            msg = 'Error while saving form'
+            details = format_exc()
+            logger.error('%s\n%s', msg, details)
+            show_critical_message_box(msg, detailed_text=details)
 
     def on_open(self):
         if self.pending_changes_tracker.process_pending():
@@ -5078,317 +5159,6 @@ class SectionTransitionsNode(Node):
             'next_section_definition' : [child.transition_rule()
                                          for child in self.childItems[:-1]]
         }
-
-class SectionTransitionNode(Node):
-    def __init__(self, label, transition_cfg, parent=None):
-
-        #if isinstance(transition_cfg, str):
-        #    transition_cfg = ('True', transition_cfg)
-
-        # label = ('submit' if transition_cfg[1] == '__submit__'
-        #          else 'to %s' % transition_cfg[1])
-        super(SectionTransitionNode, self).__init__(label, parent)
-
-        self.cfg = {
-            'predicate' : transition_cfg[0],
-            'next_section' : transition_cfg[1]
-        }
-
-    def transition_rule(self):
-        return (self.cfg['predicate'], self.cfg['next_section'])
-
-class ___ItemNode(Node):
-    def __init__(self, label, locked_variable_types=None, parent=None):
-        self.locked_variable_types = (locked_variable_types
-                                      if locked_variable_types is not None
-                                      else {})
-        super(ItemNode, self).__init__(label, parent)
-        self.state = 'base'
-
-    def set_pdict(self, item_dict):
-
-        self.key_tr = None
-        self.init_values = None
-
-        if len(item_dict['keys']) > 0:
-            self.text_only = False
-            if len(item_dict['keys']) == 1:
-                self.key_tr = item_dict['keys'][self.label]
-                init_values = item_dict.pop('init_values')
-                self.init_value = (init_values[self.label]
-                                   if init_values is not None else None)
-        else:
-            self.text_only = True
-        item_dict.pop('keys')
-
-        self.item_dict = item_dict
-        self.check_locked_var_types()
-
-    def check_locked_var_types(self):
-        self.type_locked = False
-        for var_name in self.all_keys():
-            if var_name in self.locked_variable_types:
-                self.type_locked = True
-                self.item_dict['vtype'] = self.locked_variable_types[var_name]
-                break
-
-    def setData(self, column, value):
-        if value not in self.parent().all_keys():
-            success = super(ItemNode, self).setData(column, value)
-            if self.variables_node() is None:
-                self.check_locked_var_types()
-            return success
-        else:
-            return False
-
-    def removeChildren(self, position=0, count=None):
-        count = count if count is not None else len(self.childItems) - position
-
-        if position < 0 or position + count > len(self.childItems):
-            return False
-        saved_key_tr, saved_init_value = None, None
-        for row in reversed(range(count)):
-            child = self.childItems[position + row]
-            if isinstance(child, VariablesNode):
-                nb_sub_children = child.childCount()
-                if nb_sub_children == 2:
-                    saved_key_tr = child.childItems[0].cfg['key_tr'].copy()
-                    saved_init_value = child.childItems[0].cfg['init_value']
-                elif nb_sub_children > 2:
-                    logger.warning('Cannot retrieve key translation and '\
-                                   'init value from several deleted variables')
-                break
-        success = super(ItemNode, self).removeChildren(position, count)
-        if success and saved_key_tr is not None:
-            self.key_tr = saved_key_tr
-            self.init_value = saved_init_value
-
-        return success
-
-    def add_variables_node(self, keys=None, init_values=None):
-        if self.variables_node() is None:
-            keys = if_none(keys, {self.label : self.key_tr})
-            init_values = if_none(init_values, {self.label : self.init_value})
-            variables_node = VariablesNode(keys, init_values, parent=self)
-            self.childItems.append(variables_node)
-            return True
-        return False
-
-    def variables_node(self):
-        for child in self.childItems:
-            if isinstance(child, VariablesNode):
-                return child
-        return None
-
-    def new_label(self, label_pat='Var_%d'):
-        return self.parent().new_child_label(label_pat)
-
-    def choices_node(self):
-        for child in self.childItems:
-            if isinstance(child, ChoicesNode):
-                return child
-        return None
-
-    def to_dict(self):
-        var_dict = {'keys' : {}, 'init_values' : None}
-        variables_node = self.variables_node()
-        if variables_node is None:
-            if not self.text_only:
-                var_dict['keys'][self.label] = self.key_tr
-                if self.init_value is not None:
-                    var_dict['init_values'] = {self.label : self.init_value}
-            else:
-                var_dict['keys'] = None
-                var_dict['init_values'] = None
-        else:
-            var_dict = variables_node.to_dict()
-
-        choices_node = self.choices_node()
-        if choices_node is not None:
-            other_choice_node = choices_node.other_choice_node()
-        else:
-            other_choice_node = None
-        return {
-            **self.item_dict,
-            **var_dict,
-            **{'choices' : (choices_node.to_dict()
-                            if choices_node is not None else None),
-               'other_choice_label' : (other_choice_node.choice_tr.copy()
-                                       if other_choice_node is not None
-                                       else None)}
-        }
-
-    def to_json(self):
-        return json.dumps({**{'label':self.label,
-                              'parent_label':self.parent().label},
-                           **self.to_dict()})
-
-    def __add_choices_node(self, force=False):
-        if force or self.choices_node() is None:
-            choices_node = ChoicesNode({}, parent=self)
-            self.childItems.insert(0, choices_node)
-            return True
-        return False
-
-    def all_keys(self):
-        variables_node = self.variables_node()
-        if variables_node is None:
-            return {self.label}
-        else:
-            return variables_node.all_keys()
-
-
-class ChoicesNode(Node):
-    def __init__(self, choices, parent=None):
-        super(ChoicesNode, self).__init__('choices', parent)
-        for choice_value, choice_tr in choices.items():
-            self.childItems.append(ChoiceNode(choice_value, choice_tr,
-                                              parent=self))
-
-    def to_dict(self):
-        return {child.label : child.choice_tr for child in self.childItems[:-1]
-                if isinstance(child, ChoiceNode)}
-
-    def insertChildren(self, position, nb_children):
-        if position < 0 or position > len(self.childItems):
-            return False
-
-        self.childItems[position:(position+nb_children-1)] = \
-            [self._new_choice_node() for i in range(nb_children)]
-
-        return True
-
-    def other_choice_node(self):
-        for child in self.childItems:
-            if isinstance(child, OtherChoiceNode):
-                return child
-        return None
-
-    def add_other_choice_node(self):
-        if self.other_choice_node() is None:
-            other_choice_node = OtherChoiceNode({'French': 'Autre :',
-                                                 'English' : 'Other'},
-                                                parent=self)
-            self.childItems.insert(0, other_choice_node)
-            return True
-        return False
-
-    def children_labels(self):
-        return set(child.label for child in self.childItems
-                   if not isinstance(child, AddChoiceNode))
-
-    def new_child_label(self, label_pat='choice_%d', label=None):
-        used_choices = self.all_choice_labels
-        if label is not None and label not in used_choices:
-            return label
-
-        i_choice = len(self.childItems) - 1
-        while 'choice_%d' % i_choice in used_choices:
-            i_choice += 1
-        choice = 'choice_%d' % i_choice
-
-    def _new_choice_node(self):
-        return ChoiceNode(self.new_child_label(),
-                          {'French': 'Choix %d' % i_choice,
-                           'English' : 'Choice %d' % i_choice},
-                          parent=self)
-
-class VariablesNode(Node):
-    def __init__(self, keys_tr, init_values, parent=None):
-        super(VariablesNode, self).__init__('variables', parent)
-
-        for key, key_tr in keys_tr.items():
-            init_value = (init_values.get(key, None)
-                          if init_values is not None else None)
-            self.childItems.append(VarNode(key, key_tr, init_value, parent=self))
-
-        self.childItems.append(AddVarNode(self))
-
-    def all_keys(self):
-        return {child.label for child in self.childItems
-                if not isinstance(child, AddVarNode)}
-
-    def to_dict(self):
-        init_values = {child.label : child.cfg['init_value']
-                       for child in self.childItems[:-1]}
-        if all(value is None for value in init_values):
-            init_values = None
-        return {
-            'keys' : {
-                child.label : child.cfg['key_tr'] for child in self.childItems[:-1]
-            },
-            'init_values' : init_values
-        }
-
-    def insertChildren(self, position, nb_children):
-        if position < 0 or position > len(self.childItems):
-            return False
-
-        self.childItems[position:position+nb_children-1] = \
-            [self._new_var_node() for i in range(nb_children)]
-
-        self.parent().check_locked_var_types()
-        return True
-
-    def _new_var_node(self):
-        var_name =  self.parent().new_label()
-
-        return VarNode(var_name, {'French': 'Nom de variable %d' % i_var,
-                                  'English' : 'Name of variable %d' % i_var},
-                       None, parent=self)
-
-class VarNode(Node):
-    def __init__(self, label, key_tr, init_value, parent=None):
-        super(VarNode, self).__init__(label, parent)
-        key_tr = {'French' : '', 'English' : ''}  if key_tr is None else key_tr
-        self.cfg = {
-            'key_tr' : key_tr,
-            'init_value' : init_value
-        }
-
-        self.state = 'base'
-
-    def setData(self, column, value, force=False):
-        success = super(VariablesNode, self).setData(column, value)
-        self.parent().parent().check_locked_var_types()
-        return success
-
-    def new_label(self, label_pat='Var_%d'):
-        return self.parent().parent().new_child_label(label_pat)
-
-
-class ChoiceNode(Node):
-    def __init__(self, label, choice_tr, parent=None):
-        super(ChoiceNode, self).__init__(label, parent)
-        self.choice_tr = choice_tr
-
-    def new_label(self, label_pat='choice_%d'):
-        return self.parent().new_child_label(label_pat)
-
-class OtherChoiceNode(Node):
-    def __init__(self, choice_tr, parent=None):
-        super(OtherChoiceNode, self).__init__('[Other]', parent)
-        self.choice_tr = choice_tr
-
-class AddSectionNode(Node):
-    def __init__(self, parent=None):
-        super(AddSectionNode, self).__init__('+', parent)
-
-class AddItemNode(Node):
-    def __init__(self, parent=None):
-        super(AddItemNode, self).__init__('+', parent)
-
-class AddVarNode(Node):
-    def __init__(self, parent=None):
-        super(AddVarNode, self).__init__('+', parent)
-
-class AddSectionTransitionNode(Node):
-    def __init__(self, parent=None):
-        super(AddSectionTransitionNode, self).__init__('+', parent)
-
-class AddChoiceNode(Node):
-    def __init__(self, parent=None):
-        super(AddChoiceNode, self).__init__('+', parent)
 
 def make_unique_label(label, existing_labels):
     idx = 0
