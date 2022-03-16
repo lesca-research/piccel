@@ -173,11 +173,15 @@ content_html = \
  </table>
 </p>
 """
-
+import os.path as op
 from piccel import ReportWidget
+from piccel.form import ImgWidget
 from piccel import ui
 from piccel.plugin_tools import ProgressNoteEntry, ParticipantProgressNotes
 from datetime import datetime
+import tempfile
+
+import pygraphviz as pgv
 
 def main():
     app = QApplication(sys.argv)
@@ -194,23 +198,38 @@ def main():
     app.setStyle('Fusion')
     app.setStyleSheet(ui.main_qss.main_style)
 
-    pns = ParticipantProgressNotes('CE0001', '2022/02/22')
-    pns.add(ProgressNoteEntry(datetime.now(),
-                              'me',
-                              'General',
-                              {'Consent' : 'Ok', 'Tech_Tuto' : 'Yep'},
-                              [('Details 1', 'looooon details........'),
-                               ('Review', 'It was fine in the end')]))
+    # pns = ParticipantProgressNotes('CE0001', '2022/02/22')
+    # pns.add(ProgressNoteEntry(datetime.now(),
+    #                           'me',
+    #                           'General',
+    #                           {'Consent' : 'Ok', 'Tech_Tuto' : 'Yep'},
+    #                           [('Details 1', 'looooon details........'),
+    #                            ('Review', 'It was fine in the end')]))
 
-    pns.add(ProgressNoteEntry(datetime.now(),
-                              'me',
-                              'PreScreening',
-                              {'Available' : 'Yes', 'Eligible' : 'Yep'},
-                              [('Details', 'Sooo looooon prescr details........')]))
+    # pns.add(ProgressNoteEntry(datetime.now(),
+    #                           'me',
+    #                           'PreScreening',
+    #                           {'Available' : 'Yes', 'Eligible' : 'Yep'},
+    #                           [('Details', 'Sooo looooon prescr details........')]))
 
-    report = pns.to_report('Project Common - {Participant_ID}')
+    # report = pns.to_report('Project Common - {Participant_ID}')
 
-    print(report.content)
-    report = ReportWidget(report.content, report.header, report.footer)
-    report.show()
+    # print(report.content)
+    # report = ReportWidget(report.content, report.header, report.footer)
+    # report.show()
+
+
+    G = pgv.AGraph()
+    G = pgv.AGraph(strict=False, directed=True)
+    G.add_node("__submit__")
+    G.add_node("Section1")
+    G.add_edge("Section1", "__submit__")
+    G.layout(prog='dot')
+    tmp_img_dir = tempfile.mkdtemp()
+    tmp_img = op.join(tmp_img_dir, 'graph.png')
+    G.draw(tmp_img)
+
+    sections_graph_img = ImgWidget(tmp_img)
+    sections_graph_img.show()
     sys.exit(app.exec_())
+

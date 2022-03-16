@@ -47,6 +47,12 @@ class SectionNotFound(Exception): pass
 class InvalidSectionMove(Exception): pass
 class BadLabelFormat(Exception): pass
 
+try:
+    import pygraphviz as pgv
+except ImportError:
+    logger.info('pygraphviz not available. Graph of transitions between '\
+                'section graphs will not be available.')
+    pgv = None
 
 class FormSelector(QtWidgets.QDialog):
     def __init__(self, form, selection_mode, parent=None):
@@ -3705,14 +3711,6 @@ class SectionTransitionPropertyEditor(QtWidgets.QWidget,
                        empty_str_is_None=True, editable=not self.read_only,
                        callback=validation)
 
-    def validate_section(self, transition_node, transition_node_index, form_model,
-                         section_choice):
-        logger.debug('validate transition to %s', section_choice)
-        if section_choice is None or section_choice == '':
-            form_model.indicate_invalid_node(transition_node,
-                                             transition_node_index)
-        return True
-
 import traceback, sys
 
 class PendingChangesTracker:
@@ -4385,6 +4383,19 @@ class FormFileEditor(QtWidgets.QWidget, ui.form_editor_file_ui.Ui_Form):
 
 from PyQt5.QtCore import pyqtSignal
 
+class ImgWidget(QtWidgets.QWidget):
+    def __init__(self, img_fn):
+        super().__init__()
+        hbox = QtWidgets.QHBoxLayout(self)
+        pixmap = QtGui.QPixmap(img_fn)
+        label = QtWidgets.QLabel(self)
+        label.setPixmap(pixmap)
+        hbox.addWidget(label)
+        self.setLayout(hbox)
+
+        # self.setWindowTitle('Image with PyQt')
+
+
 class on_act:
     """ To connected with QAction.trigger to ignore check state """
     def __init__(self, callback):
@@ -4402,6 +4413,8 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         self.setupUi(self)
 
         self.selection_mode = selection_mode
+
+        self.sections_graph_img = None
 
         self.locked_variable_types = (locked_variable_types
                                       if locked_variable_types is not None
@@ -4675,6 +4688,41 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
 
         return any(v in self.locked_variable_types for v in var_names)
 
+    def show_sections_graph(self):
+        form_index = self.model.index(0, 0, parent=QModelIndex())
+        form_node = self.model.getItem(form_index)
+        G = pgv.AGraph()
+        G = pgv.AGraph(strict=False, directed=True)
+        G.add_node("__submit__")
+        first_section = True
+        for section_node in form_node.childItems:
+            if section_node.node_type == 'section':
+                if first_section:
+                    G.add_node(section_node.label, shape='box')
+                else:
+                    G.add_node(section_node.label)
+                first_section=False
+
+                transition_nodes = next((c.childItems
+                                         for c in section_node.childItems
+                                         if c.node_type=='transition_rules'),
+                                        [])
+                for transition_node in transition_nodes:
+                    if transition_node.node_type == 'transition_rule':
+                        dest = if_none(transition_node.pdict['next_section'],
+                                       '#NA#')
+                        G.add_edge(section_node.label, dest)
+
+        G.layout()
+        tmp_img_dir = tempfile.mkdtemp()
+        tmp_img = op.join(tmp_img_dir, 'graph.png')
+        G.draw(tmp_img, prog='dot')
+
+        if self.sections_graph_img is not None:
+            self.sections_graph_img.close()
+        self.sections_graph_img = ImgWidget(tmp_img)
+        self.sections_graph_img.show()
+
     def open_menu(self, position):
         # indexes = self.sender().selectedIndexes()
         model_index = self.tree_view.indexAt(position)
@@ -4706,14 +4754,21 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
                 f = partial(self.add_choices_to_item, model_index)
                 action.triggered.connect(on_act(f))
 
-        if isinstance(model_item, ChoicesNode) and \
-           model_item.other_choice_node() is None:
-            action = right_click_menu.addAction(self.choices_icon,
-                                                self.tr("Add Other choice"))
-            f = partial(self.add_other_choice_node_to_choices_node, model_index)
-            action.triggered.connect(on_act(f))
+        # if isinstance(model_item, ChoicesNode) and \
+        #    model_item.other_choice_node() is None:
+        #     action = right_click_menu.addAction(self.choices_icon,
+        #                                         self.tr("Add Other choice"))
+        #     f = partial(self.add_other_choice_node_to_choices_node, model_index)
+        #     action.triggered.connect(on_act(f))
 
         if model_item.node_type == 'form':
+
+            if pgv is not None:
+                act_sec_graph = (right_click_menu
+                                 .addAction(self.import_icon,
+                                            self.tr('Transitions graph')))
+                (act_sec_graph.triggered
+                 .connect(on_act(self.show_sections_graph)))
 
             test_menu = right_click_menu.addMenu(self.tr('Test'))
             for role in UserRole:
@@ -4841,9 +4896,21 @@ class Node(object):
         return [c.label for c in self.childItems
                 if c.node_type == self.child_type]
 
+    # def indicate_invalid_child(self, child):
+    #     self.error_hint += 'Subnode %s invalid.' % child.label
+    #     new_state = self.state
+    #     if self.
+
     def validate(self):
         new_state = self.state
         self.error_hint = ''
+
+        # for child in self.childItems:
+        #     child.validate()
+        #     if child.state == 'invalid':
+        #         new_state = 'invalid'
+        #         self.error_hint += 'Subnode %s invalid.' % child.label
+
         if self.node_type == 'transition_rule':
             next_section = self.pdict['next_section']
             logger.debug('Check %s, next_section=%s', self.label, next_section)
@@ -4851,10 +4918,11 @@ class Node(object):
             all_sections = self.parent().parent().parent().child_labels()
             print('!!!', all_sections)
             if (next_section is None or next_section == '' or
-                (next_section not in all_sections and next_section != '__submit__')):
+                (next_section not in all_sections and
+                 next_section != '__submit__')):
                 new_state = 'invalid'
                 self.error_hint += 'Next section not found.'
-            else:
+            elif len(self.error_hint) == 0:
                 new_state = 'base'
 
         state_changed = False
@@ -4863,7 +4931,8 @@ class Node(object):
             logger.debug('New state of node %s: %s', self.label, new_state)
             self.state = new_state
         else:
-            logger.debug('State of node %s unchanged (%s)', self.label, new_state)
+            logger.debug('State of node %s unchanged (%s)',
+                         self.label, new_state)
         return state_changed
 
     def to_dict(self, selected_only=False):
@@ -4879,9 +4948,11 @@ class Node(object):
             }
 
         elif self.node_type == 'section':
+            transitions_node = next(c for c in self.childItems
+                                    if c.node_type=='transition_rules')
             return {
                 **pdict_copy,
-                **self.childItems[0].to_dict(),
+                **transitions_node.to_dict(),
                 **{'label' : self.label,
                    'items' : [i.to_dict() for i in self.childItems
                               if (i.node_type.startswith('item') and \
@@ -5153,7 +5224,8 @@ class TreeModel(QAbstractItemModel):
         if not node.validate():
             self.dataChanged.emit(node_index, node_index,
                                   [QtCore.Qt.ForegroundRole,
-                                   QtCore.Qt.BackgroundRole])
+                                   QtCore.Qt.BackgroundRole,
+                                   QtCore.Qt.ToolTipRole])
 
     def set_node_selection(self, state, node_index, apply_to_children=True):
         node = self.getItem(node_index)
@@ -5445,10 +5517,14 @@ class TreeModel(QAbstractItemModel):
 
         if role not in [Qt.DisplayRole, Qt.EditRole, role != Qt.FontRole,
                         QtCore.Qt.DecorationRole, QtCore.Qt.BackgroundRole,
-                        QtCore.Qt.ForegroundRole]:
+                        QtCore.Qt.ForegroundRole, QtCore.Qt.ToolTipRole]:
             return None
 
         node = self.getItem(index)
+
+        if (role == QtCore.Qt.ToolTipRole and node.error_hint is not None
+            and node.error_hint != ''):
+            return node.error_hint
 
         if role == Qt.DisplayRole or role == Qt.EditRole:
             return node.data(0)
@@ -5803,11 +5879,32 @@ class TreeModel(QAbstractItemModel):
                 node.parent().pdict['type_locked'] = True
                 node.parent().pdict['vtype'] = locked_type
 
+    def process_renamed_section_label(self, old_label, new_label):
+        form_index = self.index(0, 0, parent=QModelIndex())
+        for irow_form in range(self.rowCount(form_index)):
+            section_index = self.index(irow_form, 0, parent=form_index)
+            section_node = self.getItem(section_index)
+            for irow_section in range(self.rowCount(section_index)):
+                transitions_index = self.index(irow_section, 0,
+                                               parent=section_index)
+                transitions_node = self.getItem(transitions_index)
+                if transitions_node.node_type == 'transition_rules':
+                    for irow_rule in range(self.rowCount(transitions_index)):
+                        rule_index = self.index(irow_rule, 0,
+                                                parent=transitions_index)
+                        rule_node = self.getItem(rule_index)
+                        if (rule_node.node_type == 'transition_rule' and
+                            rule_node.pdict['next_section'] == old_label):
+                            rule_node.pdict['next_section'] = new_label
+                            self.validate_node(rule_index)
+                    break
+
     def setData(self, index, value, role=Qt.EditRole, force=False):
         if role != Qt.EditRole:
             return False
 
         node = self.getItem(index)
+        old_label = node.label
         if node.node_type in ['item_single_var', 'variable']:
             if value in self.all_sibling_keys(node):
                 return False
@@ -5818,6 +5915,9 @@ class TreeModel(QAbstractItemModel):
 
         if result:
             self.dataChanged.emit(index, index)
+
+            if node.node_type == 'section':
+                self.process_renamed_section_label(old_label, value)
 
         return result
 
