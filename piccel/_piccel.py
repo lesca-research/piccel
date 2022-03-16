@@ -36,6 +36,7 @@ from .plugin_tools import (LescaDashboard, InterviewTracker,
                            DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
                            PollTracker, EmailledPollTracker,
                            ParticipantStatusTracker)
+
 from .form import (Form, FormSection, FormItem, FormSheetEditor,
                    NotEditableError, DateTimeCollector, LanguageError,
                    FormWidget, FormFileEditor, FormItemKeyNotFound)
@@ -808,6 +809,11 @@ class DataSheet:
                 raise InvalidSheetLabel('Sheet label (%s) is not the same as '\
                                         'containing folder (%s)' % \
                                         (self.label, fs_label))
+            if not self.filesystem.exists('master_form_locks'):
+                logger.info('Sheet %s: Create master form locks folder',
+                            self.label)
+                self.filesystem.makedirs('master_form_locks')
+
         self.has_write_access = (self.filesystem.test_write_access() \
                                  if self.filesystem is not None else False)
 
@@ -1115,7 +1121,7 @@ class DataSheet:
             # TODO: IMPORTANT changed form data is ignored here
             self.filesystem.accept_all_changes('data')
 
-    def get_form_for_edition(self):
+    def get_form_for_edition(self, ignore_edition_locks=False):
         # Insure that there is no pending live forms
         users_with_live_forms = self.users_with_pending_live_forms()
         if len(users_with_live_forms) > 0:
@@ -1124,10 +1130,14 @@ class DataSheet:
                          self.label, locking_users)
             raise FormEditionBlockedByPendingLiveForm(locking_users)
 
-        # Insure that there is no edition lock
-        if self.filesystem.exists('master.form.lock'):
-            lock_user = self.filesystem.load('master.form.lock')
-            raise FormEditionLocked(lock_user)
+        if not ignore_edition_locks:
+            # Insure that there is no edition lock
+            lock_dir = 'master_form_locks'
+            lock_fns = self.filesystem.listdir(lock_dir)
+            if len(lock_fns) > 0:
+                lock_users = [self.filesystem.load(op.join(lock_dir, fn))
+                              for fn in lock_fns]
+                raise FormEditionLocked(lock_users)
 
         self.lock_form_master_edition()
         if self.form_master is None:
@@ -1155,17 +1165,21 @@ class DataSheet:
                           protect_fn(self.user))
 
     def lock_form_master_edition(self):
-        self.filesystem.save('master.form.lock', self.user)
+        self.filesystem.save(op.join('master_form_locks',
+                                     protect_fn(self.user)),
+                             self.user, overwrite=True)
 
     def unlock_form_master_edition(self):
-        if self.filesystem.exists('master.form.lock'):
-            self.filesystem.remove('master.form.lock')
+        lock_fn = op.join('master_form_locks', protect_fn(self.user))
+        if self.filesystem.exists(lock_fn):
+            self.filesystem.remove(lock_fn)
 
     def close_form_edition(self):
         self.unlock_form_master_edition()
 
     def save_edited_form(self, edited_form):
-        if not self.filesystem.exists('master.form.lock'):
+        lock_fn = op.join('master_form_locks', protect_fn(self.user))
+        if not self.filesystem.exists(lock_fn):
             raise  FormEditionNotOpen()
 
         if self.df is not None and self.df.shape[0] > 0:
@@ -2772,8 +2786,39 @@ def foo():
 
     def test_form_edition_lock(self):
         form_master = self.sheet_ts.get_form_for_edition()
-        self.assertRaises(FormEditionLocked, self.sheet_ts.get_form_for_edition)
+        lock_exception_raised = False
+        try:
+            self.sheet_ts.get_form_for_edition()
+        except FormEditionLocked as e:
+            self.assertEqual(e.args[0], [self.user])
+            lock_exception_raised = True
+        self.assertTrue(lock_exception_raised)
         self.sheet_ts.close_form_edition()
+
+        self.assertTrue(self.sheet_ts.get_form_for_edition() is not None)
+
+    def test_form_edition_multiple_locks(self):
+        form = self.sheet_ts.get_form_for_edition()
+        self.sheet_ts.set_user('another user', UserRole.EDITOR)
+        form2 = self.sheet_ts.get_form_for_edition(ignore_edition_locks=True)
+        self.assertTrue(form2 is not None)
+
+        lock_exception_raised = False
+        try:
+            self.sheet_ts.get_form_for_edition()
+        except FormEditionLocked as e:
+            self.assertEqual(set(e.args[0]), {self.user, 'another user'})
+            lock_exception_raised = True
+        self.assertTrue(lock_exception_raised)
+        self.sheet_ts.close_form_edition() # remove lock for "another user"
+
+        lock_exception_raised = False
+        try:
+            self.sheet_ts.get_form_for_edition()
+        except FormEditionLocked as e:
+            self.assertEqual(e.args[0], [self.user])
+            lock_exception_raised = True
+        self.assertTrue(lock_exception_raised)
 
     def test_form_edition_save(self):
         form_master = self.sheet_ts.get_form_for_edition()
@@ -2810,7 +2855,8 @@ def foo():
     def test_form_edition_locked_types_with_existing_data(self):
         form_master = self.sheet_ts.get_form_for_edition()
         form_master['section1'].items[1].vtype = 'text'
-        self.assertRaises(FormEditionLockedType, self.sheet_ts.save_edited_form,
+        self.assertRaises(FormEditionLockedType,
+                          self.sheet_ts.save_edited_form,
                           form_master)
 
     def test_form_edition_orphan_variable_with_no_data(self):

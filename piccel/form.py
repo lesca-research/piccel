@@ -3785,20 +3785,25 @@ class FormSheetEditor(QtWidgets.QWidget, ui.form_editor_sheet_ui.Ui_Form):
                              'forms of user(s): %s' % e)
             self.sheet.close_form_edition()
         except FormEditionLocked as e:
-            error_message = 'Form is being edited by %s' % e
-            if self.sheet.user_role >= UserRole.ADMIN:
+            error_message = ('Form is being edited by %s' %
+                             ', '.join('<b>%s</b>'%u for u in e.args[0]))
+            if self.sheet.user_role >= UserRole.MANAGER:
                 message_box = QtWidgets.QMessageBox()
-                message_box.setIcon(QtWidgets.QMessageBox.Question)
-                message_box.setText('%s. Click discard to force unlock. ' \
-                                    'OK to keep lock and open in ' \
-                                    'read-only mode' % error_message)
-                message_box.addButton(QtWidgets.QMessageBox.Discard)
+                discard_button = (message_box
+                                  .addButton(QtWidgets.QMessageBox.Discard))
+                discard_label = discard_button.text().replace('&', '')
                 message_box.addButton(QtWidgets.QMessageBox.Cancel)
                 message_box.addButton(QtWidgets.QMessageBox.Ok)
+                message_box.setText('%s. Click "%s" to force edition. ' \
+                                    'Click "OK" to keep lock(s) and open in ' \
+                                    'read-only mode.' % (error_message,
+                                                         discard_label))
                 result = message_box.exec_()
                 if result == QtWidgets.QMessageBox.Discard:
                     self.sheet.close_form_edition()
-                    form = self.sheet.get_form_for_edition()
+                    form = (self.sheet
+                            .get_form_for_edition(ignore_edition_locks=True))
+
                     error_message = None
                 elif result == QtWidgets.QMessageBox.Cancel:
                     raise FormEditionCancelled()
