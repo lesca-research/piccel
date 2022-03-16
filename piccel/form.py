@@ -3454,12 +3454,31 @@ def link_text_edit(text_edit, dest_dict, dest_key, empty_str_is_None=False,
         text_edit.setReadOnly(True)
 
 def dict_set_none_if_empty(d, k, s):
-    if v == '':
-        v = None
-    d[k] = v
+    if s == '':
+        s = None
+    d[k] = s
+
+class call_if:
+    def __init__(self, f, predicate):
+        self.f = f
+        self.predicate = predicate
+    def __call__(self, *args, **kwargs):
+        if self.predicate(*args, **kwargs):
+            self.f(*args, **kwargs)
+
+class call_after:
+    def __init__(self, f1, f2):
+        self.f1 = f1
+        self.f2 = f2
+    def __call__(self, *args, **kwargs):
+        self.f1(*args, **kwargs)
+        self.f2()
 
 def link_combo_box(combox_box, dest_dict, dest_key, choices=None, editable=True,
-                   empty_str_is_None=False):
+                   empty_str_is_None=False, callback=None):
+
+    callback = if_none(callback, lambda s: None)
+
     try:
         combox_box.currentTextChanged.disconnect()
     except TypeError:
@@ -3477,7 +3496,7 @@ def link_combo_box(combox_box, dest_dict, dest_key, choices=None, editable=True,
             f_store_in_dict = partial(dict_set_none_if_empty, dest_dict, dest_key)
         else:
             f_store_in_dict = partial(dest_dict.__setitem__, dest_key)
-        combox_box.currentTextChanged.connect(f_store_in_dict)
+        combox_box.currentTextChanged.connect(call_after(f_store_in_dict, callback))
     else:
         combox_box.setEnabled(False)
 
@@ -3674,7 +3693,7 @@ class SectionTransitionPropertyEditor(QtWidgets.QWidget,
         self.setupUi(self)
         self.read_only = read_only
 
-    def attach(self, transition_node):
+    def attach(self, transition_node, validation):
         link_line_edit(self.criterionLineEdit, transition_node.pdict, 'predicate',
                        read_only=self.read_only)
         next_section_choices = ['', '__submit__'] + \
@@ -3683,8 +3702,16 @@ class SectionTransitionPropertyEditor(QtWidgets.QWidget,
                                  if s != transition_node.parent().parent().label]
         link_combo_box(self.nextSectionComboBox, transition_node.pdict,
                        'next_section', choices=next_section_choices,
-                       empty_str_is_None=True,
-                       editable=not self.read_only)
+                       empty_str_is_None=True, editable=not self.read_only,
+                       callback=validation)
+
+    def validate_section(self, transition_node, transition_node_index, form_model,
+                         section_choice):
+        logger.debug('validate transition to %s', section_choice)
+        if section_choice is None or section_choice == '':
+            form_model.indicate_invalid_node(transition_node,
+                                             transition_node_index)
+        return True
 
 import traceback, sys
 
@@ -4424,6 +4451,7 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
 
         def on_preview_mode_change(state):
             pass
+
         self.button_preview_mode.toggled.connect(on_preview_mode_change)
         button_preview_mode_icon = QtGui.QIcon()
         button_preview_mode_icon.addPixmap(QtGui.QPixmap(':/icons/on_icon'),
@@ -4495,6 +4523,7 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         if self.selection_mode is not None:
             return
 
+        f_validation = partial(self.model.validate_node, model_index)
         if model_item.node_type == 'form':
             self.show_form_editor(model_item)
         elif model_item.node_type == 'section':
@@ -4506,14 +4535,15 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         elif model_item.node_type == 'variable':
             self.show_variable_editor(model_item)
         elif model_item.node_type == 'transition_rule':
-            self.show_section_transition_editor(model_item)
+            self.show_section_transition_editor(model_item, f_validation)
 
     def show_variable_editor(self, var_node):
         self.variable_property_editor.attach(var_node)
         self.variable_property_editor.show()
 
-    def show_section_transition_editor(self, transition_node):
-        self.section_transition_property_editor.attach(transition_node)
+    def show_section_transition_editor(self, transition_node, validation):
+        self.section_transition_property_editor.attach(transition_node,
+                                                       validation=validation)
         self.section_transition_property_editor.show()
 
     def show_choice_editor(self, choice_node):
@@ -4793,6 +4823,7 @@ class Node(object):
         self.child_type = child_type
         self.childItems = []
         self.state = state
+        self.error_hint = ''
         self.pdict = if_none(pdict, {})
 
     def to_json(self):
@@ -4804,6 +4835,31 @@ class Node(object):
     def child_labels(self):
         return [c.label for c in self.childItems
                 if c.node_type == self.child_type]
+
+    def validate(self):
+        new_state = self.state
+        self.error_hint = ''
+        if self.node_type == 'transition_rule':
+            next_section = self.pdict['next_section']
+            logger.debug('Check %s, next_section=%s', self.label, next_section)
+            #              next_section .section .form
+            all_sections = self.parent().parent().parent().child_labels()
+            print('!!!', all_sections)
+            if (next_section is None or next_section == '' or
+                (next_section not in all_sections and next_section != '__submit__')):
+                new_state = 'invalid'
+                self.error_hint += 'Next section not found.'
+            else:
+                new_state = 'base'
+
+        state_changed = False
+        if self.state != new_state:
+            state_changed = True
+            logger.debug('New state of node %s: %s', self.label, new_state)
+            self.state = new_state
+        else:
+            logger.debug('State of node %s unchanged (%s)', self.label, new_state)
+        return state_changed
 
     def to_dict(self, selected_only=False):
         pdict_copy = self.pdict.copy()
@@ -4958,207 +5014,6 @@ class Node(object):
         self.label = value
         return True
 
-class ___RootNode(Node):
-
-    def __init__(self, lock_variable_types, parent=None):
-        super(RootNode, self).__init__('', parent)
-        self.lock_variable_types = lock_variable_types
-
-    def insertChildren(self, position, nb_children):
-        if position < 0 or position > len(self.childItems) or \
-           len(self.childItems) > 0: # allow only one child
-            return False
-
-        self.childItems[position:position+nb_children-1] = \
-            [self._new_form_node() for i in range(nb_children)]
-
-        return True
-
-    def _new_form_node(self):
-        return FormNode(Form({}, 'English', ['English', 'French']).to_dict(),
-                        self.lock_variable_types, parent=self)
-
-class ___FormNode(Node):
-    def __init__(self, form_dict, lock_variable_types, parent=None):
-        super(FormNode, self).__init__(form_dict.pop('label'), parent)
-        self.form_dict = form_dict.copy()
-        self.lock_variable_types = lock_variable_types
-        # sections = self.form_dict.pop('sections')
-
-        # children are sections
-        # self.childItems = [SectionNode(section_name, section, lock_variable_types,
-        #                               parent=self)
-        #                   for section_name, section in sections.items()]
-        # self.childItems.append(AddSectionNode(self))
-
-    def set_pdict(self, pdict):
-        self.pdict = pdict.copy()
-
-    def section_labels(self):
-        return [s.label for s in self.childItems
-                if s.node_type == self.child_type]
-
-    def section_after(self, section_node):
-        i_section = section_node.childNumber()
-        return (self.childItems[i_section+1].label if i_section < self.childCount()-1
-                else None)
-
-    def insertChildren(self, position, nb_children):
-        if position < 0 or position > len(self.childItems):
-            return False
-
-        self.childItems[position:(position+nb_children-1)] = \
-            [self._new_section_node() for i in range(nb_children)]
-
-        return True
-
-    def section_labels(self):
-        return set(s.label for s in self.childItems)
-
-    def new_child_label(self, label_pat='section_%d', label=None):
-        set_names = self.section_labels()
-
-        if label is not None and label not in set_names:
-            return label
-
-        i_section = len(self.childItems)
-        while label_pat % i_section in set_names:
-            i_section += 1
-        section_name = label_pat % i_section
-
-    def _new_section_node(self):
-        section_name = self.new_child_label()
-        new_section_cfg = (FormSection([], self.form_dict['default_language'],
-                                       self.form_dict['supported_languages'])
-                           .to_dict())
-        return SectionNode(section_name, new_section_cfg,
-                           self.lock_variable_types, parent=self)
-
-    def to_dict(self):
-        return {
-            **self.form_dict,
-            **{'label' : self.label,
-               'sections' : {s.label : s.to_dict() for s in self.childItems[:-1]}
-            }
-        }
-
-
-class ___SectionNode(Node):
-    def __init__(self, section_name, section_dict, lock_variable_types,
-                 parent=None):
-        super(SectionNode, self).__init__(section_name, parent)
-        self.section_dict = section_dict
-        #self.section_name = section_name
-        self.lock_variable_types = lock_variable_types
-        self.state = 'base'
-
-        #transitions_cfg = self.section_dict.pop('next_section_definition')
-        #transitions_node = SectionTransitionsNode(transitions_cfg, parent=self)
-        #self.childItems.append(transitions_node)
-
-        #self.childItems.extend(ItemNode(item['label'], item, lock_variable_types,
-        #                                parent=self) for item in
-        #                      self.section_dict.pop('items'))
-        #self.childItems.append(AddItemNode(self))
-
-    def set_pdict(self, pdict):
-        self.section_dict = pdict
-
-    def insertChildren(self, position, nb_children):
-        if position < 0 or position > len(self.childItems):
-            return False
-
-        self.childItems[position:(position+nb_children-1)] = \
-            [self._new_item() for i_item in range(nb_children)]
-        return True
-
-    def all_keys(self):
-        set_keys = set()
-        for item in self.childItems:
-            if not isinstance(item, (AddItemNode, SectionTransitionsNode)):
-                set_keys.update(item.all_keys())
-        return set_keys
-
-
-    def new_child_label(self, label_pat='Var_%d', label=None):
-        used_keys = self.all_keys()
-
-        if label is not None and label not in used_keys:
-            return label
-
-        label_idx = len(used_keys)
-        while  label_pat % label_idx in used_keys:
-            label_idx += 1
-
-        return label_pat % label_idx
-
-    def _new_item(self):
-        used_keys = self.all_keys()
-        label_pat = 'Var_%d'
-        label_idx = len(used_keys)
-        while  label_pat % label_idx in used_keys:
-            label_idx += 1
-
-        item_label = label_pat % label_idx
-
-        new_item_dict = FormItem({item_label : {'French': 'Nom de variable',
-                                                'English' : 'Variable name'}},
-                                 self.section_dict['default_language'],
-                                 self.section_dict['supported_languages'],
-                                 label=item_label).to_dict()
-
-        new_node = ItemNode(new_item_dict.pop('label'), self.lock_variable_types,
-                            parent=self)
-        new_node.set_pdict(new_item_dict)
-        return new_node
-
-    def to_dict(self):
-        return {
-            **self.section_dict,
-            **self.childItems[0].to_dict(),
-            **{'items' : [i.to_dict() for i in self.childItems[1:-1]]}
-        }
-
-    def to_json(self):
-        return json.dumps({**{'label':self.label,
-                              'parent_label':self.parent().label},
-                           **self.to_dict()})
-
-class SectionTransitionsNode(Node):
-    def __init__(self, parent=None):
-        super(SectionTransitionsNode, self).__init__('next section', parent)
-        # if transitions_cfg is not None:
-        #     if isinstance(transitions_cfg, str):
-        #         self.childItems.append(SectionTransitionNode('transition rule 1',
-        #                                                      transitions_cfg, parent=self))
-        #     else:
-        #         self.childItems = [SectionTransitionNode('transition rule %d' % it,
-        #                                                  transition_def, parent=self)
-        #                            for it, transition_def in enumerate(transitions_cfg)]
-
-        # self.childItems.append(AddSectionTransitionNode(self))
-
-    def insertChildren(self, position, nb_children):
-        if position < 0 or position > len(self.childItems):
-            return False
-
-        self.childItems[position:(position+nb_children-1)] = \
-            [self._new_transition() for i_item in range(nb_children)]
-        return True
-
-    def _new_transition(self):
-        #                        .section .form
-        next_section_label = self.parent().parent().section_after(self.parent())
-        if next_section_label is None:
-            next_section_label = '__submit__'
-        return SectionTransitionNode('transition rule %d' % len(self.childItems),
-                                     ('True', next_section_label), parent=self)
-
-    def to_dict(self):
-        return {
-            'next_section_definition' : [child.transition_rule()
-                                         for child in self.childItems[:-1]]
-        }
 
 def make_unique_label(label, existing_labels):
     idx = 0
@@ -5287,6 +5142,13 @@ class TreeModel(QAbstractItemModel):
         if new_state == 'sel_unchecked' and \
            node.node_type.startswith('item') or node.node_type == 'variable' :
             self.unselect_if_no_selected_child(self.parent(node_index))
+
+    def validate_node(self, node_index):
+        node = self.getItem(node_index)
+        if not node.validate():
+            self.dataChanged.emit(node_index, node_index,
+                                  [QtCore.Qt.ForegroundRole,
+                                   QtCore.Qt.BackgroundRole])
 
     def set_node_selection(self, state, node_index, apply_to_children=True):
         node = self.getItem(node_index)
@@ -5587,10 +5449,14 @@ class TreeModel(QAbstractItemModel):
             return node.data(0)
 
         if role == QtCore.Qt.BackgroundRole:
+            if node.state == 'invalid':
+                return ui.main_qss.form_item_invalid_bg_color
             if node.node_type == 'section':
                 return ui.main_qss.section_bg_color
 
         if role == QtCore.Qt.ForegroundRole:
+            if node.state == 'invalid':
+                return ui.main_qss.form_item_invalid_fg_color
             if node.node_type == 'section':
                 return ui.main_qss.section_fg_color
 
