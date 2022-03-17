@@ -3591,7 +3591,7 @@ class ItemPropertyEditor(QtWidgets.QWidget,
         self.generatorComboBox.addItems(generators)
         self.read_only = read_only
 
-    def attach(self, item_node):
+    def attach(self, item_node, validation):
         for field, dest_dict, key in [(self.title_field_french,
                                        item_node.pdict['title'], 'French'),
                                       (self.title_field_english,
@@ -3613,7 +3613,8 @@ class ItemPropertyEditor(QtWidgets.QWidget,
 
         link_combo_box(self.typeComboBox, item_node.pdict, 'vtype',
                        editable=(not item_node.pdict['type_locked'] and
-                                 not self.read_only))
+                                 not self.read_only),
+                       callback=validation)
         link_check_box(self.uniqueCheckBox, item_node.pdict, 'unique',
                        read_only=self.read_only)
         link_check_box(self.allowEmptyCheckBox, item_node.pdict, 'allow_empty',
@@ -4562,16 +4563,17 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         if self.selection_mode is not None:
             return
 
-        f_validation = partial(self.model.validate_node, model_index)
+        f_validation = partial(self.model.validate_node_recurse, model_index)
         if model_item.node_type == 'form':
             self.show_form_editor(model_item)
         elif model_item.node_type == 'section':
             self.show_section_editor(model_item)
         elif model_item.node_type.startswith('item'):
-            self.show_item_editor(model_item)
+            self.show_item_editor(model_item, f_validation)
         elif model_item.node_type == 'choice':
             self.show_choice_editor(model_item)
         elif model_item.node_type == 'variable':
+            # TODO: validation: check that init value has proper format
             self.show_variable_editor(model_item)
         elif model_item.node_type == 'transition_rule':
             self.show_section_transition_editor(model_item, f_validation)
@@ -4597,8 +4599,8 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         self.section_property_editor.attach(section_node)
         self.section_property_editor.show()
 
-    def show_item_editor(self, item_node):
-        self.item_property_editor.attach(item_node)
+    def show_item_editor(self, item_node, validation):
+        self.item_property_editor.attach(item_node, validation=validation)
         self.item_property_editor.show()
 
     def on_view_double_click(self, model_index):
