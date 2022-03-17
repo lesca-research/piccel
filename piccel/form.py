@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-
+import traceback, sys
 from datetime import date, datetime, timedelta, time
 import logging
 import tempfile
@@ -14,6 +14,8 @@ from uuid import uuid1, uuid4
 from time import sleep
 from copy import copy
 from traceback import format_stack, format_exc
+
+import subprocess
 
 import json
 import numpy as np
@@ -1409,6 +1411,7 @@ class FormItem:
             'format' : lambda v : v,
             'message invalid format' : 'Enter a text',
             'validate value type' : lambda v : isinstance(v, str),
+            'null_value' : ''
             },
         'html' : {
             'dtype_pd' : 'string',
@@ -1416,6 +1419,7 @@ class FormItem:
             'format' : lambda v : v,
             'message invalid format' : 'Enter a text',
             'validate value type' : is_valid_html,
+            'null_value' : '<html></html>'
             },
         'user_name' : {
             'dtype_pd' : 'string',
@@ -1423,6 +1427,7 @@ class FormItem:
             'format' : lambda v : v,
             'message invalid format' : 'Enter a user name',
             'validate value type' : lambda v : isinstance(v, str),
+            'null_value' : ''
         },
          'int' : {
              'dtype_pd' : 'int',
@@ -1430,6 +1435,7 @@ class FormItem:
              'format' : lambda i : '%d' % i,
              'message invalid format' : 'Enter an integer',
              'validate value type' : lambda v : isinstance(v, int),
+             'null_value' : 0
          },
         'int64' : {
              'dtype_pd' : 'int64',
@@ -1437,6 +1443,7 @@ class FormItem:
              'format' : lambda i : '%d' % i,
              'message invalid format' : 'Enter an integer',
              'validate value type' : lambda v : isinstance(v, np.int64),
+            'null_value' : np.int64(0)
          },
          'boolean' : {
              'dtype_pd' : 'boolean',
@@ -1444,6 +1451,7 @@ class FormItem:
              'format' : lambda b : str(b),
              'message invalid format' : 'Enter a boolean',
              'validate' : lambda v : isinstance(v, bool),
+             'null_value' : False
          },
         'number' : {
             'dtype_pd' : 'float',
@@ -1452,6 +1460,7 @@ class FormItem:
             'message invalid format' : ('Enter a number using a dot ' +\
                                         'as decimal separator if needed.'),
             'validate' : lambda v : isinstance(v, float),
+            'null_value' : 0.0
          },
          'date' : {
              'dtype_pd' : 'datetime64[ns]',
@@ -1459,6 +1468,7 @@ class FormItem:
              'format' : lambda d : d.strftime(FormItem.DATE_FORMAT),
              'message invalid format' : 'Enter a date as "YYYY-MM-DD"',
              'validate' : lambda v : isinstance(v, datetime.date),
+             'null_value' : datetime.now().date()
          },
          'datetime' : {
              'dtype_pd' : 'datetime64[ns]',
@@ -1469,6 +1479,7 @@ class FormItem:
              'message invalid format' : ('Enter date and time as ' \
                                          '"YYYY-MM-DD hh:mm:ss"'),
              'validate' : lambda v : isinstance(v, datetime.date),
+             'null_value' : datetime.now()
          }
     }
 
@@ -2700,7 +2711,6 @@ Date_Time (datetime): 2018-01-12 09:32:00.000000"""
             form_fns.append(form_fn)
             with open(form_fn, 'w') as fout:
                 fout.write(pformat(f.to_dict()))
-        import subprocess
         subprocess.run(['meld'] + form_fns)
 
 class TestFormSection(unittest.TestCase):
@@ -3416,7 +3426,10 @@ class TestCompose(unittest.TestCase):
         self.assertEqual(d, {'res' : 4})
 
 def link_line_edit(line_edit, dest_dict, dest_key, empty_str_is_None=False,
-                   read_only=False):
+                   read_only=False, callback=None):
+
+    callback = if_none(callback, lambda : None)
+
     try:
         line_edit.editingFinished.disconnect()
     except TypeError:
@@ -3433,8 +3446,9 @@ def link_line_edit(line_edit, dest_dict, dest_key, empty_str_is_None=False,
         else:
             f_store_in_dict = partial(dest_dict.__setitem__, dest_key)
 
-        line_edit.editingFinished.connect(compose(line_edit.text,
-                                                  f_store_in_dict))
+        line_edit.editingFinished.connect(call_after(compose(line_edit.text,
+                                                             f_store_in_dict),
+                                                     callback))
     else:
         line_edit.setReadOnly(True)
 
@@ -3483,7 +3497,7 @@ class call_after:
 def link_combo_box(combox_box, dest_dict, dest_key, choices=None, editable=True,
                    empty_str_is_None=False, callback=None):
 
-    callback = if_none(callback, lambda s: None)
+    callback = if_none(callback, lambda : None)
 
     try:
         combox_box.currentTextChanged.disconnect()
@@ -3502,7 +3516,8 @@ def link_combo_box(combox_box, dest_dict, dest_key, choices=None, editable=True,
             f_store_in_dict = partial(dict_set_none_if_empty, dest_dict, dest_key)
         else:
             f_store_in_dict = partial(dest_dict.__setitem__, dest_key)
-        combox_box.currentTextChanged.connect(call_after(f_store_in_dict, callback))
+        combox_box.currentTextChanged.connect(call_after(f_store_in_dict,
+                                                         callback))
     else:
         combox_box.setEnabled(False)
 
@@ -3700,8 +3715,9 @@ class SectionTransitionPropertyEditor(QtWidgets.QWidget,
         self.read_only = read_only
 
     def attach(self, transition_node, validation):
-        link_line_edit(self.criterionLineEdit, transition_node.pdict, 'predicate',
-                       read_only=self.read_only)
+        link_line_edit(self.criterionLineEdit, transition_node.pdict,
+                       'predicate', read_only=self.read_only,
+                       callback=validation)
         next_section_choices = ['', '__submit__'] + \
                                 [s for s in (transition_node.parent().parent()
                                              .parent().child_labels())
@@ -3710,8 +3726,6 @@ class SectionTransitionPropertyEditor(QtWidgets.QWidget,
                        'next_section', choices=next_section_choices,
                        empty_str_is_None=True, editable=not self.read_only,
                        callback=validation)
-
-import traceback, sys
 
 class PendingChangesTracker:
     def __init__(self, process_pending_changes, callback_pending,
@@ -4691,6 +4705,17 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
     def show_sections_graph(self):
         form_index = self.model.index(0, 0, parent=QModelIndex())
         form_node = self.model.getItem(form_index)
+        try:
+            gv_ok = True
+            result = subprocess.run(['dot', '-V'])
+        except Exception:
+            gv_ok = False
+        if not gv_ok or result.returncode != 0:
+            logger.error('Graphviz not available')
+            logger.debug('sys.path:\n %s', pformat(sys.path))
+            logger.debug('os exec path:\n %s', pformat(os.get_exec_path()))
+            return
+
         G = pgv.AGraph()
         G = pgv.AGraph(strict=False, directed=True)
         G.add_node("__submit__")
@@ -4785,6 +4810,11 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         #     act_test = right_click_menu.addAction(self.tr('Import item(s)'))
         #     act_test.triggered.connect(partial(self.ask_import_items,
         #                                        model_index))
+
+        if model_item.node_type != 'add_button':
+            act_validate = right_click_menu.addAction(self.tr('Validate'))
+            f_validate = partial(self.model.validate_node_recurse, model_index)
+            act_validate.triggered.connect(on_act(f_validate))
 
         if model_item.node_type not in ['add_button', 'form', 'transition_rules']\
             and not self.variable_is_locked(model_item):
@@ -4913,16 +4943,50 @@ class Node(object):
 
         if self.node_type == 'transition_rule':
             next_section = self.pdict['next_section']
+            parent_section = self.parent().parent()
             logger.debug('Check %s, next_section=%s', self.label, next_section)
-            #              next_section .section .form
-            all_sections = self.parent().parent().parent().child_labels()
-            print('!!!', all_sections)
+            all_sections = parent_section.parent().child_labels()
             if (next_section is None or next_section == '' or
                 (next_section not in all_sections and
                  next_section != '__submit__')):
                 new_state = 'invalid'
                 self.error_hint += 'Next section not found.'
-            elif len(self.error_hint) == 0:
+
+            predicate = Predicate(self.pdict['predicate'])
+
+            all_keys = []
+            values_test = {}
+            for child in parent_section.childItems:
+                if child.node_type in ['item', 'item_single_var']:
+                    default_value = \
+                        FormItem.VTYPES[child.pdict['vtype']]['null_value']
+                    if child.node_type == 'item':
+                        for key in zip(child.child_labels()):
+                            values_test[key] = default_value
+                    elif child.node_type == 'item_single_var':
+                        values_test[child.label] = default_value
+
+            criterion_ok = False
+            try:
+                predicate(values_test)
+            except InvalidPredicateResult:
+                self.error_hint += 'Criterion does evaluate to boolean.'
+            except SyntaxError:
+                self.error_hint += 'Syntax error in criterion.'
+            except NameError as e:
+                self.error_hint += e.args[0].replace('name', 'Variable')
+            except Exception as e:
+                logger.error('Error while evaluating criterion of transition '\
+                             'rule "%s" for section %s.', self.label,
+                             parent_section.label)
+                logger.error(format_exc())
+                self.error_hint += repr(e)
+            else:
+                criterion_ok = True
+            if not criterion_ok:
+                new_state = 'invalid'
+
+            if len(self.error_hint) == 0:
                 new_state = 'base'
 
         state_changed = False
@@ -5219,6 +5283,11 @@ class TreeModel(QAbstractItemModel):
            node.node_type.startswith('item') or node.node_type == 'variable' :
             self.unselect_if_no_selected_child(self.parent(node_index))
 
+    def validate_node_recurse(self, node_index):
+        self.validate_node(node_index)
+        for irow in range(self.rowCount(node_index)):
+            self.validate_node_recurse(self.index(irow, 0, parent=node_index))
+
     def validate_node(self, node_index):
         node = self.getItem(node_index)
         if not node.validate():
@@ -5307,14 +5376,15 @@ class TreeModel(QAbstractItemModel):
         else:
             node_state = 'base'
 
-        new_node = Node(label, node_type, is_container=is_container, pdict=pdict,
-                        parent=parent_node, child_type=child_type,
+        new_node = Node(label, node_type, is_container=is_container,
+                        pdict=pdict, parent=parent_node, child_type=child_type,
                         state=node_state)
         self.beginInsertRows(parent_index, irow, irow)
         parent_node.childItems.insert(irow, new_node)
         self.endInsertRows()
 
         new_node_index = self.index(irow, 0, parent_index)
+
         if self.selection_mode is None and is_container:
             # Insert button to add new item
             self.beginInsertRows(new_node_index, 0, 0)
@@ -5360,6 +5430,8 @@ class TreeModel(QAbstractItemModel):
         # Insert sections
         for section_label, section_dict in sections_dict.items():
             self.insert_section(section_label, section_dict, form_index)
+
+        self.validate_node_recurse(form_index)
 
     def insert_section(self, label, section_dict, form_index, irow=None,
                        fix_duplicate_label=True):
@@ -5918,7 +5990,12 @@ class TreeModel(QAbstractItemModel):
 
             if node.node_type == 'section':
                 self.process_renamed_section_label(old_label, value)
-
+            if node.node_type in ['item_single_var', 'variable', 'choice']:
+                if node.node_type == 'item_single_var':
+                    parent_section_index = self.parent(index)
+                else:
+                    parent_section_index = self.parent(self.parent(index))
+                self.validate_node_recurse(parent_section_index)
         return result
 
     def setHeaderData(self, section, orientation, value, role=Qt.EditRole):
