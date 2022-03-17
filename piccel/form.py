@@ -3082,12 +3082,19 @@ class TestFormItem(unittest.TestCase):
         item = FormItem({'Grade':None}, vtype='int', title='',
                         choices={
                             '1' : {'English' : 'One'},
-                            '3' : {'English' : 'Three'}
+                            '3' : {'English' : 'Three'},
+                            'a' : {'English' : 'A'}
                         },
                         supported_languages={'English'},
                         default_language='English')
+        logger.debug('utest: Three')
         item.set_input_str('Three')
+        self.assertTrue(item.is_valid())
         self.assertEqual(item.get_value(), 3)
+
+        logger.debug('utest: A')
+        item.set_input_str('A')
+        self.assertFalse(item.is_valid())
 
         item.set_input_str('Four')
         self.assertFalse(item.is_valid())
@@ -4935,11 +4942,16 @@ class Node(object):
         new_state = self.state
         self.error_hint = ''
 
-        # for child in self.childItems:
-        #     child.validate()
-        #     if child.state == 'invalid':
-        #         new_state = 'invalid'
-        #         self.error_hint += 'Subnode %s invalid.' % child.label
+        if self.node_type == 'choice':
+            vtype = self.parent().parent().pdict['vtype']
+            unformat = FormItem.VTYPES[vtype]['unformat']
+            invalid_msg = FormItem.VTYPES[vtype]['message invalid format']
+            try:
+                unformat(self.label)
+            except ValueError:
+                self.error_hint += invalid_msg
+            except Exception as e:
+                self.error_hint += repr(e)
 
         if self.node_type == 'transition_rule':
             next_section = self.pdict['next_section']
@@ -4949,7 +4961,6 @@ class Node(object):
             if (next_section is None or next_section == '' or
                 (next_section not in all_sections and
                  next_section != '__submit__')):
-                new_state = 'invalid'
                 self.error_hint += 'Next section not found.'
 
             predicate = Predicate(self.pdict['predicate'])
@@ -4966,7 +4977,6 @@ class Node(object):
                     elif child.node_type == 'item_single_var':
                         values_test[child.label] = default_value
 
-            criterion_ok = False
             try:
                 predicate(values_test)
             except InvalidPredicateResult:
@@ -4981,13 +4991,11 @@ class Node(object):
                              parent_section.label)
                 logger.error(format_exc())
                 self.error_hint += repr(e)
-            else:
-                criterion_ok = True
-            if not criterion_ok:
-                new_state = 'invalid'
 
-            if len(self.error_hint) == 0:
-                new_state = 'base'
+        if len(self.error_hint) == 0:
+            new_state = 'base'
+        else:
+            new_state = 'invalid'
 
         state_changed = False
         if self.state != new_state:
