@@ -3588,6 +3588,8 @@ class ItemPropertyEditor(QtWidgets.QWidget,
         self.typeComboBox.addItems(list(sorted(FormItem.VTYPES.keys())))
         generators = [''] + sorted([g for g in FormItem.GENERATORS
                                     if g is not None])
+        self.accessLevelComboBox.clear()
+        self.accessLevelComboBox.addItems(r.name for r in UserRole)
         self.generatorComboBox.addItems(generators)
         self.read_only = read_only
 
@@ -4726,15 +4728,27 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
             return
 
         G = pgv.AGraph()
-        G = pgv.AGraph(strict=False, directed=True)
+        g_bg_color = (ui.main_qss.default_bg_qcolor
+                      .name(QtGui.QColor.HexRgb))
+        G = pgv.AGraph(strict=False, directed=True,
+                       bgcolor=g_bg_color)
         G.add_node("__submit__")
         first_section = True
         for section_node in form_node.childItems:
             if section_node.node_type == 'section':
                 if first_section:
-                    G.add_node(section_node.label, shape='box')
+                    shape = 'box'
                 else:
-                    G.add_node(section_node.label)
+                    shape = 'ellipse'
+
+                bg_color = (ui.main_qss.section_bg_color
+                            .name(QtGui.QColor.HexRgb))
+                fg_color = (ui.main_qss.section_fg_color
+                            .name(QtGui.QColor.HexRgb))
+                G.add_node(section_node.label, shape=shape,
+                           fillcolor=bg_color, fontcolor=fg_color,
+                           style='filled')
+
                 first_section=False
 
                 transition_nodes = next((c.childItems

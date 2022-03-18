@@ -1232,7 +1232,6 @@ class DataSheet:
             self.notifier.notify('header_changed')
             self.reload_all_data()
 
-    ## End of methods used for FormEditor IO
     def _remove_from_value_to_index(self, entry_df):
         # TODO utest that value indexes are properly maintained
         # after entry deletion
