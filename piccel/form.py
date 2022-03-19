@@ -4758,8 +4758,24 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         if self.form_tester is not None:
             self.form_tester.close()
 
-        logger.debug('test_form: user=%s', user)
-        form = self.get_form()
+        logger.debug('test_form: user=%s (role=%s)', user, role)
+
+        form_index = self.model.index(0, 0, parent=QModelIndex())
+        nb_invalid = self.model.validate_node_recurse(form_index)
+        if nb_invalid > 0:
+            show_critical_message_box('Cannot test form: %d invalid elements' %
+                                      nb_invalid)
+            return
+
+        try:
+            form = self.get_form()
+        except Exception:
+            details = format_exc()
+            msg = 'Error making form for test'
+            logger.error('%s:\n%s', msg, details)
+            show_critical_message_box(msg, detailed_text=details)
+            return
+
         form.set_user(user)
         form.set_on_submission(compose(partial(form.format_entry_dict,
                                                html=True),
@@ -5441,17 +5457,21 @@ class TreeModel(QAbstractItemModel):
             self.unselect_if_no_selected_child(self.parent(node_index))
 
     def validate_node_recurse(self, node_index):
-        self.validate_node(node_index)
+        nb_invalid = 0
         for irow in range(self.rowCount(node_index)):
-            self.validate_node_recurse(self.index(irow, 0, parent=node_index))
+            child_index = self.index(irow, 0, parent=node_index)
+            nb_invalid += self.validate_node_recurse(child_index)
+        return self.validate_node(node_index) + nb_invalid
 
     def validate_node(self, node_index):
         node = self.getItem(node_index)
         if not node.validate():
+
             self.dataChanged.emit(node_index, node_index,
                                   [QtCore.Qt.ForegroundRole,
                                    QtCore.Qt.BackgroundRole,
                                    QtCore.Qt.ToolTipRole])
+        return node.state == 'invalid'
 
     def set_node_selection(self, state, node_index, apply_to_children=True):
         node = self.getItem(node_index)
