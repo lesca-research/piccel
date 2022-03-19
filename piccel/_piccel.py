@@ -5802,7 +5802,7 @@ class TestWorkBook(unittest.TestCase):
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'drop_out')
 
-    def test_dashboard_interview_track(self):
+    def test_dashboard_interview_track_editor(self):
         # Create empty workbook
         fs = LocalFileSystem(self.tmp_dir)
 
@@ -6055,7 +6055,14 @@ class TestWorkBook(unittest.TestCase):
         wb.add_sheet(sh_eval)
         wb.add_sheet(sh_pp)
 
-        # wb.after_workbook_load()
+        logger.debug('---- Create user Bobbie ----')
+        wb['__users__'].add_new_entry({'User_Name' : 'Bobbie',
+                                       'Security_Word' : 'yata',
+                                       'Role' : UserRole.EDITOR.name})
+        wb.set_user_password('Bobbie', 'pwd_staff')
+
+        logger.debug('---- Login as Bobbie ----')
+        wb.user_login('Bobbie', 'pwd_staff')
 
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(set(df.index.values), set(pp_df['Participant_ID']))
@@ -6075,12 +6082,12 @@ class TestWorkBook(unittest.TestCase):
 
         ts = datetime(2021,9,10,10,10)
         form.set_values_from_entry({'Plan_Action' : 'assign_staff',
-                                    'Staff' : 'Thomas Vincent',
+                                    'Staff' : 'Bobbie',
                                     'Timestamp_Submission' : ts})
         form.submit()
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(df.loc[pid, 'Eval'], 'eval_not_done')
-        self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Bobbie')
         self.assertEqual(df.loc[pid, 'Eval_Plan'], 'eval_plan')
 
         logger.debug('------- Pid %s: Plan interview date, no email --------',
@@ -6103,7 +6110,7 @@ class TestWorkBook(unittest.TestCase):
         form.submit()
         df = wb['Dashboard'].get_df_view()
         self.assertEqual(df.loc[pid, 'Eval'], 'eval_scheduled')
-        self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Bobbie')
         self.assertEqual(df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATETIME_FMT))
 
@@ -6125,7 +6132,7 @@ class TestWorkBook(unittest.TestCase):
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_callback_now')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Bobbie')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
         logger.debug('-- Pid %s: No planned date, availability, '\
@@ -6144,7 +6151,7 @@ class TestWorkBook(unittest.TestCase):
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_callback_%dD' % callback_nb_days)
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Bobbie')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
         wb['Dashboard'].plugin.date_now = ts + timedelta(days=1)
@@ -6153,7 +6160,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_callback_%dD' % (callback_nb_days-1))
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
-                         'Thomas Vincent')
+                         'Bobbie')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
         wb['Dashboard'].plugin.date_now = (ts +
@@ -6162,7 +6169,7 @@ class TestWorkBook(unittest.TestCase):
 
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_callback_now' )
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Bobbie')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'parfois')
 
         logger.debug('------- Pid %s: Plan interview date, with email --------',
@@ -6180,7 +6187,7 @@ class TestWorkBook(unittest.TestCase):
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_email_pending')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Thomas Vincent')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'staff')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATETIME_FMT))
 
@@ -6196,7 +6203,7 @@ class TestWorkBook(unittest.TestCase):
         form.submit()
 
         date_now = idate - timedelta(days=2.1)
-        logger.debug('------- Check dashboard when 2 days before (date_now=%s) --------' %
+        logger.debug('------- Check dashboard 2 days before (date_now=%s) --------' %
                      date_now)
         wb['Dashboard'].plugin.date_now = date_now
         wb['Dashboard'].plugin.reset_data()
@@ -6204,7 +6211,7 @@ class TestWorkBook(unittest.TestCase):
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_2D')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
-                         'Thomas Vincent')
+                         'Bobbie')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATETIME_FMT))
 
@@ -6212,7 +6219,7 @@ class TestWorkBook(unittest.TestCase):
                              idate.month,
                              idate.day) -
                     timedelta(minutes=5))
-        logger.debug('------- Check dashboard when night before (date_now=%s) --------' %
+        logger.debug('------- Check dashboard the night before (date_now=%s) --------' %
                      date_now)
         wb['Dashboard'].plugin.date_now = date_now
         wb['Dashboard'].plugin.reset_data()
@@ -6220,7 +6227,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_1D')
 
         date_now = idate - timedelta(hours=1)
-        logger.debug('------- Check dashboard when one hour before (date_now=%s) --------' %
+        logger.debug('------- Check dashboard one hour before (date_now=%s) --------' %
                      date_now)
         wb['Dashboard'].plugin.date_now = date_now
         wb['Dashboard'].plugin.reset_data()
@@ -6228,7 +6235,7 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_today')
 
         date_now = idate + timedelta(minutes=30)
-        logger.debug('------- Check dashboard when 30 mins after (date_now=%s) --------' %
+        logger.debug('------- Check dashboard 30 mins after (date_now=%s) --------' %
                      date_now)
         wb['Dashboard'].plugin.date_now = date_now
         wb['Dashboard'].plugin.reset_data()
@@ -6249,20 +6256,21 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Eval'],
                          'eval_email_error')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
-                         'Thomas Vincent')
+                         'Bobbie')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATETIME_FMT))
 
         logger.debug('------- Interview done for %s --------' % pid)
-        idate = datetime(2021,10,10,10,10)
-        ts = datetime(2021,9,10,10,16)
+        idate = datetime(2021,10,10,10,33)
+        ts = datetime(2021,11,10,10,16)
         form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
                                                  'Eval')
         self.assertTrue(action_label.endswith('New'))
         self.assertTrue(action_label.startswith('Eval'))
 
         form.set_values_from_entry({'Session_Action' : 'do_session',
-                                    'User' : 'Thomas Vincent',
+                                    'Session_Date' : idate,
+                                    'User' : 'Bobbie',
                                     'Session_Status' : 'done',
                                     'Timestamp_Submission' : ts})
         form.submit()
@@ -6271,7 +6279,7 @@ class TestWorkBook(unittest.TestCase):
         # Overriding User field does not work:
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
-                         ts.strftime(DATETIME_FMT))
+                         idate.strftime(DATETIME_FMT))
 
         logger.debug('------- Interview to redo for %s --------' % pid)
         idate = datetime(2021,10,10,10,10)
@@ -6289,21 +6297,21 @@ class TestWorkBook(unittest.TestCase):
                          'eval_redo')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
-                         ts.strftime(DATETIME_FMT))
+                         'eval_plan')
 
-        logger.debug('------- Interview cancelled for %s --------' % pid)
+        logger.debug('------- Interview revoked for %s --------' % pid)
         idate = datetime(2021,10,11,10,10)
         ts = datetime(2021,9,10,10,18)
         form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
                                                  'Eval')
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Eval'))
-        form.set_values_from_entry({'Session_Action' : 'cancel_session',
-                                    'User' : 'Thomas Vincent',
+        form.set_values_from_entry({'Session_Action' : 'revoke_session',
+                                    'User' : 'Bobbie',
                                     'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
-        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_cancelled')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_NA')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'eval_plan')
 
@@ -6482,7 +6490,7 @@ class TestWorkBook(unittest.TestCase):
                           default_language='French',
                           freeze_on_update=True,
                           supported_languages={'French'}),
-                 FormItem(keys={'Note_Type':None},
+                 FormItem(keys={'Note_Type' : None},
                           vtype='text', supported_languages={'French'},
                           choices={'health' : {'French' : 'Etat de santé'},
                                    'withdrawal' : {'French' : "Abandon"},

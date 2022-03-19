@@ -84,7 +84,7 @@ class SheetPlugin:
         for sheet_label in to_watch:
             if sheet_label not in self.watched_sheets:
                 if self.workbook.has_sheet(sheet_label):
-                    logger.debug('Plugin of %s will watch sheet %s',
+                    logger.debug('Plugin of %s should watch sheet %s',
                                  self.sheet.label, sheet_label)
                     sheet = self.workbook[sheet_label]
                     # if sheet is None:

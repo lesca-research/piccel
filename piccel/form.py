@@ -954,13 +954,14 @@ class Predicate:
 
 class DateTimeCollector:
     def __init__(self, callback_date_str, qdate=None,
-                 hours=None, minutes=None):
+                 hours=None, minutes=None, date_only=False):
         self.date, self.hours, self.minutes = None, None, None
         self.callback = None
+        self.date_only = date_only
         self.set_date(qdate)
         self.set_hours(hours)
         self.set_minutes(minutes)
-        self.callback = callback_date_str
+        self.callback = if_none(callback_date_str, lambda s: None)
 
     def set_date(self, qdate):
         if qdate is not None and not qdate.isNull():
@@ -984,14 +985,17 @@ class DateTimeCollector:
         self.callback('')
 
     def check_completion(self):
-        if self.callback is not None:
-            date_str = ''
-            if self.date is not None and self.minutes is not None and \
-               self.hours is not None:
-                dt = datetime.combine(self.date, time(self.hours, self.minutes))
-                date_str = dt.strftime(FormItem.DATETIME_FORMAT)
-            print('collected datetime: ', date_str)
-            self.callback(date_str)
+        if self.callback is None:
+            return
+
+        date_str = ''
+        if self.date_only and self.date is not None:
+            date_str = self.date.strftime(FormItem.DATE_FORMAT)
+        elif self.date is not None and self.minutes is not None and \
+             self.hours is not None:
+            dt = datetime.combine(self.date, time(self.hours, self.minutes))
+            date_str = dt.strftime(FormItem.DATETIME_FORMAT)
+        self.callback(date_str)
 
 class TestDateTimeCollector(unittest.TestCase):
 
@@ -1014,6 +1018,19 @@ class TestDateTimeCollector(unittest.TestCase):
                           11, 13)
         self.assertEqual(self.set_date_str_nb_calls, 0)
         self.assertEqual(self.date_str, 'start')
+
+    def test_date_only_no_callback_at_init(self):
+        DateTimeCollector(self.set_date_str, QtCore.QDate(2020,1,1),
+                          date_only=True)
+        self.assertEqual(self.set_date_str_nb_calls, 0)
+        self.assertEqual(self.date_str, 'start')
+
+    def test_date_only(self):
+        dt_collector = DateTimeCollector(self.set_date_str, date_only=True)
+        dt_collector.set_date(QtCore.QDate(2020,1,1))
+        self.assertEqual(self.set_date_str_nb_calls, 1)
+        self.assertEqual(self.date_str, (datetime(2020,1,1)
+                                         .strftime(FormItem.DATE_FORMAT)))
 
     def test_setdate_no_hours(self):
         dt_collector = DateTimeCollector(self.set_date_str)
@@ -1038,6 +1055,16 @@ class TestDateTimeCollector(unittest.TestCase):
         dt_collector.set_date(QtCore.QDate(2020,1,1))
         dt_collector.set_hours(12)
         dt_collector.set_minutes(13)
+        self.assertEqual(self.set_date_str_nb_calls, 3)
+        dt_collector.clear()
+        self.assertEqual(self.set_date_str_nb_calls, 4)
+        self.assertEqual(self.date_str, '')
+
+    def test_date_only_clear(self):
+        dt_collector = DateTimeCollector(self.set_date_str, date_only=True)
+        dt_collector.set_date(QtCore.QDate(2020,1,1))
+        dt_collector.set_date(QtCore.QDate(2020,1,2))
+        dt_collector.set_date(QtCore.QDate(2020,1,3))
         self.assertEqual(self.set_date_str_nb_calls, 3)
         dt_collector.clear()
         self.assertEqual(self.set_date_str_nb_calls, 4)
@@ -1877,8 +1904,9 @@ class FormItem:
         except InvalidValue:
             pass
         if vdate is None:
-            return (date.today().strftime(FormItem.DATE_FORMAT),
-                    FormItem.QDATE_FORMAT, None, None)
+            return (None, FormItem.QDATE_FORMAT, None, None)
+            #return (date.today().strftime(FormItem.DATE_FORMAT),
+            #        FormItem.QDATE_FORMAT, None, None)
         hours, mins = 0, 0
         if self.vtype == 'datetime':
             hours = vdate.hour
@@ -4033,14 +4061,27 @@ def make_item_input_widget(item_widget, item, key, key_label,
         else:
             qdate = QtCore.QDate()
         logger.debug2("Init date field with %s -> qdate=%s", date_str, qdate)
-        date_collector = DateTimeCollector(item.set_input_str, qdate, hour, mins)
+        date_collector = DateTimeCollector(item.set_input_str, qdate, hour, mins,
+                                           date_only=item.vtype == 'date')
 
+        #_input_ui.datetime_field.setSpecialValueText(" NA ")
         _input_ui.datetime_field.setDate(qdate)
-        _input_ui.datetime_field.dateChanged.connect(date_collector.set_date)
+        def f_set(date_str):
+            _input_ui.datetime_field.setStyleSheet("")
+            date_collector.set_date(date_str)
+        _input_ui.datetime_field.dateChanged.connect(f_set)
+
+        def f_clear():
+            # TODO: also modify style of hour and min field!
+            date_collector.clear()
+            _input_ui.datetime_field.setStyleSheet("color: gray;")
+        _input_ui.button_clear.clicked.connect(f_clear)
+
         if hour is not None:
             _input_ui.hour_field.setValue(hour)
         else:
             _input_ui.hour_field.clear()
+        # TODO: reset style sheet on set
         callback = get_set_connect(_input_ui.hour_field.value,
                                    date_collector.set_hours)
         _input_ui.hour_field.editingFinished.connect(callback)
@@ -4049,6 +4090,7 @@ def make_item_input_widget(item_widget, item, key, key_label,
             _input_ui.minute_field.setValue(mins)
         else:
             _input_ui.minute_field.clear()
+        # TODO: reset style sheet on set
         callback = get_set_connect(_input_ui.minute_field.value,
                                    date_collector.set_minutes)
         _input_ui.minute_field.editingFinished.connect(callback)
