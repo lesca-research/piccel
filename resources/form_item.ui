@@ -146,6 +146,16 @@ border-bottom-right-radius: 0px;</string>
            </property>
           </widget>
          </item>
+         <item>
+          <widget class="QPushButton" name="button_clear">
+           <property name="text">
+            <string>Clear</string>
+           </property>
+           <property name="flat">
+            <bool>false</bool>
+           </property>
+          </widget>
+         </item>
         </layout>
        </widget>
       </item>

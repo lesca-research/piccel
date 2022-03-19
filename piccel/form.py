@@ -1389,13 +1389,13 @@ class Translator():
 
 
 def unformat_boolean(s):
-    if s=='True':
+    if s == 'True':
         return True
-    elif s=='False' or s=='':
+    elif s == 'False' or s == '':
         return False
     else:
-        raise ValueError('Boolean string must be "True", "False" or '\
-                         'empty (%s given)'%s)
+        raise ValueError('Boolean string must be "True", "False", '\
+                         'empty (%s given)' % s)
 
 import html5lib
 import html
@@ -1879,6 +1879,10 @@ class FormItem:
             assert(len(self.keys)==1)
             key = next(iter(self.keys))
 
+        logger.debug('get_value request for key %s (vtype: %s) - '\
+                     'error_when_invalid=%s', key, self.vtype, error_when_invalid)
+        logger.debug('Available choices: %s', self.choices)
+
         if not self.validity and error_when_invalid:
             raise InvalidValue("%s: %s" %(key,self.validity_message))
 
@@ -1887,12 +1891,12 @@ class FormItem:
             current_choices = {self.tr[k]:k for k in self.choices}
             value_str = current_choices.get(value_str, value_str)
 
-        try:
-            return (self.unformat(value_str)
-                    if value_str is not None and len(value_str)>0
-                    else None)
-        except Exception:
-            from IPython import embed; embed()
+        #try:
+        return (self.unformat(value_str)
+                if value_str is not None and len(value_str)>0
+                else None)
+        #except Exception:
+        #   from IPython import embed; embed()
 
     def get_items(self, error_when_invalid=True):
         return {k : self.get_value(k, error_when_invalid) for k in self.keys}
@@ -3691,6 +3695,7 @@ class ItemPropertyEditor(QtWidgets.QWidget,
                     # TODO: handle format/unformat
                     item_node.pdict['init_value'] = \
                         if_none_or_empty(self.initialValueLineEdit.text(), None)
+                    validation()
                 self.initialValueLineEdit.editingFinished.connect(store_init_value)
             else:
                 self.initialValueLineEdit.setReadOnly(True)
@@ -3735,7 +3740,7 @@ class VariablePropertyEditor(QtWidgets.QWidget,
         self.setupUi(self)
         self.read_only = read_only
 
-    def attach(self, var_node):
+    def attach(self, var_node, validation):
         for field, dest_dict, key in [(self.variable_field_french,
                                        var_node.pdict['key_tr'], 'French'),
                                       (self.variable_field_english,
@@ -3743,7 +3748,8 @@ class VariablePropertyEditor(QtWidgets.QWidget,
                                       (self.initValueLineEdit,
                                        var_node.pdict, 'init_value')]:
             logger.debug2('link line edit for %s', key)
-            link_line_edit(field, dest_dict, key, read_only=self.read_only)
+            link_line_edit(field, dest_dict, key, read_only=self.read_only,
+                           callback=validation)
 
 class SectionTransitionPropertyEditor(QtWidgets.QWidget,
                                       ui.section_transition_edit_ui.Ui_SectionTransitionPropertyEditor):
@@ -3963,7 +3969,7 @@ class FormSheetEditor(QtWidgets.QWidget, ui.form_editor_sheet_ui.Ui_Form):
 import os
 
 def make_item_input_widget(item_widget, item, key, key_label,
-                           item_is_single=False):
+                           item_is_single=False, clear_button=None):
     input_widget = QtWidgets.QWidget(item_widget)
     init_value = item.values_str[key]
     _input_ui = None
@@ -3977,10 +3983,14 @@ def make_item_input_widget(item_widget, item, key, key_label,
         refresh_label_key()
         if not item_is_single:
             item.notifier.add_watcher('language_changed', refresh_label_key)
-        #_input_ui.label_key.setText(item.tr[key])
         _input_ui.value_field.setText(init_value)
-        callback = text_connect(_input_ui.value_field.text, item.set_input_str)
+        callback = text_connect(_input_ui.value_field.text,
+                                partial(item.set_input_str, key=key))
         _input_ui.value_field.editingFinished.connect(callback)
+
+        def null_style():
+            _input_ui.value_field.clear()
+
     elif item.vtype == 'text' and item.choices is None and \
          item.nb_lines>1:
         # Multi line input field
@@ -3991,17 +4001,35 @@ def make_item_input_widget(item_widget, item, key, key_label,
         item.notifier.add_watcher('language_changed', refresh_label_key)
         _input_ui.value_field.setPlainText(init_value)
         callback = text_connect(_input_ui.value_field.toPlainText,
-                                item.set_input_str)
+                                partial(item.set_input_str, key=key))
         _input_ui.value_field.editingFinished.connect(callback)
+
+        def null_style():
+            _input_ui.value_field.clear()
+
     elif (item.vtype == 'boolean' and not item_is_single):
+        # Checkboxes
         _input_ui = ui.item_boolean_checkboxes_ui.Ui_Form()
         _input_ui.setupUi(input_widget)
         refresh_label_key = refresh_text(item, key, _input_ui.check_box)
         refresh_label_key()
         item.notifier.add_watcher('language_changed', refresh_label_key)
-        _input_ui.check_box.toggled.connect(lambda b: item.set_input_str('%s'%b))
+
+        def null_style():
+            logger.debug('Apply null style for %s (boolean in multi-item)', key)
+            _input_ui.check_box.setChecked(False)
+            _input_ui.check_box.setStyleSheet('color : gray;')
+
+        def _toggle(state):
+            _input_ui.check_box.setStyleSheet('')
+            item.set_input_str('%s' % state, key=key)
+        _input_ui.check_box.toggled.connect(_toggle)
+
         if init_value != '':
             _input_ui.check_box.setChecked(item.get_value())
+        else:
+            null_style()
+
     elif (item.vtype == 'text' and item.choices is not None) or\
          (item.vtype == 'boolean' and item_is_single):
         # Radio buttons
@@ -4013,9 +4041,17 @@ def make_item_input_widget(item_widget, item, key, key_label,
             item.notifier.add_watcher('language_changed', refresh_label_key)
 
         radio_group = QtWidgets.QButtonGroup(input_widget)
+        radio_buttons = []
+
+        def not_null_style():
+            for radio_button in radio_buttons:
+                radio_button.setStyleSheet('')
+            _input_ui.radio_button_other.setStyleSheet('color : gray;')
+
         for idx, choice in enumerate(item.choices.keys()):
             frame = _input_ui.radio_frame
             radio_button = QtWidgets.QRadioButton(frame)
+            radio_buttons.append(radio_button)
             refresh_radio_text = refresh_text(item, choice, radio_button)
             refresh_radio_text()
             item.notifier.add_watcher('language_changed', refresh_radio_text)
@@ -4029,9 +4065,9 @@ def make_item_input_widget(item_widget, item, key, key_label,
                 def __call__(self, state):
                     if state:
                         self.item.set_input_str(self.choice_button.text())
-            radio_button.toggled.connect(ChoiceProcess(item, radio_button))
-            # if item.vtype == 'boolean':
-            #     from IPython import embed; embed()
+            (radio_button.toggled
+             .connect(call_after(ChoiceProcess(item, radio_button),
+                                 not_null_style)))
             if item.is_valid() and item.value_to_str() == choice:
                 radio_group.button(idx).setChecked(True)
         if item.allow_other_choice:
@@ -4043,9 +4079,23 @@ def make_item_input_widget(item_widget, item, key, key_label,
             _input_ui.radio_button_other.toggled.connect(toggle_other_field)
 
             callback = text_connect(_input_ui.other_field.text, item.set_input_str)
-            _input_ui.other_field.editingFinished.connect(callback)
+            (_input_ui.other_field.editingFinished
+             .connect(call_after(callback, not_null_style)))
         else:
             _input_ui.radio_button_other_frame.hide()
+
+        def null_style():
+            logger.debug('Apply null style for %s (boolean in single-item)', key)
+            radio_buttons[0].setAutoExclusive(False)
+            radio_buttons[0].setChecked(False)
+            radio_buttons[0].setAutoExclusive(True)
+            if item.allow_other_choice:
+                _input_ui.other_field.clear()
+                _input_ui.other_field.setEnabled(False)
+
+            for radio_button in radio_buttons:
+                radio_button.setStyleSheet('color : gray;')
+            _input_ui.radio_button_other.setStyleSheet('color : gray;')
 
     elif item.vtype == 'date' or item.vtype == 'datetime':
         # Date/Time input
@@ -4055,27 +4105,33 @@ def make_item_input_widget(item_widget, item, key, key_label,
         refresh_label_key()
         item.notifier.add_watcher('language_changed', refresh_label_key)
         date_str, date_fmt, hour, mins = item.split_qdatetime_str(key)
+        if item.vtype == 'date':
+            hour, mins = None, None
 
         if date_str is not None:
             qdate = QtCore.QDate.fromString(date_str, date_fmt)
         else:
             qdate = QtCore.QDate()
         logger.debug2("Init date field with %s -> qdate=%s", date_str, qdate)
-        date_collector = DateTimeCollector(item.set_input_str, qdate, hour, mins,
+        date_collector = DateTimeCollector(partial(item.set_input_str, key=key),
+                                           qdate, hour, mins,
                                            date_only=item.vtype == 'date')
 
-        #_input_ui.datetime_field.setSpecialValueText(" NA ")
         _input_ui.datetime_field.setDate(qdate)
-        def f_set(date_str):
-            _input_ui.datetime_field.setStyleSheet("")
-            date_collector.set_date(date_str)
-        _input_ui.datetime_field.dateChanged.connect(f_set)
 
-        def f_clear():
-            # TODO: also modify style of hour and min field!
+        def reset_style():
+            _input_ui.datetime_field.setStyleSheet("")
+
+        (_input_ui.datetime_field.dateChanged
+         .connect(call_after(date_collector.set_date, reset_style)))
+
+        def null_style():
             date_collector.clear()
             _input_ui.datetime_field.setStyleSheet("color: gray;")
-        _input_ui.button_clear.clicked.connect(f_clear)
+            if item.vtype == 'datetime':
+                _input_ui.hour_field.clear()
+                _input_ui.minute_field.clear()
+        #_input_ui.button_clear.clicked.connect(f_clear)
 
         if hour is not None:
             _input_ui.hour_field.setValue(hour)
@@ -4084,21 +4140,27 @@ def make_item_input_widget(item_widget, item, key, key_label,
         # TODO: reset style sheet on set
         callback = get_set_connect(_input_ui.hour_field.value,
                                    date_collector.set_hours)
-        _input_ui.hour_field.editingFinished.connect(callback)
+        _input_ui.hour_field.editingFinished.connect(call_after(callback,
+                                                                reset_style))
 
         if mins is not None:
             _input_ui.minute_field.setValue(mins)
         else:
             _input_ui.minute_field.clear()
-        # TODO: reset style sheet on set
         callback = get_set_connect(_input_ui.minute_field.value,
                                    date_collector.set_minutes)
-        _input_ui.minute_field.editingFinished.connect(callback)
+        _input_ui.minute_field.editingFinished.connect(call_after(callback,
+                                                                  reset_style))
 
         if item.vtype == 'date':
             _input_ui.frame_hour.hide()
     else:
         logger.error('Cannot make UI for item %s (vtype: %s)', item, item.vtype)
+
+    if clear_button is not None:
+        f_set_input_to_None = on_act(partial(item.set_input_str, '', key=key))
+        clear_button.clicked.connect(call_after(f_set_input_to_None,
+                                                null_style))
 
     if _input_ui is not None and item_is_single:
         _input_ui.label_key.hide()
@@ -4130,10 +4192,16 @@ def make_item_widget(section_widget, item):
         item.notifier.add_watcher('item_valid', _item_ui.label_invalid_message.hide)
         if item.allow_None:
             _item_ui.required_label.hide()
+            clear_button = _item_ui.button_clear
+        else:
+            clear_button = None
+            _item_ui.button_clear.hide()
+
         for key, key_label in item.keys.items():
             input_widget = make_item_input_widget(item_widget, item, key,
                                                   key_label,
-                                                  item_is_single=len(item.keys)==1)
+                                                  item_is_single=len(item.keys)==1,
+                                                  clear_button=clear_button)
             _item_ui.input_layout.addWidget(input_widget)
             if not item.editable:
                 input_widget.setEnabled(False)
@@ -4617,13 +4685,12 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         elif model_item.node_type == 'choice':
             self.show_choice_editor(model_item)
         elif model_item.node_type == 'variable':
-            # TODO: validation: check that init value has proper format
-            self.show_variable_editor(model_item)
+            self.show_variable_editor(model_item, f_validation)
         elif model_item.node_type == 'transition_rule':
             self.show_section_transition_editor(model_item, f_validation)
 
-    def show_variable_editor(self, var_node):
-        self.variable_property_editor.attach(var_node)
+    def show_variable_editor(self, var_node, validation):
+        self.variable_property_editor.attach(var_node, validation)
         self.variable_property_editor.show()
 
     def show_section_transition_editor(self, transition_node, validation):
@@ -5011,7 +5078,28 @@ class Node(object):
             except Exception as e:
                 self.error_hint += repr(e)
 
-        if self.node_type == 'transition_rule':
+        elif self.node_type in ['item_single_var', 'variable']:
+            if self.node_type == 'item_single_var':
+                vtype = self.pdict['vtype']
+            else:
+                vtype = self.parent().pdict['vtype']
+            init_value = self.pdict['init_value']
+
+            if init_value is not None:
+                unformat = FormItem.VTYPES[vtype]['unformat']
+                invalid_msg = ('Init value error: %s' %
+                               FormItem.VTYPES[vtype]['message invalid format'])
+                logger.debug('Check %s (%s), vtype=%s', self.label, self.node_type,
+                             vtype)
+
+                try:
+                    unformat(init_value)
+                except ValueError:
+                    self.error_hint += invalid_msg
+                except Exception as e:
+                    self.error_hint += repr(e)
+
+        elif self.node_type == 'transition_rule':
             next_section = self.pdict['next_section']
             parent_section = self.parent().parent()
             logger.debug('Check %s, next_section=%s', self.label, next_section)
@@ -5304,16 +5392,19 @@ class TreeModel(QAbstractItemModel):
 
         self.multi_variable_icon = {
             'base' : QtGui.QIcon(':/icons/form_multi_variable_icon'),
+            'invalid' : QtGui.QIcon(':/icons/form_multi_variable_icon'),
             'sel_checked' : QtGui.QIcon(':/icons/form_checked_multi_variable_icon'),
             'sel_unchecked' : QtGui.QIcon(':/icons/form_unchecked_multi_variable_icon')
         }
         self.variable_icon = {
             'base' : QtGui.QIcon(':/icons/form_variable_icon'),
+            'invalid' : QtGui.QIcon(':/icons/form_variable_icon'),
             'sel_checked' : QtGui.QIcon(':/icons/form_checked_variable_icon'),
             'sel_unchecked' : QtGui.QIcon(':/icons/form_unchecked_variable_icon')
         }
         self.section_icon = {
             'base' : QtGui.QIcon(':/icons/form_section_icon'),
+            'invalid' : QtGui.QIcon(':/icons/form_section_icon'),
             'sel_checked' : QtGui.QIcon(':/icons/form_checked_section_icon'),
             'sel_unchecked' : QtGui.QIcon(':/icons/form_unchecked_section_icon')
         }
