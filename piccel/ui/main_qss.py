@@ -12,8 +12,11 @@ default_bg_qcolor = QtGui.QColor(*style_defs['default_bg_color'])
 section_bg_color = QtGui.QColor(*section_bg_color_rgb)
 section_fg_color = QtGui.QColor(*section_fg_color_rgb)
 
-form_item_invalid_bg_color = QtGui.QColor(162, 37, 34)
+form_item_invalid_bg_color = QtGui.QColor(162, 37, 34) # some red
 form_item_invalid_fg_color = QtGui.QColor(255, 255, 255)
+
+form_item_warning_bg_color = QtGui.QColor(224, 142, 69) # some orange
+form_item_warning_fg_color = QtGui.QColor(255, 255, 255)
 
 main_style = """
 QLabel {{

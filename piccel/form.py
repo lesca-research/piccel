@@ -3492,7 +3492,10 @@ def link_line_edit(line_edit, dest_dict, dest_key, empty_str_is_None=False,
         line_edit.setReadOnly(True)
 
 def link_text_edit(text_edit, dest_dict, dest_key, empty_str_is_None=False,
-                   read_only=False):
+                   read_only=False, callback=None):
+
+    callback = if_none(callback, lambda : None)
+
     try:
         text_edit.editingFinished.disconnect()
     except TypeError:
@@ -3507,8 +3510,8 @@ def link_text_edit(text_edit, dest_dict, dest_key, empty_str_is_None=False,
             f_store_in_dict = partial(dict_set_none_if_empty, dest_dict, dest_key)
         else:
             f_store_in_dict = partial(dest_dict.__setitem__, dest_key)
-        callback = compose(text_edit.toPlainText, f_store_in_dict)
-        text_edit.editingFinished.connect(callback)
+        store_text = compose(text_edit.toPlainText, f_store_in_dict)
+        text_edit.editingFinished.connect(call_after(store_text, callback))
     else:
         text_edit.setReadOnly(True)
 
@@ -3593,11 +3596,11 @@ class FormPropertyEditor(QtWidgets.QWidget,
         self.setupUi(self)
         self.read_only = read_only
 
-    def attach(self, form_node):
+    def attach(self, form_node, validation):
         for field, language in [(self.title_field_french, 'French'),
                                 (self.title_field_english, 'English')]:
             link_line_edit(field, form_node.pdict['title'], language,
-                           read_only=self.read_only)
+                           read_only=self.read_only, callback=validation)
 
 class SectionPropertyEditor(QtWidgets.QWidget,
                             ui.section_edit_ui.Ui_SectionPropertyEditor):
@@ -3606,11 +3609,11 @@ class SectionPropertyEditor(QtWidgets.QWidget,
         self.setupUi(self)
         self.read_only = read_only
 
-    def attach(self, section_node):
+    def attach(self, section_node, validation):
         for field, language in [(self.title_field_french, 'French'),
                                 (self.title_field_english, 'English')]:
             link_line_edit(field, section_node.pdict['title'], language,
-                           read_only=self.read_only)
+                           read_only=self.read_only, callback=validation)
 
 class ItemPropertyEditor(QtWidgets.QWidget,
                          ui.item_edit_ui.Ui_ItemPropertyEditor):
@@ -3635,7 +3638,8 @@ class ItemPropertyEditor(QtWidgets.QWidget,
                                       (self.regExprInvalidHintLineEdit,
                                        item_node.pdict,
                                        'regexp_invalid_message')]:
-            link_line_edit(field, dest_dict, key, read_only=self.read_only)
+            link_line_edit(field, dest_dict, key, read_only=self.read_only,
+                           callback=validation)
 
         for field, dest_dict, key in [(self.description_field_french,
                                        item_node.pdict['description'],
@@ -3643,7 +3647,8 @@ class ItemPropertyEditor(QtWidgets.QWidget,
                                       (self.description_field_english,
                                        item_node.pdict['description'],
                                        'English')]:
-            link_text_edit(field, dest_dict, key, read_only=self.read_only)
+            link_text_edit(field, dest_dict, key, read_only=self.read_only,
+                           callback=validation)
 
         link_combo_box(self.typeComboBox, item_node.pdict, 'vtype',
                        editable=(not item_node.pdict['type_locked'] and
@@ -3727,11 +3732,11 @@ class ChoicePropertyEditor(QtWidgets.QWidget,
         self.setupUi(self)
         self.read_only = read_only
 
-    def attach(self, choice_node):
+    def attach(self, choice_node, validation):
         for field, language in [(self.choice_field_french, 'French'),
                                 (self.choice_field_english, 'English')]:
             link_line_edit(field, choice_node.pdict, language,
-                           read_only=self.read_only)
+                           read_only=self.read_only, callback=validation)
 
 class VariablePropertyEditor(QtWidgets.QWidget,
                              ui.variable_edit_ui.Ui_VariablePropertyEditor):
@@ -3865,9 +3870,12 @@ class FormSheetEditor(QtWidgets.QWidget, ui.form_editor_sheet_ui.Ui_Form):
                     raise FormEditionCancelled()
                 # else Ok -> keep error and form will be open read-only
         except Exception as e:
-            error_message = 'Error while requesting form edition: %s' % e
-            logger.error(traceback.format_exception(*sys.exc_info()))
+            msg = 'Error while requesting form edition'
+            details = format_exc()
+            logger.error('%s\n%s', msg, details)
+            show_critical_message_box(msg, detailed_text=details)
             self.sheet.close_form_edition()
+            raise FormEditionCancelled()
 
         self.read_only = False
         if error_message is not None:
@@ -4155,6 +4163,8 @@ def make_item_input_widget(item_widget, item, key, key_label,
         if item.vtype == 'date':
             _input_ui.frame_hour.hide()
     else:
+        def null_style():
+            pass
         logger.error('Cannot make UI for item %s (vtype: %s)', item, item.vtype)
 
     if clear_button is not None:
@@ -4190,7 +4200,7 @@ def make_item_widget(section_widget, item):
         item.notifier.add_watcher('item_invalid',
                                   _item_ui.label_invalid_message.show)
         item.notifier.add_watcher('item_valid', _item_ui.label_invalid_message.hide)
-        if item.allow_None:
+        if item.allow_None and len(item.keys) > 0:
             _item_ui.required_label.hide()
             clear_button = _item_ui.button_clear
         else:
@@ -4518,15 +4528,28 @@ class FormFileEditor(QtWidgets.QWidget, ui.form_editor_file_ui.Ui_Form):
 from PyQt5.QtCore import pyqtSignal
 
 class ImgWidget(QtWidgets.QWidget):
-    def __init__(self, img_fn):
+    def __init__(self, image_fn):
         super().__init__()
         hbox = QtWidgets.QHBoxLayout(self)
-        pixmap = QtGui.QPixmap(img_fn)
-        label = QtWidgets.QLabel(self)
-        label.setPixmap(pixmap)
-        hbox.addWidget(label)
-        self.setLayout(hbox)
+        if 0:
+            pixmap = QtGui.QPixmap(img_fn)
+            label = QtWidgets.QLabel(self)
+            label.setPixmap(pixmap)
+            hbox.addWidget(label)
 
+        self.graphicsView = QtWidgets.QGraphicsView(self)
+        self.graphicsView.setFrameShadow(QtWidgets.QFrame.Raised)
+        #self.graphicsView.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContentsOnFirstShow)
+        self.graphicsView.setAlignment(QtCore.Qt.AlignJustify |
+                                       QtCore.Qt.AlignVCenter)
+        self.graphicsView.setObjectName("graphicsView")
+        scene = QtWidgets.QGraphicsScene(self)
+        pixmap = QtGui.QPixmap(image_fn)
+        item = QtWidgets.QGraphicsPixmapItem(pixmap)
+        scene.addItem(item)
+        self.graphicsView.setScene(scene)
+        hbox.addWidget(self.graphicsView)
+        self.setLayout(hbox)
         # self.setWindowTitle('Image with PyQt')
 
 
@@ -4677,13 +4700,13 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
 
         f_validation = partial(self.model.validate_node_recurse, model_index)
         if model_item.node_type == 'form':
-            self.show_form_editor(model_item)
+            self.show_form_editor(model_item, f_validation)
         elif model_item.node_type == 'section':
-            self.show_section_editor(model_item)
+            self.show_section_editor(model_item, f_validation)
         elif model_item.node_type.startswith('item'):
             self.show_item_editor(model_item, f_validation)
         elif model_item.node_type == 'choice':
-            self.show_choice_editor(model_item)
+            self.show_choice_editor(model_item, f_validation)
         elif model_item.node_type == 'variable':
             self.show_variable_editor(model_item, f_validation)
         elif model_item.node_type == 'transition_rule':
@@ -4698,16 +4721,16 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
                                                        validation=validation)
         self.section_transition_property_editor.show()
 
-    def show_choice_editor(self, choice_node):
-        self.choice_property_editor.attach(choice_node)
+    def show_choice_editor(self, choice_node, validation):
+        self.choice_property_editor.attach(choice_node, validation)
         self.choice_property_editor.show()
 
-    def show_form_editor(self, form_node):
-        self.form_property_editor.attach(form_node)
+    def show_form_editor(self, form_node, validation):
+        self.form_property_editor.attach(form_node, validation)
         self.form_property_editor.show()
 
-    def show_section_editor(self, section_node):
-        self.section_property_editor.attach(section_node)
+    def show_section_editor(self, section_node, validation):
+        self.section_property_editor.attach(section_node, validation)
         self.section_property_editor.show()
 
     def show_item_editor(self, item_node, validation):
@@ -4856,7 +4879,7 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         g_bg_color = (ui.main_qss.default_bg_qcolor
                       .name(QtGui.QColor.HexRgb))
         G = pgv.AGraph(strict=False, directed=True,
-                       bgcolor=g_bg_color)
+                       bgcolor=g_bg_color, fontname="Verdana", fontsize="30pt")
         G.add_node("__submit__")
         first_section = True
         for section_node in form_node.childItems:
@@ -4895,6 +4918,8 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
             self.sections_graph_img.close()
         self.sections_graph_img = ImgWidget(tmp_img)
         self.sections_graph_img.show()
+
+        # TODO: remove on close!!
 
     def open_menu(self, position):
         # indexes = self.sender().selectedIndexes()
@@ -5062,6 +5087,7 @@ class Node(object):
         self.childItems = []
         self.state = state
         self.error_hint = ''
+        self.warning_hint = ''
         self.pdict = if_none(pdict, {})
 
     def to_json(self):
@@ -5074,10 +5100,43 @@ class Node(object):
         return [c.label for c in self.childItems
                 if c.node_type == self.child_type]
 
-    # def indicate_invalid_child(self, child):
-    #     self.error_hint += 'Subnode %s invalid.' % child.label
-    #     new_state = self.state
-    #     if self.
+    def validate_translation(self):
+        previous_warning_hint = self.warning_hint
+        self.warning_hint = ''
+
+        def _missing_tr(d):
+            if len(d) <= 1:
+                return True
+
+            languages = d.keys()
+            not_filled_tr = []
+            has_one_tr = False
+            for language, tr in d.items():
+                if len(tr) > 0:
+                    has_one_tr = True
+                else:
+                    not_filled_tr.append(language)
+
+            if has_one_tr:
+                return not_filled_tr
+
+            return []
+
+        if self.node_type == 'choice':
+            missing_languages = _missing_tr(self.pdict)
+            if len(missing_languages) > 0:
+                self.warning_hint += ('Missing translation for %s.' %
+                                      ', '.join(missing_languages))
+        else:
+            for parameter in ('title', 'description'):
+                if parameter in self.pdict:
+                    missing_languages = _missing_tr(self.pdict[parameter])
+                    if len(missing_languages) > 0:
+                        self.warning_hint += ('Missing %s translation for %s.' %
+                                              (parameter,
+                                               ', '.join(missing_languages)))
+
+        return self.warning_hint != previous_warning_hint
 
     def validate(self):
         new_state = self.state
@@ -5465,12 +5524,14 @@ class TreeModel(QAbstractItemModel):
 
     def validate_node(self, node_index):
         node = self.getItem(node_index)
-        if not node.validate():
-
+        validity_changed = node.validate()
+        translation_completness_changed = node.validate_translation()
+        if validity_changed or translation_completness_changed:
             self.dataChanged.emit(node_index, node_index,
                                   [QtCore.Qt.ForegroundRole,
                                    QtCore.Qt.BackgroundRole,
                                    QtCore.Qt.ToolTipRole])
+
         return node.state == 'invalid'
 
     def set_node_selection(self, state, node_index, apply_to_children=True):
@@ -5771,9 +5832,11 @@ class TreeModel(QAbstractItemModel):
 
         node = self.getItem(index)
 
-        if (role == QtCore.Qt.ToolTipRole and node.error_hint is not None
-            and node.error_hint != ''):
-            return node.error_hint
+        if role == QtCore.Qt.ToolTipRole:
+            if node.error_hint is not None and node.error_hint != '':
+                return node.error_hint
+            elif node.warning_hint is not None and node.warning_hint != '':
+                return node.warning_hint
 
         if role == Qt.DisplayRole or role == Qt.EditRole:
             return node.data(0)
@@ -5781,13 +5844,17 @@ class TreeModel(QAbstractItemModel):
         if role == QtCore.Qt.BackgroundRole:
             if node.state == 'invalid':
                 return ui.main_qss.form_item_invalid_bg_color
-            if node.node_type == 'section':
+            elif node.warning_hint is not None and node.warning_hint != '':
+                return ui.main_qss.form_item_warning_bg_color
+            elif node.node_type == 'section':
                 return ui.main_qss.section_bg_color
 
         if role == QtCore.Qt.ForegroundRole:
             if node.state == 'invalid':
                 return ui.main_qss.form_item_invalid_fg_color
-            if node.node_type == 'section':
+            elif node.warning_hint is not None and node.warning_hint != '':
+                return ui.main_qss.form_item_warning_fg_color
+            elif node.node_type == 'section':
                 return ui.main_qss.section_fg_color
 
         if role == Qt.FontRole and node.node_type in ['variables', 'choices',

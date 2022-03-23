@@ -154,7 +154,7 @@
          <item row="2" column="0">
           <widget class="QLabel" name="roleLabel">
            <property name="text">
-            <string>Role</string>
+            <string>Role:</string>
            </property>
           </widget>
          </item>

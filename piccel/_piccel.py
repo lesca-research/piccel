@@ -498,7 +498,7 @@ class LocalFileSystem:
             for bfn in files:
                 rdir = op.relpath(wroot, self.root_folder)
                 fn = op.normpath(op.join(rdir, bfn))
-                self.current_stats.pop(fn)
+                self.current_stats.pop(fn, None)
 
         logger.debug2('Remove folder %s', full_folder)
         shutil.rmtree(full_folder)
@@ -563,6 +563,9 @@ class InvalidSheetLabel(Exception): pass
 class NoFormMasterError(Exception): pass
 class NoPluginFileError(Exception): pass
 class UndefinedUser(Exception): pass
+class NonEmptyDataSheetError(Exception): pass
+class LiveFormsPendingError(Exception): pass
+class MasterFormLockError(Exception): pass
 
 class Unformatter:
     def __init__(self, form, key, na_value=pd.NA):
@@ -1064,9 +1067,7 @@ class DataSheet:
                              self.label, '\n'.join(data_bfns))
             if len(data_bfns) > 0:
                 if self.df.shape[0] > 0:
-                    self.notifier.notify('pre_clear_data')
-                    self.df.drop(self.df.index, inplace=True)
-                    self.notifier.notify('cleared_data')
+                    self.delete_all_entries()
                 # Associated view will be cleared
                 # Expect watchers to react
                 for data_bfn in data_bfns:
@@ -1121,6 +1122,11 @@ class DataSheet:
             # TODO: IMPORTANT changed form data is ignored here
             self.filesystem.accept_all_changes('data')
 
+    def users_with_master_form_lock(self):
+        lock_dir = 'master_form_locks'
+        lock_fns = self.filesystem.listdir(lock_dir)
+        return [self.filesystem.load(op.join(lock_dir, fn)) for fn in lock_fns]
+
     def get_form_for_edition(self, ignore_edition_locks=False):
         # Insure that there is no pending live forms
         users_with_live_forms = self.users_with_pending_live_forms()
@@ -1132,11 +1138,8 @@ class DataSheet:
 
         if not ignore_edition_locks:
             # Insure that there is no edition lock
-            lock_dir = 'master_form_locks'
-            lock_fns = self.filesystem.listdir(lock_dir)
-            if len(lock_fns) > 0:
-                lock_users = [self.filesystem.load(op.join(lock_dir, fn))
-                              for fn in lock_fns]
+            lock_users = self.users_with_master_form_lock()
+            if len(lock_users) > 0:
                 raise FormEditionLocked(lock_users)
 
         self.lock_form_master_edition()
@@ -1481,6 +1484,11 @@ class DataSheet:
                                  overwrite=overwrite)
         else:
             logger.info('No form master to save for sheet %s' % self.label)
+
+        if not self.filesystem.exists('master_form_locks'):
+            logger.info('Sheet %s: Create master form locks folder',
+                        self.label)
+            self.filesystem.makedirs('master_form_locks')
 
     def get_live_forms_folder(self):
         return op.join('live_forms', protect_fn(self.user))
@@ -2098,6 +2106,11 @@ class DataSheet:
         if entry_idx is None:
             entry_idx = (self.new_entry_id(), 0, 0)
         self.add_entry(entry_dict, entry_idx, self._append_df)
+
+    def delete_all_entries(self):
+        self.notifier.notify('pre_clear_data')
+        self.df.drop(self.df.index, inplace=True)
+        self.notifier.notify('cleared_data')
 
     # TODO: admin feature!
     def delete_entry(self, entry_idx):
@@ -3998,6 +4011,7 @@ class WorkBook:
         if not filesystem.exists(sheet_folder):
             logger.info('WorkBook %s: Create sheet subfolder', self.label)
             filesystem.makedirs(sheet_folder)
+        self.sheet_folder = sheet_folder
 
         jobs_folder = op.join(data_folder, WorkBook.JOBS_FOLDER)
         if not filesystem.exists(jobs_folder):
@@ -4738,6 +4752,25 @@ class WorkBook:
 
         self.after_workbook_load()
 
+    def delete_sheet(self, sheet_label):
+        sheet = self.sheets[sheet_label]
+
+        blocking_users = sheet.users_with_pending_live_forms()
+        if len(blocking_users):
+            raise LiveFormsPendingError(blocking_users)
+
+        if sheet.df is not None and sheet.df.shape[0] > 0:
+            raise NonEmptyDataSheetError()
+
+        blocking_users = sheet.users_with_master_form_lock()
+        if len(blocking_users):
+            raise MasterFormLockError(blocking_users)
+
+        self.sheets.pop(sheet_label)
+        self.filesystem.rmtree(op.join(self.sheet_folder, sheet_label))
+
+        self.after_workbook_load() # TODO handle unwatching here: better to fully reload workbook from scratch in fact...
+
     @check_role(UserRole.EDITOR)
     def save_sheet_entry(self, sheet_label, entry_df):
         assert(self.encrypter is not None)
@@ -4850,6 +4883,135 @@ class TestWorkBook(unittest.TestCase):
         wb2.set_job_code('a_job', job_code, save=True)
         self.assertEqual(wb2.get_job_code('a_job'), job_code)
         wb2.run_job('a_job')
+
+    def test_delete_sheet(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'A_Workbook'
+        user = 'TV'
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
+
+        sheet_id = 'Simple_Sheet'
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                        default_language='French',
+                        supported_languages={'French'}),]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Evaluation'})
+        sh1 = DataSheet(sheet_id, form, user=user)
+
+        wb.add_sheet(sh1)
+        wb.delete_sheet(sh1.label)
+
+        self.assertRaises(SheetNotFound, wb.__getitem__, 'Simple_Sheet')
+        self.assertFalse(fs.exists(op.join(wb.sheet_folder, 'Simple_Sheet')))
+
+        wb2 = WorkBook.from_configuration_file(op.join(self.tmp_dir, cfg_bfn))
+        wb2.decrypt(self.access_pwd)
+        wb2.user_login(user, self.admin_pwd)
+
+        self.assertRaises(SheetNotFound, wb2.__getitem__, 'Simple_Sheet')
+        self.assertFalse(fs.exists(op.join(wb2.sheet_folder, 'Simple_Sheet')))
+
+    def test_cannot_delete_sheet_with_data(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'A_Workbook'
+        user = 'TV'
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
+
+        sheet_id = 'Simple_Sheet'
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                        default_language='French',
+                        supported_languages={'French'}),]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Evaluation'})
+        sh1 = DataSheet(sheet_id, form, user=user)
+        wb.add_sheet(sh1)
+
+        sh1.add_new_entry({'Participant_ID' : 'Bobbie'})
+        sh1.add_new_entry({'Participant_ID' : 'Chouchou'})
+
+        self.assertRaises(NonEmptyDataSheetError, wb.delete_sheet, 'Simple_Sheet')
+
+        sh1.delete_all_entries()
+
+        wb.delete_sheet(sh1.label)
+        self.assertRaises(SheetNotFound, wb.__getitem__, 'Simple_Sheet')
+        self.assertFalse(fs.exists(op.join(wb.sheet_folder, 'Simple_Sheet')))
+
+    def test_cannot_delete_sheet_pending_live_forms(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'A_Workbook'
+        user = 'TV'
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
+
+        sheet_id = 'Simple_Sheet'
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                        default_language='French',
+                        supported_languages={'French'}),]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Evaluation'})
+        sh1 = DataSheet(sheet_id, form, user=user)
+        wb.add_sheet(sh1)
+
+        form = sh1.form_new_entry()
+        self.assertRaises(LiveFormsPendingError, wb.delete_sheet, 'Simple_Sheet')
+
+        form.submit()
+        sh1.delete_all_entries()
+
+        wb.delete_sheet(sh1.label)
+        self.assertRaises(SheetNotFound, wb.__getitem__, 'Simple_Sheet')
+        self.assertFalse(fs.exists(op.join(wb.sheet_folder, 'Simple_Sheet')))
+
+    def test_cannot_delete_sheet_master_form_edition_lock(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb_id = 'A_Workbook'
+        user = 'TV'
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd, admin_user=user)
+        cfg_bfn = protect_fn(wb_id) + '.psh'
+
+        sheet_id = 'Simple_Sheet'
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                        default_language='French',
+                        supported_languages={'French'}),]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Evaluation'})
+        sh1 = DataSheet(sheet_id, form, user=user)
+        wb.add_sheet(sh1)
+
+        sh1.get_form_for_edition()
+        self.assertRaises(MasterFormLockError, wb.delete_sheet, 'Simple_Sheet')
+
+        sh1.close_form_edition()
+
+        wb.delete_sheet(sh1.label)
+        self.assertRaises(SheetNotFound, wb.__getitem__, 'Simple_Sheet')
+        self.assertFalse(fs.exists(op.join(wb.sheet_folder, 'Simple_Sheet')))
+
+    def test_delete_sheet_on_watchers(self):
+        raise NotImplementedError() # TODO
 
     def test_export_all_logic(self):
 
@@ -7612,12 +7774,12 @@ class TabSorter:
 
     def close_tab_sheet(self, sheet_label):
         """
-        Remove tab showing given form and set focus on previous tab or
+        Remove tab showing given sheet and set focus on previous tab or
         on next one if removed sheet was the first.
         """
-        tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet.label])
+        tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet_label])
         self.tab_widget.removeTab(tab_idx)
-        self.sheet_widgets.pop(sheet.label)
+        self.sheet_widgets.pop(sheet_label)
 
     def show_tab_sheet_warning(self, sheet_name, reporting=None):
         tab_idx = self.tab_widget.indexOf(self.sheet_widgets[sheet_name])
@@ -8518,8 +8680,20 @@ class PiccelApp(QtWidgets.QApplication):
         ask.setIcon(QtWidgets.QMessageBox.Question)
         answer = ask.exec()
         if answer == QtWidgets.QMessageBox.Yes:
-            print("TODO: delete sheet!")
-            # self.logic.workbook.delete_sheet(sheet_label) # TODO
+            try:
+                self.logic.workbook.delete_sheet(sheet_label)
+                self.tab_sorter.close_tab_sheet(sheet_label)
+            except NonEmptyDataSheetError:
+                show_critical_message_box('Cannot delete sheet with data. '\
+                                          'It must be cleared first.')
+            except MasterFormLockError as e:
+                show_critical_message_box('Cannot delete sheet because '\
+                                          'form master is being edited by '\
+                                          '<b>%s</b>.' % ', '.join(e.args[0]))
+            except LiveFormsPendingError as e:
+                show_critical_message_box('Cannot delete sheet because '\
+                                          'of pending live forms of '\
+                                          '<b>%s</b>.' % ', '.join(e.args[0]))
 
     def login_preload_user(self, user):
         """ Return new password if reset has happened, or None if no reset """
