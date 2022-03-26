@@ -1457,7 +1457,7 @@ class FormItem:
             'null_value' : ''
         },
          'int' : {
-             'dtype_pd' : 'int',
+             'dtype_pd' : 'Int64',
              'unformat' : lambda s : int(s),
              'format' : lambda i : '%d' % i,
              'message invalid format' : 'Enter an integer',
@@ -1465,7 +1465,7 @@ class FormItem:
              'null_value' : 0
          },
         'int64' : {
-             'dtype_pd' : 'int64',
+             'dtype_pd' : 'Int64',
              'unformat' : lambda s : np.int64(s),
              'format' : lambda i : '%d' % i,
              'message invalid format' : 'Enter an integer',
@@ -1879,9 +1879,9 @@ class FormItem:
             assert(len(self.keys)==1)
             key = next(iter(self.keys))
 
-        logger.debug('get_value request for key %s (vtype: %s) - '\
+        logger.debug2('get_value request for key %s (vtype: %s) - '\
                      'error_when_invalid=%s', key, self.vtype, error_when_invalid)
-        logger.debug('Available choices: %s', self.choices)
+        logger.debug2('Available choices: %s', self.choices)
 
         if not self.validity and error_when_invalid:
             raise InvalidValue("%s: %s" %(key,self.validity_message))
@@ -4945,12 +4945,13 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
             f = partial(self.model.convert_item_to_text_only, model_index)
             action.triggered.connect(on_act(f))
 
-            if len(model_item.childItems) == 0 or \
-               model_item.childItems[0].node_type != 'choices':
-                action = right_click_menu.addAction(self.choices_icon,
-                                                    self.tr("Add choices"))
-                f = partial(self.add_choices_to_item, model_index)
-                action.triggered.connect(on_act(f))
+        if (model_item.node_type in ['item_single_var', 'item'] and
+            (len(model_item.childItems) == 0 or
+             model_item.childItems[0].node_type != 'choices')):
+            action = right_click_menu.addAction(self.choices_icon,
+                                                self.tr("Add choices"))
+            f = partial(self.add_choices_to_item, model_index)
+            action.triggered.connect(on_act(f))
 
         # if isinstance(model_item, ChoicesNode) and \
         #    model_item.other_choice_node() is None:
@@ -5086,6 +5087,7 @@ class Node(object):
         self.child_type = child_type
         self.childItems = []
         self.state = state
+        self.base_state = state
         self.error_hint = ''
         self.warning_hint = ''
         self.pdict = if_none(pdict, {})
@@ -5155,6 +5157,7 @@ class Node(object):
 
         elif self.node_type in ['item_single_var', 'variable']:
             if self.node_type == 'item_single_var':
+                item_node = self
                 vtype = self.pdict['vtype']
             else:
                 vtype = self.parent().pdict['vtype']
@@ -5214,7 +5217,7 @@ class Node(object):
                 self.error_hint += repr(e)
 
         if len(self.error_hint) == 0:
-            new_state = 'base'
+            new_state = self.base_state
         else:
             new_state = 'invalid'
 
@@ -5493,6 +5496,8 @@ class TreeModel(QAbstractItemModel):
 
         node = self.getItem(node_index)
 
+        logger.debug('Toggle selection of node %s (state=%s)',
+                     node.label, node.state)
         # if section selected: select all children
         # if section unselected: unselect all children
         # if item selected: select all children
@@ -5501,18 +5506,19 @@ class TreeModel(QAbstractItemModel):
         # if var unselected: unselect parent if all siblings are unselected
 
         new_state = None
-        if (self.selection_mode == 'section' and node.node_type == 'section') or\
-           node.node_type.startswith('item') or node.node_type == 'variable':
+        if (self.selection_mode == 'section' and
+            (node.node_type == 'section' or node.node_type.startswith('item')
+             or node.node_type == 'variable')):
             new_state = Node.NEXT_SEL_STATE[node.state]
             state = self.set_node_selection(new_state, node_index)
 
         if new_state == 'sel_checked' and self.selection_mode == 'section' and \
-           node.node_type.startswith('item') or node.node_type == 'variable':
+           (node.node_type.startswith('item') or node.node_type == 'variable'):
             self.set_node_selection(new_state, self.parent(node_index),
                                     apply_to_children=False)
 
         if new_state == 'sel_unchecked' and \
-           node.node_type.startswith('item') or node.node_type == 'variable' :
+           (node.node_type.startswith('item') or node.node_type == 'variable'):
             self.unselect_if_no_selected_child(self.parent(node_index))
 
     def validate_node_recurse(self, node_index):
@@ -5531,6 +5537,18 @@ class TreeModel(QAbstractItemModel):
                                   [QtCore.Qt.ForegroundRole,
                                    QtCore.Qt.BackgroundRole,
                                    QtCore.Qt.ToolTipRole])
+
+        if (node.node_type in ['item_single_var', 'item'] and
+            node.pdict['vtype'] == 'boolean' and
+            # TODO: be more robust about fetching choices node: it can
+            # be another child than the first one...
+            (len(node.childItems) == 0 or \
+             node.childItems[0].node_type != 'choices')):
+            choices_index = self.add_choices_node(node_index)
+            self.insert_node('True', 'choice', choices_index,
+                             pdict={'French' : 'Oui', 'English': 'Yes'})
+            self.insert_node('False', 'choice', choices_index,
+                             pdict={'French' : 'Non', 'English': 'No'})
 
         return node.state == 'invalid'
 
@@ -5617,6 +5635,9 @@ class TreeModel(QAbstractItemModel):
         new_node = Node(label, node_type, is_container=is_container,
                         pdict=pdict, parent=parent_node, child_type=child_type,
                         state=node_state)
+        logger.debug('Inserted node %s (type: %s, state: %s) ' \
+                     '(selection mode: %s)', label, node_type, node_state,
+                     self.selection_mode)
         self.beginInsertRows(parent_index, irow, irow)
         parent_node.childItems.insert(irow, new_node)
         self.endInsertRows()

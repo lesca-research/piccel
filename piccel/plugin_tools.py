@@ -38,6 +38,8 @@ class LescaDashboard(SheetPlugin):
                 if self.workbook.has_sheet(sheet_label):
                     to_watch.append(sheet_label)
                     self.progress_notes_sheets.append(sheet_label)
+            if self.workbook.has_sheet('Eligibility'):
+                to_watch.append('Eligibility')
         return super(LescaDashboard, self).sheets_to_watch() + to_watch
 
     def after_workbook_load(self):
@@ -166,7 +168,8 @@ class LescaDashboard(SheetPlugin):
 
         self.status_tracker.track(self.df, pids)
         for progress_notes_sheet_label in self.progress_notes_sheets:
-            self.df.loc[pids, progress_notes_sheet_label] = 'add_note'
+            column_name = progress_notes_sheet_label.replace('Progress_', 'P')
+            self.df.loc[pids, column_name] = 'add_note'
 
         # Filter drop-outs
         df_selected = self.df.loc[pids]
@@ -180,8 +183,8 @@ class LescaDashboard(SheetPlugin):
         participant_id = entry_df.index[0]
         logger.debug('action_lesca for %s, col %s' % \
                      (participant_id, selected_column))
-        if selected_column.startswith('Progress_Notes'):
-            if selected_column == 'Progress_Notes_Common':
+        if selected_column.startswith('PNotes'):
+            if selected_column.endswith('Common'):
                 pn_sheet_label = 'Progress_Notes_Common' # project PN
             else:
                 pn_sheet_label = 'Progress_Notes' # workbook-specific PN
@@ -600,6 +603,7 @@ class ParticipantStatusTracker:
                  workbook, dashboard_column_status='Study_Status'):
         self.participant_sheet_label = participant_sheet_label
         self.progress_notes_sheet_label = progress_notes_sheet_label
+        self.eligibility_sheet_label = 'Eligibility'
         self.workbook = workbook
         self.dashboard_column_status = dashboard_column_status
 
@@ -627,6 +631,18 @@ class ParticipantStatusTracker:
         }
         errors.extend(check_sheet(self.workbook, self.progress_notes_sheet_label,
                                   expected_fields=expected_fields))
+
+        if (self.eligibility_sheet_label is not None and
+            self.workbook.has_sheet(self.eligibility_sheet_label)):
+            expected_fields = {
+                'Participant_ID' : 'text',
+                'Included' : 'boolean',
+                'User' : 'user_name',
+                'Timestamp_Submission' : 'datetime'
+            }
+            errors.extend(check_sheet(self.workbook, self.eligibility_sheet_label,
+                                      expected_fields=expected_fields))
+
         return errors
 
     def action(self, entry_df, selected_column):
@@ -638,6 +654,7 @@ class ParticipantStatusTracker:
         """
         If progress note with drop status is more recent than latest entry in
         participant_status_sheet -> confirm_drop
+        If eligibility indicates not included -> excluded
         Else: Display current participant status in participant_status_sheet
         """
         # dashboard_df.loc[:, self.dashboard_column_status] = 'error'
@@ -672,29 +689,52 @@ class ParticipantStatusTracker:
 
         pns_drop_fresher, status_fresher = df_keep_higher(pns_drop_df, status_df)
 
+        new_dropped = pns_drop_fresher.index
+
+        if (self.eligibility_sheet_label is not None
+            and self.workbook.has_sheet(self.eligibility_sheet_label)):
+            eligibility_df = latest_sheet_data(self.workbook,
+                                               self.eligibility_sheet_label,
+                                               view='latest',
+                                               index_column='Participant_ID',
+                                               indexes=pids)
+            if dashboard_error_if_none(status_df, dashboard_df,
+                                       self.dashboard_column_status,
+                                       'error %s' % self.eligibility_sheet_label):
+                return
+
+            eligibility_fresher, status_fresher = \
+                df_keep_higher(eligibility_df, status_df)
+            new_dropped = new_dropped.union(eligibility_fresher.index)
+
         dashboard_df.loc[status_fresher.index, self.dashboard_column_status] = \
             status_fresher.loc[:, 'Study_Status']
 
-        dashboard_df.loc[pns_drop_fresher.index, self.dashboard_column_status] = \
+        dashboard_df.loc[new_dropped, self.dashboard_column_status] = \
             'confirm_drop'
 
 class PollTracker:
-    def __init__(self, poll_sheet_label, workbook, default_status,
+    def __init__(self, poll_sheet_label, workbook, default_status=None,
                  dashboard_column=None, poll_answer_column=None,
-                 answered_tag='answered'):
+                 answered_tag=None):
         self.poll_sheet_label = poll_sheet_label
         self.workbook = workbook
         self.dashboard_column = if_none(dashboard_column, poll_sheet_label)
         self.poll_answer_column = poll_answer_column
-        self.answered_tag = answered_tag
-        self.default_status = default_status
+        self.answered_tag = if_none(answered_tag, "%s_done" % poll_sheet_label)
+        self.default_status = if_none(default_status,
+                                      '%s_todo' % poll_sheet_label.lower())
 
     def check(self):
         # TODO insure that poll_answer_column is in fields
         #      (field can have any type)
-        logger.debug('PollTracker: check sheets')
-        return check_sheet(self.workbook, self.interview_label,
-                           expected_fields={'Participant_ID' : 'text'})
+        logger.debug('PollTracker for %s: check sheets', self.poll_sheet_label)
+        expected_fields = {'Participant_ID' : 'text'}
+        if self.poll_answer_column is not None:
+            expected_fields[self.poll_answer_column] = None
+
+        return check_sheet(self.workbook, self.poll_sheet_label,
+                           expected_fields=expected_fields)
 
     def track(self, dashboard_df, pids, poll_filter=None):
         poll_df = latest_sheet_data(self.workbook, self.poll_sheet_label,
@@ -706,6 +746,9 @@ class PollTracker:
                                    'error %s' % self.poll_sheet_label):
             return
 
+        logger.debug('PollTracker for %s: poll_df for %s has %d entries',
+                     self.poll_sheet_label, ', '.join(pids), poll_df.shape[0])
+
         dashboard_df.loc[pids, self.dashboard_column] = self.default_status
         if poll_df.shape[0] > 0:
             if self.poll_answer_column is not None:
@@ -715,6 +758,14 @@ class PollTracker:
             else:
                 dashboard_df.loc[poll_df.index, self.dashboard_column] = \
                     self.answered_tag
+
+    def action(self, entry_df, poll_column):
+        poll_status = entry_df[poll_column].iat[0]
+        if poll_status=='' or pd.isna(poll_status) or poll_status is None:
+            return None, ''
+        participant_id = entry_df.index[0]
+        return form_update_or_new(self.poll_sheet_label, self.workbook,
+                                  {'Participant_ID' : participant_id})
 
 def filter_pids(df, pids, column, sheet_label=None, workbook=None,
                 not_equal=None, equal=None):
@@ -952,13 +1003,15 @@ def check_sheet(workbook, sheet_label, expected_fields=None,
             errors.append('Missing field %s in form of sheet %s' % \
                           (field_name, sheet_label))
         elif not isinstance(expected_type, Choice):
-            if form_fields[field_name] != expected_type:
+            if (expected_type is not None and
+                form_fields[field_name] != expected_type):
                 errors.append('Type of field %s in form of sheet %s is %s '\
                               'but must be %s' % \
                               (field_name, sheet_label, form_fields[field_name],
                                expected_type))
         else:
-            if form_fields[field_name] != expected_type.vtype:
+            if (expected_type.vtype is not None and
+                form_fields[field_name] != expected_type.vtype):
                 errors.append('Type of field %s in form of sheet %s is %s '\
                               'but must be %s' % \
                               (field_name, sheet_label, expected_type))
@@ -1068,7 +1121,7 @@ class EmailledPollTracker:
                         conditions={
                             '%s_to_send' % poll_tag:
                             (email_df, 'Email_Action', ['cancelled']),
-                            '%s_cancelled' % poll_tag:
+                            '%s_NA' % poll_tag:
                             (email_df, 'Email_Action', ['revoke']),
                             '%s_email_pending' % poll_tag:
                             And((email_df, 'Email_Action', ['plan']),
@@ -1119,8 +1172,7 @@ class EmailledPollTracker:
 
     def action(self, entry_df, poll_column):
         poll_status = entry_df[poll_column].iat[0]
-        if poll_status=='' or pd.isna(poll_status) or poll_status is None or \
-           poll_status == '%s_answered' % poll_column:
+        if poll_status=='' or pd.isna(poll_status) or poll_status is None:
             return None, ''
         participant_id = entry_df.index[0]
         return form_update_or_new(self.email_sheet_label, self.workbook,
@@ -1150,7 +1202,8 @@ class InterviewTracker:
         errors = []
         expected_fields = {
             'Participant_ID' : 'text',
-            'Session_Action' : Choice('text', ['do_session', 'cancel_session']),
+            'Session_Action' : Choice('text', ['do_session', 'revoke_session']),
+            'Interview_Date' : 'datetime',
             'Session_Status' : Choice('text', ['done', 'redo']),
             'User' : 'user_name',
             'Timestamp_Submission' : 'datetime'
@@ -1161,7 +1214,8 @@ class InterviewTracker:
         expected_fields = {
             'Participant_ID' : 'text',
             'Staff' : 'text',
-            'Plan_Action' : Choice('text', ['assign_staff', 'plan']),
+            'Plan_Action' : Choice('text', ['assign_staff', 'plan',
+                                            'cancel_date']),
             'Interview_Type' : Choice('text', [self.interview_label]),
             'Interview_Date' : 'datetime',
             'Availability' : 'text',
@@ -1191,13 +1245,20 @@ class InterviewTracker:
 
         if interview_column.endswith('_Plan'):
             interview_label = interview_column[:-len('_Plan')]
-            return form_update_or_new(self.plan_sheet_label, self.workbook,
-                                      {'Participant_ID' : participant_id,
-                                       'Interview_Type' : interview_label},
-                                      {'Plan_Action' : 'plan',
-                                       'Send_Email' : True,
-                                       'Email_Schedule' : 'days_before_2',
-                                       'Email_Template' : interview_label})
+            if value == 'confirm_cancel':
+                return form_update_or_new(self.plan_sheet_label, self.workbook,
+                                          {'Participant_ID' : participant_id,
+                                           'Interview_Type' : interview_label},
+                                          {'Plan_Action' : 'cancel_date',
+                                           'Send_Email' : False})
+            else:
+                return form_update_or_new(self.plan_sheet_label, self.workbook,
+                                          {'Participant_ID' : participant_id,
+                                           'Interview_Type' : interview_label},
+                                          {'Plan_Action' : 'plan',
+                                           'Send_Email' : True,
+                                           'Email_Schedule' : 'days_before_2',
+                                           'Email_Template' : interview_label})
             # if value.endswith('_not_done') or value.endswith('_cancelled'):
             # elif value.endswith('_scheduled') or value.endswith('_email_pending') or \
             #  value.endswith('_email_sent') or value.endswith('_email_error') or \
@@ -1299,15 +1360,14 @@ class InterviewTracker:
             dashboard_df.loc[planned.index, column_date] = dates
 
         def set_date_from_interview(int_sel_df):
-            done = int_sel_df[((int_sel_df['Session_Action']!='cancel_session') & \
-                               ((int_sel_df['Session_Status']=='done') | \
-                                (int_sel_df['Session_Status']=='redo')))]
-            dates = (done.loc[done.index, 'Timestamp_Submission']
+            done = int_sel_df[((int_sel_df['Session_Action']!='revoke_session') & \
+                               (int_sel_df['Session_Status']=='done'))]
+            dates = (done.loc[done.index, 'Interview_Date']
                      .apply(lambda x: x.strftime(DATETIME_FMT)))
             dashboard_df.loc[done.index, column_date] = dates
 
-            cancelled = int_sel_df[((int_sel_df['Session_Action']=='cancel_session') | \
-                                    (int_sel_df['Session_Status']=='cancel_session'))]
+            cancelled = int_sel_df[((int_sel_df['Session_Action']=='revoke_session') | \
+                                    (int_sel_df['Session_Status']=='redo'))]
             dashboard_df.loc[cancelled.index, column_date] = '%s_plan' % interview_tag
 
         common_pids = plan_df.index.intersection(interview_df.index)
@@ -1324,7 +1384,8 @@ class InterviewTracker:
             print(common_pids)
 
         dashboard_df.loc[pids, column_date] = default_date
-        plan_df_fresher, interview_df_fresher = df_keep_higher(plan_df, interview_df)
+        plan_df_fresher, interview_df_fresher = df_keep_higher(plan_df,
+                                                               interview_df)
 
         # More readable API to replace map_set:
         # match_set(dashboard_df, column_date,
@@ -1336,14 +1397,14 @@ class InterviewTracker:
         #                             value=FetchDf(plan_df, 'Interview_Date',
         #                                           apply=fmt_date)),
         #                    SetWhere(where=And((itv_df, 'Session_Action',
-        #                                        NotIn('cancel_session')),
+        #                                        NotIn('revoke_session')),
         #                                       (itv_df, 'Session_Status',
         #                                        ['done', 'redo'])),
         #                             value=FetchDf(itv_df, 'Timestamp_Submission', apply=fmt_date)),
         #                    SetWhere(where=Or((itv_df, 'Session_Action',
-        #                                       ['cancel_session']),
+        #                                       ['revoke_session']),
         #                                      (itv_df, 'Session_Status',
-        #                                       ['cancel_session'])),
+        #                                       ['revoke_session'])),
         #                             value='%s_plan' % interview_tag)])
 
         set_date_from_plan(plan_df_fresher)
@@ -1482,8 +1543,8 @@ class InterviewTracker:
                          '%s_redo' % interview_tag:
                          And((interview_df_fresher, 'Session_Action', ['do_session']),
                              (interview_df_fresher, 'Session_Status', ['redo'])),
-                         '%s_cancelled' % interview_tag:
-                         (interview_df_fresher, 'Session_Action', ['cancel_session'])
+                         '%s_NA' % interview_tag:
+                         (interview_df_fresher, 'Session_Action', ['revoke_session'])
                         })
             except SrcColumnNotFound as e:
                 msg = 'Column %s not found in df of sheet %s' % \
@@ -1596,9 +1657,9 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
        ACTION: new entry in interview_sheet with:
               pid, interview_staff, action=do_session
 
-    * if interview_sheet.action==cancel_session or
+    * if interview_sheet.action==revoke_session or
           interview_sheet.action==do_session and
-          interview_sheet.session_status=='cancel':
+          interview_sheet.session_status=='redo':
        -> _cancelled
        ACTION: new entry in interview_sheet with:
               pid, interview_staff, action=do_session
@@ -1677,15 +1738,15 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
         dashboard_df.loc[planned.index, column_date] = dates
 
     def set_date_from_interview(int_sel_df):
-        done = int_sel_df[((int_sel_df['Session_Action']!='cancel_session') & \
+        done = int_sel_df[((int_sel_df['Session_Action']!='revoke_session') & \
                            ((int_sel_df['Session_Status']=='done') | \
                             (int_sel_df['Session_Status']=='redo')))]
         dates = (done.loc[done.index, 'Timestamp_Submission']
                  .apply(lambda x: x.strftime(DATETIME_FMT)))
         dashboard_df.loc[done.index, column_date] = dates
 
-        cancelled = int_sel_df[((int_sel_df['Session_Action']=='cancel_session') | \
-                                (int_sel_df['Session_Status']=='cancel_session'))]
+        cancelled = int_sel_df[((int_sel_df['Session_Action']=='revoke_session') | \
+                                (int_sel_df['Session_Status']=='redo'))]
         dashboard_df.loc[cancelled.index, column_date] = \
             '%s_plan' % interview_tag
 
@@ -1715,14 +1776,14 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
     #                             value=FetchDf(plan_df, 'Interview_Date',
     #                                           apply=fmt_date)),
     #                    SetWhere(where=And((itv_df, 'Session_Action',
-    #                                        NotIn('cancel_session')),
+    #                                        NotIn('revoke_session')),
     #                                       (itv_df, 'Session_Status',
     #                                        ['done', 'redo'])),
     #                             value=FetchDf(itv_df, 'Timestamp_Submission', apply=fmt_date)),
     #                    SetWhere(where=Or((itv_df, 'Session_Action',
-    #                                       ['cancel_session']),
+    #                                       ['revoke_session']),
     #                                      (itv_df, 'Session_Status',
-    #                                       ['cancel_session'])),
+    #                                       ['revoke_session'])),
     #                             value='%s_plan' % interview_tag)])
 
     set_date_from_plan(plan_df_fresher)
@@ -1832,8 +1893,8 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
                      '%s_redo' % interview_tag:
                      And((interview_df_fresher, 'Session_Action', ['do_session']),
                          (interview_df_fresher, 'Session_Status', ['redo'])),
-                     '%s_cancelled' % interview_tag:
-                     (interview_df_fresher, 'Session_Action', ['cancel_session'])
+                     '%s_NA' % interview_tag:
+                     (interview_df_fresher, 'Session_Action', ['revoke_session'])
                     })
         except SrcColumnNotFound as e:
             msg = 'Column %s not found in df of sheet %s' % \

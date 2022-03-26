@@ -77,6 +77,7 @@ class SheetPlugin:
             return False
 
         if self._all_watched:
+            logger.debug('all sheets already watched!')
             return True
 
         new_to_watch = []
@@ -112,6 +113,8 @@ class SheetPlugin:
         self._all_watched = _all_watched
 
     def _on_entry_append(self, sheet, entry_df=None):
+        logger.debug('Plugin of %s _on_entry_append called from %s',
+                     self.sheet.label, sheet.label)
         self.update(sheet, entry_df)
 
     def _on_entry_set(self, sheet, entry_idx):

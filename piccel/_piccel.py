@@ -1662,7 +1662,12 @@ class DataSheet:
                 logger.debug2('df_to_str: format column %s', col)
                 f = lambda v: (self.form_master.format(col,v) \
                                if not pd.isna(v) else '')
-                df[[col]] = df[[col]].applymap(f)
+                # TODO: remove try
+                try:
+                    df[[col]] = df[[col]].applymap(f)
+                except AttributeError:
+                    print('error unformating %s' % col)
+                    from IPython import embed; embed()
 
         df = df.reset_index()
         df['__entry_id__'] = df['__entry_id__'].apply(lambda x: hex(x))
@@ -2052,13 +2057,7 @@ class DataSheet:
                                                  '__update_idx__',
                                                  '__conflict_idx__'))
         entry_df = pd.DataFrame([entry_dict], index=index)
-
-        dkeys = self.form_master.datetime_keys
-        datetime_cols = list(set(entry_df.columns).intersection(dkeys))
-        other_cols =  list(set(entry_df.columns).difference(dkeys))
-        entry_df[other_cols] = entry_df[other_cols].fillna(pd.NA)
-        entry_df[datetime_cols] = entry_df[datetime_cols].fillna(pd.NaT)
-
+        self.fix_types(entry_df)
         logger.debug('Sheet %s: process addition of entry_df: index=%s, cols=%s',
                      self.label, entry_df.index.name,
                      ','.join(entry_df.columns))
@@ -2140,6 +2139,41 @@ class DataSheet:
         self.add_entry(entry_dict, entry_idx, self.set_entry_df,
                        save_func=partial(self.save_all_data, overwrite=True))
 
+    def fix_types(self, df):
+
+        # dkeys = self.form_master.datetime_keys
+        # datetime_cols = list(set(entry_df.columns).intersection(dkeys))
+        # other_cols =  list(set(entry_df.columns).difference(dkeys))
+        # entry_df[other_cols] = entry_df[other_cols].fillna(pd.NA)
+        # entry_df[datetime_cols] = entry_df[datetime_cols].fillna(pd.NaT)
+
+        # TODO: fix date types
+        master_df = self.empty_df_from_master()
+        master_cols = set(master_df.columns)
+        for col in df.columns:
+            dt_col = df.dtypes[col]
+            master_dt_col = master_df.dtypes[col]
+            logger.debug2('Check type of %s', col)
+            if col in master_cols and dt_col.name != master_dt_col.name:
+                if master_dt_col.name.startswith('float'):
+                    tmp = pd.Series(np.zeros(df[col].shape[0]),
+                                    dtype=master_dt_col,
+                                    index=df[col].index)
+                    m_na = pd.isna(df[col])
+                    tmp[~m_na] = df[~m_na][col]
+                    tmp[m_na] = np.nan
+                    df[col] = tmp
+                elif master_dt_col.name.startswith('date'):
+                    df[col].fillna(pd.NaT)
+                    df[col] = df[col].astype(master_dt_col)
+                else:
+                    # TODO: remove try
+                    try:
+                        df[col] = df[col].astype(master_dt_col)
+                    except (ValueError, TypeError):
+                        print('value error entry df')
+                        from IPython import embed; embed()
+                    df[col].fillna(pd.NA)
     def _append_df(self, entry_df):
         # TODO: use merge instead of append
         # -> have to change notification and QListView
@@ -2152,13 +2186,20 @@ class DataSheet:
             logger.debug2('Empty entry not appended to sheet %s', self.label)
             return None
 
-        self.df = self.df.append(entry_df)
+        self.fix_types(entry_df)
+
+        logger.debug2('Sheet %s, dtypes before addition: %s', self.label,
+                     self.df.dtypes)
+        self.df = pd.concat((self.df, entry_df), join='outer')
+        logger.debug2('Sheet %s, dtypes after addition: %s', self.label,
+                     self.df.dtypes)
         self.df.sort_index(inplace=True)
         entry_index = self.fix_conflicting_entries(index_to_track=entry_df.index[0])
         logger.debug2('Entry index after fixing: %s', entry_index)
         logger.debug2('Entry has been appended to sheet %s', self.label)
         logger.debug2('Resulting df has columns: %s)', ','.join(self.df.columns))
         self.invalidate_cached_views()
+        logger.debug("Sheet %s notifies 'appended_entry'", self.label)
         self.notifier.notify('appended_entry', entry_df=entry_df)
 
         # Note: only the index of the first row of entry_df is returned.
@@ -3347,7 +3388,6 @@ def foo():
         form.submit()
         logger.debug('utest: df after set:')
         logger.debug(self.sheet_ts.df)
-
         self.sheet_ts.reload_all_data()
 
         logger.debug('utest: df after data reload:')
@@ -4574,6 +4614,7 @@ class WorkBook:
 
         # TODO: sort out sheet filtering
         # ASSUME all sheet labels are unique
+        self.sheets.clear()
         self.sheets = self.load_sheets(parent_workbook=self)
         logger.debug('WorkBook %s: Load linked workbooks: %s',
                      self.label, ','.join('"%s"'%l for l,b in self.linked_books))
@@ -5608,7 +5649,7 @@ class TestWorkBook(unittest.TestCase):
                           vtype='text', supported_languages={'French'},
                           default_language='French',
                           choices={'do_session':{'French':'Réaliser la séance'},
-                                   'cancel_session':
+                                   'revoke_session':
                                    {'French':'Annuler la séance'}},
                           allow_empty=False,
                           init_values={'Session_Action' : 'do_session'}),
@@ -5790,7 +5831,7 @@ class TestWorkBook(unittest.TestCase):
         dashboard_df = sh_dashboard.get_df_view()
         self.assertEqual(dashboard_df.shape, (2,3))
 
-    def test_dashboard_status_track(self):
+    def test_dashboard_status_track_admin(self):
         # Create empty workbook
         fs = LocalFileSystem(self.tmp_dir)
 
@@ -5804,15 +5845,10 @@ class TestWorkBook(unittest.TestCase):
         sheet_id = 'Participants_Status'
         pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002'],
                               'Study_Status' : ['ongoing', 'ongoing'],
-                              'Staff' : ['TV', 'TV'],
                               'Timestamp_Submission' : [datetime(2021,9,9,10,10),
                                              datetime(2021,9,9,10,10)]})
         items = [FormItem({'Participant_ID' :
                            {'French':'Code Participant'}},
-                          default_language='French',
-                          supported_languages={'French'},
-                          allow_empty=False),
-                 FormItem({'Staff' : None},
                           default_language='French',
                           supported_languages={'French'},
                           allow_empty=False),
@@ -5903,7 +5939,7 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('---- Test add progress note not related to drop-out ----')
 
         form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
-                                                 'Progress_Notes')
+                                                 'PNotes')
         form.set_values_from_entry({'Note_Type' : 'health'})
         form.submit()
 
@@ -5912,7 +5948,7 @@ class TestWorkBook(unittest.TestCase):
 
         logger.debug('---- Test add exclusion progress note ----')
         form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
-                                                 'Progress_Notes')
+                                                 'PNotes')
         form.set_values_from_entry({'Note_Type' : 'exclusion'})
         form.submit()
         self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'confirm_drop')
@@ -5920,7 +5956,7 @@ class TestWorkBook(unittest.TestCase):
         logger.debug('---- Test add new progress note not related to drop-out ----')
 
         form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
-                                                 'Progress_Notes')
+                                                 'PNotes')
         form.set_values_from_entry({'Note_Type' : 'health'})
         form.submit()
 
@@ -5940,14 +5976,15 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'ongoing')
 
         logger.debug('---- Test add withdrawal progress note ----')
-        form, action = form_update_or_new('Progress_Notes', wb,
-                                          {'Participant_ID' : pid},
-                                          entry_dict={'Note_Type' : 'withdrawal'})
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'PNotes')
+        form.set_values_from_entry({'Note_Type' : 'withdrawal'})
         form.submit()
+
         logger.debug('---- Test add exclusion progress note ----')
-        form, action = form_update_or_new('Progress_Notes', wb,
-                                          {'Participant_ID' : pid},
-                                          entry_dict={'Note_Type' : 'exclusion'})
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'PNotes')
+        form.set_values_from_entry({'Note_Type' : 'exclusion'})
         form.submit()
 
         dashboard_df = wb['Dashboard'].get_df_view()
@@ -5977,7 +6014,11 @@ class TestWorkBook(unittest.TestCase):
 
         # Create data sheet participant info (no form)
         sheet_id = 'Participants_Status'
-        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002']})
+        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002'],
+                              'Study_Status' : ['ongoing', 'ongoing'],
+                              'Timestamp_Submission' :
+                              [datetime(2021,9,9,10,10),
+                               datetime(2021,9,9,10,10)]})
         items = [FormItem({'Participant_ID' :
                            {'French':'Code Participant'}},
                           default_language='French',
@@ -6131,9 +6172,13 @@ class TestWorkBook(unittest.TestCase):
                           vtype='text', supported_languages={'French'},
                           default_language='French',
                           choices={'do_session':{'French':'Réaliser la séance'},
-                                   'cancel_session':
+                                   'revoke_session':
                                    {'French':'Annuler la séance'}},
                           allow_empty=False),
+                 FormItem(keys={'Interview_Date':None},
+                          vtype='datetime',
+                          supported_languages={'French'},
+                          default_language='French'),
                  FormItem(keys={'Session_Status':None},
                           vtype='text', supported_languages={'French'},
                           default_language='French',
@@ -6240,7 +6285,8 @@ class TestWorkBook(unittest.TestCase):
                                                         'Eval_Staff')
         self.assertTrue(action_label.endswith('New'), action_label)
         plan_sheet_label = DEFAULT_INTERVIEW_PLAN_SHEET_LABEL
-        self.assertTrue(action_label.startswith(plan_sheet_label), action_label)
+        self.assertTrue(action_label.startswith(plan_sheet_label),
+                        action_label)
 
         ts = datetime(2021,9,10,10,10)
         form.set_values_from_entry({'Plan_Action' : 'assign_staff',
@@ -6349,7 +6395,7 @@ class TestWorkBook(unittest.TestCase):
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_email_pending')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'staff')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Bobbie')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATETIME_FMT))
 
@@ -6431,15 +6477,13 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.startswith('Eval'))
 
         form.set_values_from_entry({'Session_Action' : 'do_session',
-                                    'Session_Date' : idate,
-                                    'User' : 'Bobbie',
+                                    'Interview_Date' : idate,
                                     'Session_Status' : 'done',
                                     'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_done')
-        # Overriding User field does not work:
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Bobbie')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATETIME_FMT))
 
