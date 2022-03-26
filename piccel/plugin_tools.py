@@ -1063,11 +1063,12 @@ class EmailledPollTracker:
         Errors to handle:
         - missing poll sheet
         """
-        # TODO: cross check that poll_label is values of email_template
+        # TODO: cross check that poll_label has values of email_template
         expected_fields = {
             'Participant_ID' : 'text',
             'Email_Action' : Choice('text', ['plan', 'cancel', 'revoke']),
-            'Email_Status' : Choice('text', ['to_send', 'sent', 'error']),
+            'Email_Status' : Choice('text', ['to_send', 'sent', 'error',
+                                             'cancelled']),
             'Email_Scheduled_Send_Date' : 'datetime',
             'Email_Template' : Choice('text', [self.poll_label]),
             'Overdue_Days' : 'int',
@@ -1223,7 +1224,8 @@ class InterviewTracker:
             'Send_Email' : 'boolean',
             'Email_Schedule' : Choice('text', ['days_before_2']),
             'Email_Template' : Choice('text', [self.interview_label]),
-            'Email_Status' : Choice('text', []),
+            'Email_Status' : Choice('text', ['to_send', 'sent', 'error',
+                                             'cancelled']),
             'Callback_Days' : 'int',
             'User' : 'user_name',
             'Timestamp_Submission' : 'datetime'
@@ -1250,7 +1252,8 @@ class InterviewTracker:
                                           {'Participant_ID' : participant_id,
                                            'Interview_Type' : interview_label},
                                           {'Plan_Action' : 'cancel_date',
-                                           'Send_Email' : False})
+                                           'Send_Email' : False,
+                                           'Email_Status' : 'cancelled'})
             else:
                 return form_update_or_new(self.plan_sheet_label, self.workbook,
                                           {'Participant_ID' : participant_id,
@@ -1359,16 +1362,21 @@ class InterviewTracker:
                      .apply(lambda x: x.strftime(DATETIME_FMT)))
             dashboard_df.loc[planned.index, column_date] = dates
 
-        def set_date_from_interview(int_sel_df):
+        def set_date_from_interview(int_sel_df, plan_df):
             done = int_sel_df[((int_sel_df['Session_Action']!='revoke_session') & \
                                (int_sel_df['Session_Status']=='done'))]
             dates = (done.loc[done.index, 'Interview_Date']
                      .apply(lambda x: x.strftime(DATETIME_FMT)))
             dashboard_df.loc[done.index, column_date] = dates
 
-            cancelled = int_sel_df[((int_sel_df['Session_Action']=='revoke_session') | \
-                                    (int_sel_df['Session_Status']=='redo'))]
-            dashboard_df.loc[cancelled.index, column_date] = '%s_plan' % interview_tag
+            revoked = int_sel_df[((int_sel_df['Session_Action']=='revoke_session') | \
+                                  (int_sel_df['Session_Status']=='redo'))].index
+            revoked_in_plan = plan_df.index.intersection(revoked)
+            email_to_check = plan_df.loc[revoked_in_plan, 'Email_Status']
+            to_cancel = email_to_check[email_to_check == 'to_send'].index
+            not_cancel = revoked.difference(to_cancel)
+            dashboard_df.loc[to_cancel, column_date] = 'confirm_cancel'
+            dashboard_df.loc[not_cancel, column_date] = '%s_plan' % interview_tag
 
         common_pids = plan_df.index.intersection(interview_df.index)
         if 0:
@@ -1408,7 +1416,7 @@ class InterviewTracker:
         #                             value='%s_plan' % interview_tag)])
 
         set_date_from_plan(plan_df_fresher)
-        set_date_from_interview(interview_df_fresher)
+        set_date_from_interview(interview_df_fresher, plan_df)
 
         # Staff
         if 0:
@@ -1808,7 +1816,7 @@ def ___track_interview_old(dashboard_df, interview_label, workbook, pids,
     # Status
     dashboard_df.loc[pids, column_status] = default_status
 
-    if 1:
+    if 0:
         print('dashboard_df before map_set')
         print(dashboard_df)
 

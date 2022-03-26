@@ -6135,6 +6135,7 @@ class TestWorkBook(unittest.TestCase):
                          default_language='French',
                          choices={'to_send':None,
                                   'sent':None,
+                                  'cancelled':None,
                                   'error':None},
                          init_values={'Email_Status' : 'to_send'},
                          allow_empty=True),
@@ -6513,12 +6514,11 @@ class TestWorkBook(unittest.TestCase):
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith('Eval'))
         form.set_values_from_entry({'Session_Action' : 'revoke_session',
-                                    'User' : 'Bobbie',
                                     'Timestamp_Submission' : ts})
         form.submit()
         dashboard_df = wb['Dashboard'].get_df_view()
         self.assertEqual(dashboard_df.loc[pid, 'Eval'], 'eval_NA')
-        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], wb.user)
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'], 'Bobbie')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'], 'eval_plan')
 
         logger.debug('--- Pid %s: Plan interview date again, with email ----',
@@ -6543,6 +6543,79 @@ class TestWorkBook(unittest.TestCase):
                          'Catherine-Alexandra Grégoire')
         self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATETIME_FMT))
+
+        logger.debug('--- Pid %s: Revoke interview again, expect email cancel ----',
+                     pid)
+
+        ts = datetime(2021,9,10,10,50)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith('Eval'))
+        form.set_values_from_entry({'Session_Action' : 'revoke_session',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
+                         'eval_NA')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
+                         'Bobbie')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
+                         'confirm_cancel')
+
+        logger.debug('--- Pid %s: email cancelled ----', pid)
+        ts = datetime(2021,9,10,10,50)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith(plan_sheet_label))
+        form.submit() # automatically filled for email cancellation
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
+                         'eval_NA')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
+                         'Bobbie')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
+                         'eval_plan')
+
+        logger.debug('--- Pid %s: Plan interview date again, without email ----',
+                     pid)
+        idate = datetime(2021,10,15,10,10)
+        ts = datetime(2021,9,10,10,51)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
+        form.set_values_from_entry({'Interview_Date' : idate,
+                                    'Date_Is_Set' : True,
+                                    'Staff' : 'Catherine-Alexandra Grégoire',
+                                    'Send_Email' : False,
+                                    'Email_Status' : None,
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+
+        logger.debug('--- Pid %s: Revoke interview again, expect no email cancel ---',
+                     pid)
+
+        ts = datetime(2021,9,10,10,55)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval')
+        self.assertTrue(action_label.endswith('Update'))
+        self.assertTrue(action_label.startswith('Eval'))
+        form.set_values_from_entry({'Session_Action' : 'revoke_session',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eval'],
+                         'eval_NA')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Staff'],
+                         'Bobbie')
+        self.assertEqual(dashboard_df.loc[pid, 'Eval_Plan'],
+                         'eval_plan')
+
+    def test_dashboard_interview_review(self):
+        # Must be reviewer role to access review field
+        self.assertTrue(False)
 
     def test_dashboard_emailled_poll_track(self):
         # Create empty workbook
@@ -6640,6 +6713,7 @@ class TestWorkBook(unittest.TestCase):
                           default_language='French',
                           choices={'to_send':None,
                                    'sent':None,
+                                   'cancelled':None,
                                    'error':None},
                           init_values={'Email_Status' : 'to_send'},
                           allow_empty=True),
