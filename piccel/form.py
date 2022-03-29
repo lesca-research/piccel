@@ -946,7 +946,7 @@ class Predicate:
         return self.code
 
     def __call__(self, key_values):
-        result = eval(self.code, {}, key_values)
+        result = eval(self.code, {'isna' : pd.isna}, key_values)
         if not isinstance(result, bool):
             raise InvalidPredicateResult('Result "%s" (type:%s) is not bool' % \
                                          (result, type(result)))
@@ -1438,7 +1438,8 @@ class FormItem:
             'format' : lambda v : v,
             'message invalid format' : 'Enter a text',
             'validate value type' : lambda v : isinstance(v, str),
-            'null_value' : ''
+            'null_value' : '',
+            'na_value' : pd.NA
             },
         'html' : {
             'dtype_pd' : 'string',
@@ -1446,7 +1447,8 @@ class FormItem:
             'format' : lambda v : v,
             'message invalid format' : 'Enter a text',
             'validate value type' : is_valid_html,
-            'null_value' : '<html></html>'
+            'null_value' : '<html></html>',
+            'na_value' : pd.NA
             },
         'user_name' : {
             'dtype_pd' : 'string',
@@ -1454,7 +1456,8 @@ class FormItem:
             'format' : lambda v : v,
             'message invalid format' : 'Enter a user name',
             'validate value type' : lambda v : isinstance(v, str),
-            'null_value' : ''
+            'null_value' : '',
+            'na_value' : pd.NA
         },
          'int' : {
              'dtype_pd' : 'Int64',
@@ -1462,7 +1465,8 @@ class FormItem:
              'format' : lambda i : '%d' % i,
              'message invalid format' : 'Enter an integer',
              'validate value type' : lambda v : isinstance(v, int),
-             'null_value' : 0
+             'null_value' : 0,
+             'na_value' : pd.NA
          },
         'int64' : {
              'dtype_pd' : 'Int64',
@@ -1470,7 +1474,8 @@ class FormItem:
              'format' : lambda i : '%d' % i,
              'message invalid format' : 'Enter an integer',
              'validate value type' : lambda v : isinstance(v, np.int64),
-            'null_value' : np.int64(0)
+            'null_value' : np.int64(0),
+            'na_value' : pd.NA
          },
          'boolean' : {
              'dtype_pd' : 'boolean',
@@ -1478,7 +1483,8 @@ class FormItem:
              'format' : lambda b : str(b),
              'message invalid format' : 'Enter a boolean',
              'validate' : lambda v : isinstance(v, bool),
-             'null_value' : False
+             'null_value' : False,
+             'na_value' : pd.NA
          },
         'number' : {
             'dtype_pd' : 'float',
@@ -1487,7 +1493,8 @@ class FormItem:
             'message invalid format' : ('Enter a number using a dot ' +\
                                         'as decimal separator if needed.'),
             'validate' : lambda v : isinstance(v, float),
-            'null_value' : 0.0
+            'null_value' : 0.0,
+            'na_value' : np.nan,
          },
          'date' : {
              'dtype_pd' : 'datetime64[ns]',
@@ -1495,7 +1502,8 @@ class FormItem:
              'format' : lambda d : d.strftime(FormItem.DATE_FORMAT),
              'message invalid format' : 'Enter a date as "YYYY-MM-DD"',
              'validate' : lambda v : isinstance(v, datetime.date),
-             'null_value' : datetime.now().date()
+             'null_value' : datetime.now().date(),
+             'na_value' : pd.NaT
          },
          'datetime' : {
              'dtype_pd' : 'datetime64[ns]',
@@ -1506,7 +1514,8 @@ class FormItem:
              'message invalid format' : ('Enter date and time as ' \
                                          '"YYYY-MM-DD hh:mm:ss"'),
              'validate' : lambda v : isinstance(v, datetime.date),
-             'null_value' : datetime.now()
+             'null_value' : datetime.now(),
+             'na_value' : pd.NaT
          }
     }
 
@@ -1564,6 +1573,7 @@ class FormItem:
         self.vtype = vtype
         vtype_tools = FormItem.VTYPES[self.vtype]
         self.unformat = vtype_tools['unformat']
+        self.na_value = vtype_tools['na_value']
         self.format = vtype_tools['format']
         self.invalid_vtype_format_message = vtype_tools['message invalid format']
         self.dtype_pd = vtype_tools['dtype_pd']
@@ -1872,6 +1882,7 @@ class FormItem:
 
     def get_value(self, key=None, error_when_invalid=True):
         """ Return the current value, without using submission generator """
+
         if len(self.keys) == 0:
             return None
 
@@ -1882,6 +1893,7 @@ class FormItem:
         logger.debug2('get_value request for key %s (vtype: %s) - '\
                      'error_when_invalid=%s', key, self.vtype, error_when_invalid)
         logger.debug2('Available choices: %s', self.choices)
+
 
         if not self.validity and error_when_invalid:
             raise InvalidValue("%s: %s" %(key,self.validity_message))
@@ -1894,7 +1906,7 @@ class FormItem:
         #try:
         return (self.unformat(value_str)
                 if value_str is not None and len(value_str)>0
-                else None)
+                else self.na_value)
         #except Exception:
         #   from IPython import embed; embed()
 
@@ -1907,7 +1919,7 @@ class FormItem:
             vdate = self.get_value(key)
         except InvalidValue:
             pass
-        if vdate is None:
+        if vdate is None or pd.isna(vdate):
             return (None, FormItem.QDATE_FORMAT, None, None)
             #return (date.today().strftime(FormItem.DATE_FORMAT),
             #        FormItem.QDATE_FORMAT, None, None)
@@ -2236,7 +2248,8 @@ Date_Time (datetime): 2018-01-12 09:32:00.000000"""
         self.assertEqual(form.previous_section(), 'section2')
         entry = form.submit()
         self.assertEqual(entry['Participant_ID'], 'CE0009')
-        self.assertEqual(entry['Age'], None)
+        age = entry['Age']
+        self.assertTrue(pd.isna(age), age)
 
     def test_section_conditional_transitions(self):
         """ Test transitions based on value criteria """
@@ -2518,8 +2531,8 @@ Date_Time (datetime): 2018-01-12 09:32:00.000000"""
 
         result = form.submit()
         self.assertEqual(result, {'S1_Q1' : 'go_s2',
-                                  'S2_Q1' : None,
-                                  'S3_Q1' : None,
+                                  'S2_Q1' : pd.NA,
+                                  'S3_Q1' : pd.NA,
         })
 
     def test_from_gform_sections(self):
@@ -2622,8 +2635,10 @@ Date_Time (datetime): 2018-01-12 09:32:00.000000"""
 
         result = form.submit()
         self.assertEqual(result['S1_Q1'], 'go_s3')
-        self.assertEqual(result['S2_Q1'], None)
-        self.assertEqual(result['S3_Q1'], None)
+        rS2Q1 = result['S2_Q1']
+        self.assertTrue(pd.isna(rS2Q1), rS2Q1)
+        rS3Q1 = result['S3_Q1']
+        self.assertTrue(pd.isna(rS3Q1), rS3Q1)
 
     def test_from_gform_items(self):
         dlg = 'French'
@@ -2768,7 +2783,8 @@ class TestFormSection(unittest.TestCase):
                                         vtype='int')],
                               default_language='French',
                               supported_languages={'French'})
-        self.assertEqual(section['Age'].get_value(), None)
+        age_value = section['Age'].get_value()
+        self.assertTrue(pd.isna(age_value), age_value)
         self.assertRaises(InvalidValue, section['Participant_ID'].get_value)
         self.assertRaises(KeyError, section.__getitem__, 'Other')
 
@@ -2825,8 +2841,8 @@ class TestFormSection(unittest.TestCase):
 
     def test_next_section_with_transition(self):
         next_section_def = [
-            ('Age is not None and Age > 60', 'section_elder'),
-            ('Age is not None and Age < 50', 'section_younger')
+            ('not isna(Age) and Age > 60', 'section_elder'),
+            ('not isna(Age) and Age < 50', 'section_younger')
         ]
         section = FormSection([FormItem({'Participant_ID' :
                                          {'French':'Code Participant'}},
@@ -2870,8 +2886,8 @@ class TestFormSection(unittest.TestCase):
 
     def test_no_transition_when_no_matching_criterion(self):
         next_section_def = [
-            ('Age is not None and Age > 60', 'section_elder'),
-            ('Age is not None and Age <= 60', 'section_younger')
+            ('not isna(Age) and Age > 60', 'section_elder'),
+            ('not isna(Age) and Age <= 60', 'section_younger')
         ]
         section = FormSection([FormItem({'Participant_ID' :
                                          {'French':'Code Participant'}},
@@ -3262,7 +3278,7 @@ class TestFormItem(unittest.TestCase):
                         default_language='French')
         item.set_input_str('True', key='Agree_participation')
         self.assertTrue(item.is_valid())
-        self.assertEqual(item.get_items(), {'Agree_contact' : None,
+        self.assertEqual(item.get_items(), {'Agree_contact' : pd.NA,
                                             'Agree_participation' : True})
         item.set_input_str('Dummy', key='Agree_participation')
         self.assertFalse(item.is_valid())

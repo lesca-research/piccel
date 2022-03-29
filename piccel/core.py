@@ -7,6 +7,14 @@ from .logging import logger
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+
+class on_str(object):
+    def __init__(self, func):
+        self.func = func
+
+    def __str__(self):
+        return self.func()
+
 def if_none(value, default_value):
     return value if value is not None else default_value
 

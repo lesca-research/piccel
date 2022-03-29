@@ -67,7 +67,7 @@ from . import ui
 from .ui.widgets import (show_critical_message_box, show_info_message_box,
                          PasswordEdit)
 
-from .core import (LazyFunc, df_index_from_value, if_none,
+from .core import (LazyFunc, df_index_from_value, if_none, on_str,
                    refresh_text, strip_indent)
 
 from .core import UserRole, nexts, InputType
@@ -2037,8 +2037,9 @@ class DataSheet:
 
         self.live_forms.pop(form_id)
         logger.debug2('Sheet %s: Popped form_id %s -> remaining forms: %s',
-                     self.label, form_id,
-                     ', '.join(str(fid) for fid in self.live_forms))
+                      self.label, form_id,
+                      on_str(partial(', '.join,
+                                     (str(fid) for fid in self.live_forms))))
 
     def add_entry(self, entry_dict, entry_idx, process_entry_df,
                   save_func=None):
@@ -2046,7 +2047,8 @@ class DataSheet:
             save_func = self.save_single_entry
         if logger.level >= logging.DEBUG:
             logger.debug('Sheet %s: Add entry %s, (keys: %s)',
-                         self.label, entry_idx, ','.join(entry_dict.keys()))
+                         self.label, entry_idx,
+                         on_str(partial(','.join, entry_dict.keys())))
 
         # Convert entry dict to pandas.DataFrame and set index
         idx_arrays = [np.array([entry_idx[0]], dtype=np.int64),
@@ -2060,7 +2062,7 @@ class DataSheet:
         self.fix_types(entry_df)
         logger.debug('Sheet %s: process addition of entry_df: index=%s, cols=%s',
                      self.label, entry_df.index.name,
-                     ','.join(entry_df.columns))
+                     on_str(partial(','.join, entry_df.columns)))
 
         # Inject entry in current dataframe
         # Index of entry may change because of conflicting entries
@@ -2092,7 +2094,8 @@ class DataSheet:
             return entry_fn
         else:
             logger.debug2('Sheet %s: entry %d not saved (no associated '\
-                          'filesystem)', self.label, entry_df.index.to_list())
+                          'filesystem)', self.label,
+                          on_str(entry_df.index.to_list))
         return None
 
     def add_new_entry(self, entry_dict):
@@ -2150,17 +2153,30 @@ class DataSheet:
         # TODO: fix date types
         master_df = self.empty_df_from_master()
         master_cols = set(master_df.columns)
+
+        for extra_col in master_cols.difference(df.columns):
+            master_dt_col = master_df.dtypes[extra_col]
+            if master_dt_col.name.startswith('float'):
+                df[extra_col] = np.nan
+            elif master_dt_col.name.startswith('date'):
+                df[extra_col] = pd.NaT
+            else:
+                df[extra_col] = pd.NA
+            df[extra_col] = df[extra_col].astype(master_dt_col)
+
         for col in df.columns:
             dt_col = df.dtypes[col]
             master_dt_col = master_df.dtypes[col]
             logger.debug2('Check type of %s', col)
-            if col in master_cols and dt_col.name != master_dt_col.name:
+            if dt_col.name != master_dt_col.name:
+                logger.debug2('Inconsistent type: %s (master: %s)',
+                              dt_col.name, master_dt_col.name)
                 if master_dt_col.name.startswith('float'):
                     tmp = pd.Series(np.zeros(df[col].shape[0]),
                                     dtype=master_dt_col,
                                     index=df[col].index)
                     m_na = pd.isna(df[col])
-                    tmp[~m_na] = df[~m_na][col]
+                    tmp[~m_na] = df[col].to_numpy()[(~m_na).to_numpy()]
                     tmp[m_na] = np.nan
                     df[col] = tmp
                 elif master_dt_col.name.startswith('date'):
@@ -2174,6 +2190,7 @@ class DataSheet:
                         print('value error entry df')
                         from IPython import embed; embed()
                     df[col].fillna(pd.NA)
+
     def _append_df(self, entry_df):
         # TODO: use merge instead of append
         # -> have to change notification and QListView
@@ -2188,16 +2205,31 @@ class DataSheet:
 
         self.fix_types(entry_df)
 
+        prev_dtypes = self.df.dtypes.copy()
         logger.debug2('Sheet %s, dtypes before addition: %s', self.label,
                      self.df.dtypes)
         self.df = pd.concat((self.df, entry_df), join='outer')
         logger.debug2('Sheet %s, dtypes after addition: %s', self.label,
                      self.df.dtypes)
+        # if any(new_dtype.name != prev_dtypes[col].name
+        #        for col, new_dtype in self.df.dtypes.items()):
+        #     logger.warning('dtype changed ... fixing ...')
+        #     self.fix_types(self.df)
+
+        for col, new_dtype in self.df.dtypes.items():
+            if prev_dtypes[col].name != new_dtype.name:
+                msg = ('dtype changed for %s: was %s, now %s' % 
+                       (col, prev_dtypes[col].name, new_dtype.name))
+                logger.error(msg)
+                raise TypeError(msg)
+
         self.df.sort_index(inplace=True)
-        entry_index = self.fix_conflicting_entries(index_to_track=entry_df.index[0])
+        idx_to_track = entry_df.index[0]
+        entry_index = self.fix_conflicting_entries(index_to_track=idx_to_track)
         logger.debug2('Entry index after fixing: %s', entry_index)
         logger.debug2('Entry has been appended to sheet %s', self.label)
-        logger.debug2('Resulting df has columns: %s)', ','.join(self.df.columns))
+        logger.debug2('Resulting df has columns: %s)',
+                      on_str(partial(','.join, self.df.columns)))
         self.invalidate_cached_views()
         logger.debug("Sheet %s notifies 'appended_entry'", self.label)
         self.notifier.notify('appended_entry', entry_df=entry_df)
@@ -2370,8 +2402,8 @@ class TestDataSheet(unittest.TestCase):
             ('__entry_id__', np.array([0, 0, 1], dtype=np.int64)),
             ('__update_idx__', np.array([0, 1, 0], dtype=np.int64)),
             ('__conflict_idx__', np.array([0, 0, 0], dtype=np.int64)),
-            ('Age', pd.array([22, 50, None], dtype=pd.Int64Dtype())),
-            ('Taille', [None, 1.7, 1.7]),
+            ('Age', pd.array([22, 50, pd.NA], dtype=pd.Int64Dtype())),
+            ('Taille', [np.nan, 1.7, 1.7]),
             ('Phone_Number', ['514', '514', '512']),
             ('Flag', [True, False, None]),
             ('Comment', ['a\tb', '"', '""']),
@@ -2555,10 +2587,12 @@ def foo():
         filesystem = LocalFileSystem(sheet_folder)
 
         form_master = Form.from_dict(form_def)
-        self.assertIsNone(form_master['section1']['User'].get_value())
+        user_value = form_master['section1']['User'].get_value()
+        self.assertTrue(pd.isna(user_value), user_value)
         sheet = DataSheet(sheet_id, form_master, None, user, filesystem)
         form = sheet.form_new_entry()
-        self.assertIsNone(form_master['section1']['User'].get_value())
+        user_value = form_master['section1']['User'].get_value()
+        self.assertTrue(pd.isna(user_value), user_value)
         self.assertEqual(form['section1']['User'].get_value(), user)
 
     def test_unique_form_check(self):
@@ -4441,16 +4475,6 @@ class WorkBook:
         for sheet in self.sheets.values():
             sheet.refresh_data()
 
-    def ____set_user(self, user, role):
-        if not self.decrypted:
-            raise EncryptionError()
-        assert(isinstance(role, UserRole))
-        if not self.password_vault.has_password_key(role.name):
-            raise NoRolePasswordError(role)
-
-        form_update_or_new('__users__', self, {'User' : user},
-                           {'Role' : role})[0].submit()
-
     def get_users(self):
         assert(self.decrypted)
         users_sheet = self.request_read_only_sheet('__users__')
@@ -5714,7 +5738,7 @@ class TestWorkBook(unittest.TestCase):
                 super().init()
 
             def refresh_entries(self, pids):
-                super().refresh_entries(pids)
+                pids, pids_dropped = super().refresh_entries(pids)
                 logger.debug('Dashboard refresh for: %s', pids)
 
                 self.df.loc[pids, 'Eval'] = 'eval_todo'
@@ -5992,7 +6016,7 @@ class TestWorkBook(unittest.TestCase):
 
         logger.debug('---- Test accept withdrawal from progress note ----')
         form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
-                                                        'Study_Status')
+                                                 'Study_Status')
         self.assertTrue(action_label.endswith('Update'), action_label)
         self.assertTrue(action_label.startswith('Participants'), action_label)
 
@@ -6184,7 +6208,8 @@ class TestWorkBook(unittest.TestCase):
                           vtype='text', supported_languages={'French'},
                           default_language='French',
                           choices={'done':None,
-                                   'redo':None},
+                                   'redo':None,
+                                   'revoke_session':None,},
                           allow_empty=True),
                  FormItem(keys={'Timestamp_Submission':None},
                           vtype='datetime',
@@ -6247,12 +6272,18 @@ class TestWorkBook(unittest.TestCase):
                     [DEFAULT_INTERVIEW_PLAN_SHEET_LABEL, 'Eval']
 
             def refresh_entries(self, pids):
-                logger.debug('Dashboard refresh for: %s', pids)
-                self.eval_tracker.track(self.df, pids, date_now=self.date_now)
+                pids, pids_drop = super().refresh_entries(pids)
+                logger.debug('DashboardInterview refresh (date_now=%s)...',
+                             self.date_now)
+                self.eval_tracker.track(self.df, pids, date_now=self.date_now,
+                                        pids_drop=pids_drop)
 
             def action(self, entry_df, selected_column):
-                super().action(entry_df, selected_column)
-                return self.eval_tracker.action(entry_df, selected_column)
+                result, result_label = super().action(entry_df, selected_column)
+                if result is None:
+                    result, result_label = \
+                        self.eval_tracker.action(entry_df, selected_column)
+                return result, result_label
 
         sh_dashboard = DataSheet('Dashboard')
         sh_dashboard.set_plugin_from_code(DashboardInterview.get_code_str())
@@ -6617,6 +6648,444 @@ class TestWorkBook(unittest.TestCase):
         # Must be reviewer role to access review field
         self.assertTrue(False)
 
+    def test_dashboard_interview_on_drop(self):
+        # Create empty workbook
+        fs = LocalFileSystem(self.tmp_dir)
+
+        # Create new workbook from scratch
+        wb_id = 'Participant_info'
+        user = 'me'
+        wb = WorkBook.create(wb_id, fs, access_password=self.access_pwd,
+                             admin_password=self.admin_pwd,
+                             admin_user=user)
+
+        # Create data sheet participant info (no form)
+        sheet_id = 'Participants_Status'
+        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002', 'CE0003'],
+                              'Study_Status' : ['ongoing', 'ongoing', 'ongoing'],
+                              'Timestamp_Submission' :
+                              [datetime(2021,9,9,10,10),
+                               datetime(2021,9,9,10,10),
+                               datetime(2021,9,9,10,10)]})
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem({'Study_Status' :
+                           {'French':'Statut du participant'}},
+                          default_language='French',
+                          supported_languages={'French'},
+                          choices={
+                              'ongoing' : {'French' : 'Etude en cours'},
+                              'drop_out' : {'French' : "Sorti.e de l'étude"},
+                              'inactive' : {'French' : "Entrée inactive"},
+                          },
+                          init_values={'Study_Status' : 'ongoing'},
+                          allow_empty=False),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Timestamp_Submission':None},
+                          vtype='datetime',
+                          allow_empty=False,
+                          supported_languages={'French'},
+                          default_language='French')
+        ]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Participant Information'})
+        sh_pp = DataSheet(sheet_id, form_master=form, df=pp_df, user=user)
+
+        class ParticipantPlugin(SheetPlugin):
+            def active_view(self, df):
+                latest = self.sheet.latest_update_df(df)
+                return latest[latest['Study_Status'] != 'inactive']
+            def views(self, views):
+                views.update({'latest_active' : self.active_view})
+                return views
+        sh_pp.set_plugin_from_code(ParticipantPlugin.get_code_str())
+
+        # Create Interview plan sheet
+        sheet_id = DEFAULT_INTERVIEW_PLAN_SHEET_LABEL
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          unique=True,
+                          default_language='French',
+                          freeze_on_update=True,
+                          supported_languages={'French'}),
+                 FormItem({'Staff' : None},
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Interview_Type':None},
+                          vtype='text', supported_languages={'French'},
+                          choices={'Preliminary' :
+                                   {'French' : 'Séance préliminaire'},
+                                   'Eval' : {'French' : "Séance d'évaluation"}
+                          },
+                          default_language='French',
+                          allow_empty=False),
+                 FormItem(keys={'Plan_Action':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          choices={'plan':{'French':'Plannifier un rendez-vous'},
+                                   'cancel_date':
+                                   {'French':'Annuler le rendez-vous précédent'},
+                                   'assign_staff':
+                                   {'French':'Assigner un intervenant'}},
+                          allow_empty=False),
+                 FormItem(keys={'Interview_Date':None},
+                          vtype='datetime', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=True),
+                 FormItem(keys={'Availability':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=True),
+                 FormItem(keys={'Date_Is_Set':None},
+                          vtype='boolean', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=True),
+                 FormItem(keys={'Callback_Days':None},
+                          vtype='int', supported_languages={'French'},
+                          default_language='French',
+                          number_interval={'left':0, 'closed':'left'},
+                          allow_empty=True),
+                 FormItem(keys={'Send_Email':None},
+                          vtype='boolean', supported_languages={'French'},
+                          default_language='French',
+                          choices={'True':{'French':'Envoyer un courriel'},
+                                   'False':{'French':'NE PAS envoyer de courriel'}},
+                          allow_empty=True),
+                 FormItem(keys={'Email_Schedule':None},
+                         vtype='text', supported_languages={'French'},
+                         default_language='French',
+                         choices={'now':None,
+                                  'days_before_1':None,
+                                  'days_before_2':None,
+                                  'days_before_3':None},
+                          allow_empty=True),
+                 FormItem(keys={'Email_Template':None},
+                         vtype='text', supported_languages={'French'},
+                         default_language='French',
+                         choices={'Eval':None,
+                                  'Eval_remind':None,
+                                  'Preliminary':None,
+                                  'Preliminary_remind':None},
+                          allow_empty=True),
+                FormItem(keys={'Email_Status':None},
+                         vtype='text', supported_languages={'French'},
+                         default_language='French',
+                         choices={'to_send':None,
+                                  'sent':None,
+                                  'cancelled':None,
+                                  'error':None},
+                         init_values={'Email_Status' : 'to_send'},
+                         allow_empty=True),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Timestamp_Submission':None},
+                          vtype='datetime',
+                          allow_empty=False,
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Plannification'})
+        sh_plan = DataSheet(sheet_id, form, user=user)
+
+        # Create evaluation sheet
+        sheet_id = 'Eval'
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          unique=True,
+                          default_language='French',
+                          freeze_on_update=True,
+                          supported_languages={'French'}),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Session_Action':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          choices={'do_session':{'French':'Réaliser la séance'},
+                                   'revoke_session':
+                                   {'French':'Annuler la séance'}},
+                          allow_empty=False),
+                 FormItem(keys={'Interview_Date':None},
+                          vtype='datetime',
+                          supported_languages={'French'},
+                          default_language='French'),
+                 FormItem(keys={'Session_Status':None},
+                          vtype='text', supported_languages={'French'},
+                          default_language='French',
+                          choices={'done':None,
+                                   'redo':None,
+                                   'revoke_session':None},
+                          allow_empty=True),
+                 FormItem(keys={'Timestamp_Submission':None},
+                          vtype='datetime',
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Evaluation'})
+        sh_eval = DataSheet(sheet_id, form, user=user)
+
+        # Create Progress note sheet
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          default_language='French',
+                          freeze_on_update=True,
+                          supported_languages={'French'}),
+                 FormItem(keys={'Note_Type':None},
+                          vtype='text', supported_languages={'French'},
+                          choices={'health' : {'French' : 'Etat de santé'},
+                                   'withdrawal' : {'French' : "Abandon"},
+                                   'exclusion' : {'French' : "Exclusion"}
+                                   },
+                          default_language='French',
+                          allow_empty=False),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Timestamp_Submission' : None},
+                          vtype='datetime',
+                          generator='timestamp_submission',
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Common progress note'})
+        sh_pnote = DataSheet('Progress_Notes', form, user=user)
+
+        # Create dashboard sheet that gets list of participants from p_info
+        # and compute evaluation status.
+        class DashboardInterview(LescaDashboard):
+            def __init__(self, *args, **kwargs):
+                super(DashboardInterview, self).__init__(*args, **kwargs)
+                self.date_now = None
+
+            def after_workbook_load(self):
+                super(DashboardInterview, self).after_workbook_load()
+
+            def init(self):
+                self.eval_tracker = InterviewTracker('Eval', self.workbook)
+                super().init()
+
+            def sheets_to_watch(self):
+                return super(DashboardInterview, self).sheets_to_watch() + \
+                    [DEFAULT_INTERVIEW_PLAN_SHEET_LABEL, 'Eval']
+
+            def refresh_entries(self, pids):
+                pids, pids_drop = super().refresh_entries(pids)
+                logger.debug('DashboardInterview refresh (date_now=%s)...',
+                             self.date_now)
+                self.eval_tracker.track(self.df, pids, date_now=self.date_now,
+                                        pids_drop=pids_drop)
+
+            def action(self, entry_df, selected_column):
+                result, result_label = super().action(entry_df, selected_column)
+                if result is None:
+                    result, result_label = \
+                        self.eval_tracker.action(entry_df, selected_column)
+                return result, result_label
+
+        sh_dashboard = DataSheet('Dashboard')
+        sh_dashboard.set_plugin_from_code(DashboardInterview.get_code_str())
+        wb.add_sheet(sh_dashboard)
+
+        wb.add_sheet(sh_pnote)
+        wb.add_sheet(sh_plan)
+        wb.add_sheet(sh_eval)
+        wb.add_sheet(sh_pp)
+
+        logger.debug('---- Create user Bobbie ----')
+        wb['__users__'].add_new_entry({'User_Name' : 'Bobbie',
+                                       'Security_Word' : 'yata',
+                                       'Role' : UserRole.MANAGER.name})
+        wb.set_user_password('Bobbie', 'pwd_staff')
+
+        logger.debug('---- Login as Bobbie ----')
+        wb.user_login('Bobbie', 'pwd_staff')
+
+        pid = 'CE0003'
+        logger.debug('---- Pid %s: Drop without interview or prior planning ----',
+                     pid)
+        ts = datetime(2021,11,10,10,17)
+        dashboard_df = wb['Dashboard'].get_df_view()
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Study_Status')
+        form.set_values_from_entry({'Study_Status' : 'drop_out',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+        df = wb['Dashboard'].get_df_view()
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval']),
+                         df.loc[pid, 'Eval'])
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Staff']),
+                        df.loc[pid, 'Eval_Staff'])
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Plan']),
+                        df.loc[pid, 'Eval_Plan'])
+
+        pid = 'CE0001'
+        logger.debug('---- Pid %s: Do interview, without prior planning ----',
+                     pid)
+        idate = datetime(2021,10,10,10,33)
+        ts = datetime(2021,11,10,10,16)
+        dashboard_df = wb['Dashboard'].get_df_view()
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval')
+        self.assertTrue(action_label.endswith('New'))
+        self.assertTrue(action_label.startswith('Eval'))
+
+        form.set_values_from_entry({'Session_Action' : 'do_session',
+                                    'Interview_Date' : idate,
+                                    'Session_Status' : 'redo',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+        df = wb['Dashboard'].get_df_view()
+        self.assertEqual(df.loc[pid, 'Eval'], 'eval_redo')
+        self.assertTrue(df.loc[pid, 'Eval_Staff'], 'Bobbie')
+        self.assertTrue(df.loc[pid, 'Eval_Plan'], idate.strftime(DATETIME_FMT))
+
+        # Drop participant
+        ts = datetime(2021,11,10,10,17)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Study_Status')
+        form.set_values_from_entry({'Study_Status' : 'drop_out',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+
+        df = wb['Dashboard'].get_df_view()
+        self.assertEqual(df.loc[pid, 'Eval'], 'confirm_revoke')
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Staff']),
+                        df.loc[pid, 'Eval_Staff'])
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Plan']),
+                        df.loc[pid, 'Eval_Plan'])
+
+        # Put them back in study
+        ts = datetime(2021,11,10,10,18)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Study_Status')
+        form.set_values_from_entry({'Study_Status' : 'ongoing',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+
+        logger.debug('------- Pid %s: Plan interview date, with sent email --------',
+                     pid)
+        idate = datetime(2021,10,10,10,10)
+        ts = datetime(2021,11,10,10,19)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
+        form.set_values_from_entry({'Plan_Action' : 'plan',
+                                    'Interview_Date' : idate,
+                                    'Staff' : 'dunno',
+                                    'Availability' : 'ignored',
+                                    'Date_Is_Set' : True,
+                                    'Send_Email' : True,
+                                    'Email_Status' : 'sent',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+
+        # Drop participant
+        ts = datetime(2021,11,10,10,20)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Study_Status')
+        form.set_values_from_entry({'Study_Status' : 'drop_out',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+
+        df = wb['Dashboard'].get_df_view()
+        self.assertEqual(df.loc[pid, 'Eval'], 'confirm_revoke')
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Staff']),
+                        df.loc[pid, 'Eval_Staff'])
+        self.assertEqual(df.loc[pid, 'Eval_Plan'], 'confirm_cancel')
+
+        # Confirm planning cancellation
+        ts = datetime(2021,11,10,10,21)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
+        form.set_values_from_entry({'Timestamp_Submission' : ts})
+        logger.debug('---- Cancel date for drop out ----')
+        form.submit()
+
+        df = wb['Dashboard'].get_df_view()
+        self.assertEqual(df.loc[pid, 'Eval'], 'confirm_revoke')
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Staff']),
+                        df.loc[pid, 'Eval_Staff'])
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Plan']),
+                        df.loc[pid, 'Eval_Plan'])
+
+        # Confirm session revokation
+        ts = datetime(2021,11,10,10,22)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval')
+        form.set_values_from_entry({'Timestamp_Submission' : ts})
+        logger.debug('---- confirm revokation ----')
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval']), df.loc[pid, 'Eval'])
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Staff']),
+                        df.loc[pid, 'Eval_Staff'])
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Plan']),
+                        df.loc[pid, 'Eval_Plan'])
+
+
+        pid = 'CE0002'
+        logger.debug('---- Pid %s: Do interview, without prior planning ----',
+                     pid)
+        idate = datetime(2021,10,10,10,33)
+        ts = datetime(2021,11,10,10,16)
+        dashboard_df = wb['Dashboard'].get_df_view()
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval')
+        self.assertTrue(action_label.endswith('New'))
+        self.assertTrue(action_label.startswith('Eval'))
+
+        form.set_values_from_entry({'Session_Action' : 'do_session',
+                                    'Interview_Date' : idate,
+                                    'Session_Status' : 'done',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+        df = wb['Dashboard'].get_df_view()
+        self.assertEqual(df.loc[pid, 'Eval'], 'eval_done')
+        self.assertTrue(df.loc[pid, 'Eval_Staff'], 'Bobbie')
+        self.assertTrue(df.loc[pid, 'Eval_Plan'], idate.strftime(DATETIME_FMT))
+
+        # Drop participant
+        ts = datetime(2021,11,10,10,17)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Study_Status')
+        form.set_values_from_entry({'Study_Status' : 'drop_out',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+
+        df = wb['Dashboard'].get_df_view()
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval']),
+                         df.loc[pid, 'Eval'])
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Staff']),
+                        df.loc[pid, 'Eval_Staff'])
+        self.assertTrue(pd.isna(df.loc[pid, 'Eval_Plan']),
+                        df.loc[pid, 'Eval_Plan'])
+
     def test_dashboard_emailled_poll_track(self):
         # Create empty workbook
         fs = LocalFileSystem(self.tmp_dir)
@@ -6628,7 +7097,11 @@ class TestWorkBook(unittest.TestCase):
                              admin_password=self.admin_pwd, admin_user=user)
 
         # Create data sheet participant status)
-        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002']})
+        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002'],
+                              'Study_Status' : ['ongoing', 'ongoing'],
+                              'Timestamp_Submission' :
+                              [datetime(2021,9,9,10,10),
+                               datetime(2021,9,9,10,10)]})
         items = [FormItem({'Participant_ID' :
                    {'French':'Code Participant'}},
                           default_language='French',
@@ -6817,6 +7290,7 @@ class TestWorkBook(unittest.TestCase):
                 return super().sheets_to_watch() + ['Poll', 'Email']
 
             def refresh_entries(self, pids):
+                pids, pids_dropped = super().refresh_entries(pids)
                 logger.debug('Dashboard refresh for: %s', pids)
                 self.poll_tracker.track(self.df, pids, date_now=self.date_now)
 
