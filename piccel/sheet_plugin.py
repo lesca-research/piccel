@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import inspect
 
+from .ui.widgets import show_critical_message_box
+
 from piccel.core import LazyFunc, SheetNotFound, strip_indent, UserRole
 
 import logging
@@ -19,6 +21,8 @@ from piccel.plugin_tools import (LescaDashboard, InterviewTracker,
                                  DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
                                  PollTracker, EmailledPollTracker,
                                  ParticipantStatusTracker)
+from piccel.ui.widgets import show_critical_message_box, show_info_message_box
+
 from piccel.form import Form
 from piccel.logging import logger
 """
@@ -48,6 +52,9 @@ class SheetPlugin:
         self.sheet = data_sheet
         self._all_watched = None
         self.watched_sheets = set()
+
+    def version(self):
+        return '0'
 
     def all_watched(self):
         if self._all_watched is None:
@@ -233,6 +240,10 @@ class SheetPlugin:
                              .replace(cls.__name__, 'CustomSheetPlugin')))
 
 class UserSheetPlugin(SheetPlugin):
+
+    def version(self):
+        return '1.2022.04.01.4'
+
     def active_view(self, df):
         latest = self.sheet.latest_update_df(df)
         return latest[latest['Status'] == 'active']
@@ -246,3 +257,22 @@ class UserSheetPlugin(SheetPlugin):
     def views(self, base_views):
         base_views.update({'active' : self.active_view})
         return base_views
+
+    def action(self, entry_df, selected_column):
+        form, label = super().action(entry_df, selected_column)
+        latest = self.sheet.latest_update_df()
+        if (UserRole[latest.loc[entry_df.index[0], 'Role']] >
+            self.sheet.user_role):
+            form.cancel()
+            show_critical_message_box('Cannot edit a user with a more '\
+                                      'permissive role than the current user')
+            return None, None
+
+        for item in form.key_to_items['Role']:
+            fixed_choices = {}
+            for choice, choice_tr in item.choices.items():
+                if UserRole[choice] <= self.sheet.user_role:
+                    fixed_choices[choice] = choice_tr
+            item.set_choices(fixed_choices)
+
+        return form, label

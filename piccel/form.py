@@ -4182,6 +4182,19 @@ def make_item_input_widget(item_widget, item, key, key_label,
         _input_ui.minute_field.editingFinished.connect(call_after(callback,
                                                                   reset_style))
 
+        def _now():
+            qdate_now = QtCore.QDateTime.currentDateTime()
+            _input_ui.datetime_field.setDate(qdate_now.date())
+            _input_ui.datetime_field.editingFinished.emit()
+            if item.vtype == 'datetime':
+                time_now = qdate_now.time()
+                _input_ui.hour_field.setValue(time_now.hour())
+                _input_ui.hour_field.editingFinished.emit()
+                _input_ui.minute_field.setValue(time_now.minute())
+                _input_ui.minute_field.editingFinished.emit()
+
+        _input_ui.button_now.clicked.connect(_now)
+
         if item.vtype == 'date':
             _input_ui.frame_hour.hide()
     else:

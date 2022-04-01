@@ -574,8 +574,7 @@ class Unformatter:
         self.key = key
         self.na_value = na_value
     def __call__(self, v):
-        return self.form.unformat(self.key, v) if v!='' else self.na_value 
-
+        return self.form.unformat(self.key, v) if v!='' else self.na_value
 
 from .sheet_plugin import SheetPlugin, UserSheetPlugin
 
@@ -4457,12 +4456,13 @@ class WorkBook:
         Load user list and resolve linked books
         Must be called before user login.
         """
+        logger.info('WorkBook %s: decrypt...', self.label)
+
         if access_pwd is not None or key_afn is not None:
             if key_afn is None:
                 if not self.access_password_is_valid(access_pwd):
                     logger.error('Invalid password for data access')
                     raise InvalidPassword('Data access')
-                logger.info('WorkBook %s: decrypt', self.label)
                 encrypter = self.password_vault.get_encrypter(WorkBook.ACCESS_KEY,
                                                               access_pwd)
             else:
@@ -4479,18 +4479,40 @@ class WorkBook:
                         'Dump default one', self.label, plugin_fn)
             self.dump_common_plugin()
 
+        try:
+            users_sheet = self.request_read_only_sheet('__users__')
+        except SheetNotFound:
+            users_sheet = None
 
-        users_sheet = self.request_read_only_sheet('__users__')
-        logger.info('current version of form of loaded sheet __users__: %s',
-                    users_sheet.form_master)
-        logger.info('current version of USERS_FORM : %s',
-                    USERS_FORM.version())
+        if users_sheet is not None:
+            if users_sheet.form_master is None:
+                logger.info('Set form master for __users__ sheet (None loaded)')
+                users_sheet.set_form_master(USERS_FORM.new(),
+                                            save=True, overwrite=True)
+            else:
+                logger.info('current version of form of loaded sheet __users__: %s',
+                            users_sheet.form_master.version())
+                logger.info('current version of USERS_FORM : %s',
+                            USERS_FORM.version())
 
-        if (version.parse(users_sheet.form_master.version()) <
-            version.parse(USERS_FORM.version())):
-            logger.info('Update form master for __users__ sheet')
-            users_sheet.set_form_master(USERS_FORM.new(),
-                                        save=True, overwrite=True)
+                if (version.parse(users_sheet.form_master.version()) <
+                    version.parse(USERS_FORM.version())):
+                    logger.info('Update form master for __users__ sheet')
+                    users_sheet.set_form_master(USERS_FORM.new(),
+                                                save=True, overwrite=True)
+
+                loaded_users_plugin_ver = users_sheet.plugin.version()
+                logger.info('current version of plugin for __users__: %s',
+                            loaded_users_plugin_ver)
+                current_users_plugin_ver = UserSheetPlugin(None).version()
+                logger.info('current version of UserSheetPlugin : %s',
+                            current_users_plugin_ver)
+
+            if (version.parse(loaded_users_plugin_ver) <
+                version.parse(current_users_plugin_ver)):
+                logger.info('Set plugin for __users__ sheet (obsolete version)')
+                users_sheet.set_plugin_from_code(UserSheetPlugin.get_code_str(),
+                                                 first_attempt=False)
 
         # try:
         #     users_sheet = self.request_read_only_sheet('__users__')
@@ -8659,10 +8681,10 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
                 column = row_df.columns[idx.column()-(row_df.index.name is not None)]
             logger.debug('f_cell_action, idx.row=%d, idx.col=%d, column=%s',
                          idx.row(), idx.column(), column)
-            action_ouput = sheet.action(row_df, column)
-            if action_ouput is None:
+            action_result, action_label = sheet.action(row_df, column)
+            if action_result is None:
                 return
-            action_result, action_label = action_ouput
+
             if isinstance(action_result, Form):
                 self.tab_sorter.add_tab_live_form(action_result, action_label,
                                                   sheet.label,
