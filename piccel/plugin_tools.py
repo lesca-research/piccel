@@ -1199,43 +1199,57 @@ class InterviewTracker:
         if interview_column.endswith('_Plan'):
             interview_label = interview_column[:-len('_Plan')]
             if value == 'confirm_cancel':
-                return form_update_or_new(self.plan_sheet_label, self.workbook,
-                                          {'Participant_ID' : participant_id,
-                                           'Interview_Type' : interview_label},
-                                          {'Plan_Action' : 'cancel_date',
-                                           'Send_Email' : False,
-                                           'Email_Status' : 'cancelled'})
+                plan_action = 'cancel_date'
+                send_email = False
+                email_schedule = None
+                email_status = 'cancelled'
             else:
-                return form_update_or_new(self.plan_sheet_label, self.workbook,
-                                          {'Participant_ID' : participant_id,
-                                           'Interview_Type' : interview_label},
-                                          {'Plan_Action' : 'plan',
-                                           'Send_Email' : True,
-                                           'Email_Schedule' : 'days_before_2',
-                                           'Email_Template' : interview_label})
-            # if value.endswith('_not_done') or value.endswith('_cancelled'):
-            # elif value.endswith('_scheduled') or value.endswith('_email_pending') or \
-            #  value.endswith('_email_sent') or value.endswith('_email_error') or \
-            #  value.endswith('_ok') or value.endswith('_redo'):
+                plan_action = 'plan'
+                send_email = True
+                email_schedule = 'days_before_2'
+                email_status = 'to_send'
+
+            form, action_label = \
+                form_update_or_new(self.plan_sheet_label,
+                                   self.workbook,
+                                   {'Participant_ID' : participant_id,
+                                    'Interview_Type' : interview_label},
+                                   {'Plan_Action' : plan_action,
+                                    'Send_Email' : send_email,
+                                    'Email_Template' : interview_label,
+                                    'Email_Schedule' : email_schedule,
+                                    'Email_Status' : email_status})
+
+            for item in form.key_to_items['Interview_Type']:
+                item.set_editable(False)
+
         elif interview_column.endswith('_Staff'):
             interview_label = interview_column[:-len('_Staff')]
-            return form_update_or_new(self.plan_sheet_label, self.workbook,
-                                      {'Participant_ID' : participant_id,
-                                       'Interview_Type' : interview_label},
-                                      {'Plan_Action' : 'assign_staff',
-                                       'Send_Email' : False})
+            form, action_label = \
+                form_update_or_new(self.plan_sheet_label, self.workbook,
+                                   {'Participant_ID' : participant_id,
+                                    'Interview_Type' : interview_label},
+                                   {'Plan_Action' : 'assign_staff',
+                                    'Send_Email' : False})
+
+            for item in form.key_to_items['Interview_Type']:
+                item.set_editable(False)
+
         else:
             interview_label = interview_column
             if value == 'confirm_revoke':
-                return form_update_or_new(interview_label, self.workbook,
-                                          {'Participant_ID' : participant_id},
-                                          {'Session_Action' : 'revoke_session',
-                                           'Session_Status' : 'done'})
+                form, action_label = \
+                    form_update_or_new(interview_label, self.workbook,
+                                       {'Participant_ID' : participant_id},
+                                       {'Session_Action' : 'revoke_session',
+                                        'Session_Status' : 'done'})
             else:
-                return form_update_or_new(interview_label, self.workbook,
-                                          {'Participant_ID' : participant_id},
-                                          {'Session_Action' : 'do_session',
-                                           'Session_Status' : 'done'})
+                form, action_label = \
+                    form_update_or_new(interview_label, self.workbook,
+                                       {'Participant_ID' : participant_id},
+                                       {'Session_Action' : 'do_session',
+                                        'Session_Status' : 'done'})
+
         return form, action_label
 
     def track(self, dashboard_df, pids, date_now=None, pids_drop=None):

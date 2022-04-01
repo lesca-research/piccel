@@ -51,6 +51,7 @@ class SheetPlugin:
 
     def all_watched(self):
         if self._all_watched is None:
+            self._all_watched = False
             self.update_watched_sheets()
         return self._all_watched
 
@@ -68,6 +69,7 @@ class SheetPlugin:
         to_watch = self.sheets_to_watch()
 
         if len(to_watch) == 0:
+            logger.debug('no sheet to watch')
             if not self._all_watched:
                 self._all_watched = True
                 self.sheet.invalidate_cached_views()

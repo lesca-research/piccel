@@ -26,6 +26,7 @@ from importlib import import_module, reload as reload_module
 import inspect
 from traceback import format_stack, format_exc
 import csv
+from packaging import version
 
 from . import sheet_plugin_template
 from . import workbook_plugin_template
@@ -1582,14 +1583,12 @@ class DataSheet:
                                                     view_label)
             if validity_df is not None:
                 logger.debug('Update cached validity for view "%s". '\
-                             'Got columns: %s', view_label,
-                             ', '.join(validity_df.columns))
+                             'Shape %s. Columns: %s', view_label,
+                             validity_df.shape, ', '.join(validity_df.columns))
             else:
                 logger.warning('Update cached  view validity "%s": None',
                                view_label)
             if self.df is not None:
-                # IMPORTANT: ASSUME that validity_df aligns with self.df...
-                # but that may not be the case -> TODO clarify
                 inconsistent_ids = (self.inconsistent_entries()
                                     .intersection(validity_df.index))
                 validity_df.loc[inconsistent_ids, :] = False
@@ -1702,12 +1701,14 @@ class DataSheet:
             view_df = self.views[view_label](self.df)
             if view_df is not None:
                 logger.debug('Sheet %s: Update cached view "%s". Shape %s. '\
-                             'Columns: %s', self.label, view_label, view_df.shape,
+                             'Columns: %s', self.label, view_label,
+                             view_df.shape,
                              ', '.join(view_df.columns))
                 if '__fn__' in view_df.columns:
                     view_df = view_df.drop(columns=['__fn__'])
             else:
-                logger.debug('Sheet %s: Update cached view "%s": None', self.label,
+                logger.debug('Sheet %s: Update cached view "%s": None',
+                             self.label,
                              view_label)
             cached_views[view_label] = view_df
 
@@ -3128,9 +3129,8 @@ def foo():
             def view_validity(self, df, view):
                 validity = pd.DataFrame(index=df.index, columns=df.columns,
                                         dtype=bool)
-                if view == 'latest':
-                    col = 'Taille'
-                    validity[col] = ~df[col].duplicated(keep=False).to_numpy()
+                col = 'Taille'
+                validity[col] = ~df[col].duplicated(keep=False).to_numpy()
                 return validity
 
         self.sheet_ts.set_plugin_from_code(ValiditySheetPlugin.get_code_str())
@@ -3152,6 +3152,21 @@ def foo():
         validity = self.sheet_ts.view_validity('latest')
         expected_validity = pd.DataFrame(index=view.index, columns=view.columns,
                                          dtype=bool)
+        assert_frame_equal(validity, expected_validity)
+
+        view = self.sheet_ts.get_df_view('full')
+        validity = self.sheet_ts.view_validity('full')
+        expected_validity = pd.DataFrame(data=np.ones(view.shape, dtype=bool),
+                                         index=view.index, columns=view.columns)
+        expected_validity['Taille'] = [True, False, False, True]
+        assert_frame_equal(validity, expected_validity)
+
+        self.sheet_ts.invalidate_cached_views()
+        view = self.sheet_ts.get_df_view('full')
+        validity = self.sheet_ts.view_validity('full')
+        expected_validity = pd.DataFrame(data=np.ones(view.shape, dtype=bool),
+                                         index=view.index, columns=view.columns)
+        expected_validity['Taille'] = [True, False, False, True]
         assert_frame_equal(validity, expected_validity)
 
     def test_data_io(self):
@@ -3866,14 +3881,36 @@ roles_tr = {r.name : {language : (r.name[0].upper()+r.name[1:].lower())
             for r in UserRole}
 
 UF_ITEMS = [FormItem({'User_Name' :
-                      {'French' : "Nom d'utilisateur",
+                      {'French' : "Nom d'utilisateur.rice",
                        'English' : "User name"}},
+                     description={
+                         'French' : 'Doit être unique',
+                         'English' : 'Must be unique'
+                     },
                      allow_empty=False,
                      unique=True,
                      freeze_on_update=True,
                      default_language='French',
                      supported_languages={'French', 'English'}),
             FormItem(keys={'Role':None},
+                     description={
+                         'French' :
+                         ("<ul>" \
+                          "<li><i>Viewer:</i> accès en lecture seule" \
+                          "<li><i>Editor:</i> soumission de données" \
+                          "<li><i>Reviewer:</i> révision des données soumises" \
+                          "<li><i>Manager:</i> gestion des utilisateurs, actions de suivi critique (ex: indication d'un drop-out), édition de formulaires" \
+                          "<li><i>Admin:</i> édition du code, altération de données" \
+                          "</ul>"),
+                         'English' :
+                         ("<ul>" \
+                          "<li><i>Viewer:</i> read-only access" \
+                          "<li><i>Editor:</i> submit data" \
+                          "<li><i>Reviewer:</i> revise submitted data" \
+                          "<li><i>Manager:</i> edit users, critical follow-up actions (ex: indicate a drop-out), edit forms" \
+                          "<li><i>Admin:</i> edit code, alter data" \
+                          "</ul>")
+                     },
                      choices=roles_tr,
                      allow_empty=False,
                      init_values={'Role' : 'EDITOR'},
@@ -3881,6 +3918,10 @@ UF_ITEMS = [FormItem({'User_Name' :
                      default_language='French'),
             FormItem(keys={'Status':{'French' : 'Statut',
                                      'English' : 'Status'}},
+                     description={
+                         'French' : "Si non actif, l'utilisateur.rice ne pourra pas se connecter au classeur.<br>Utiliser ce statut pour désactiver un accès tout en gardant une trace des accès précédents.<br><b>Important :</b> le cas échéant, <b>désactiver l'accès cloud</b> au répertoire du classeur.",
+                         'English' : 'If not active, the user will not be able to connect to the workbook.<br>Use this status to desactivate an access while keeping a trace of previous access.<br><b>Important :</b> If needed, also desactivate access to the folder shared on the cloud.'
+                     },
                      choices={'active' : {'French' : 'Actif.ve',
                                           'English' : 'Active'},
                               'non_active' : {'French' : 'Non actif.ve',
@@ -3892,20 +3933,23 @@ UF_ITEMS = [FormItem({'User_Name' :
             FormItem({'Password_Reset' :
                       {'French' : "Réinitialiser le mot de passe",
                        'English' : "Reset password"}},
+                     description={
+                         'French' : "Si oui, l'utilisateur.rice devra réinitialiser son mot de passe lors de sa prochaine connexion au classeur.",
+                         'English' : 'If yes, the user will have to reinitialize their password on their next login into the workbook.'
+                     },
                      allow_empty=False,
                      vtype='boolean',
                      choices={'True' : {'French' : 'Oui', 'English' : 'Yes'},
                               'False' : {'French' : 'Non', 'English' : 'No'}},
-                     init_values={'Password_Reset' : True},
+                     init_values={'Password_Reset' : 'True'},
                      default_language='French',
                      supported_languages={'French', 'English'}),
             FormItem({'Security_Word' :
                       {'French' : "Mot de sécurité",
                        'English' : "Security word"}},
                      description={'French' : "Transmettre ce mot à "\
-                                  "l'utilisateur lors de la rèinitialisation.",
-                                  'English' : "Give this word to the user "\
-                                  "when resetting password"},
+                                  "l'utilisateur lors de la réinitialisation du mot de passe. Sert à éviter qu'un.e autre utilisateur.rice ne puisse faire la réinitialisation.<br>Doit être unique.",
+                                  'English' : "Give this word to the user when reseting their password. It is used to prevent that the reset is done by another user."},
                      allow_empty=False,
                      unique=True,
                      default_language='French',
@@ -3913,6 +3957,9 @@ UF_ITEMS = [FormItem({'User_Name' :
             FormItem({'Password_Hash' :
                       {'French' : "Mot de passe crypté",
                        'English' : "Crypted password"}},
+                     description={'French' : "Stockage d'une version cryptée du mot de passe de l'utilisateur.rice, à des fins de vérification durant la connexion au classeur.<br><b>Ne doit pas être modifié manuellement</b>.",
+                                  'English' : "Store a crypted version of the user password, for checking during login.<br><b>Must not be modified manually</b>."},
+
                      access_level=UserRole.ADMIN,
                      default_language='French',
                      supported_languages={'French', 'English'}),
@@ -3933,7 +3980,8 @@ UF_SECTIONS = {'section_main' : \
 USERS_FORM = Form(UF_SECTIONS, default_language='French',
                   supported_languages={'French', 'English'},
                   title={'French': 'Utilisateur du classeur',
-                         'English': 'Workbook user'})
+                         'English': 'Workbook user'},
+                  version='1.20220331')
 
 class InvalidWorbookLabel(Exception): pass
 class InvalidJobName(Exception): pass
@@ -4123,6 +4171,7 @@ class WorkBook:
                      self.label, self.password_vault.pwd_fn)
 
         self.sheets = {}
+        self.read_only_sheets = {}
         self.jobs = {}
         self.jobs_code = {}
         self.jobs_invalidity = {}
@@ -4408,7 +4457,6 @@ class WorkBook:
         Load user list and resolve linked books
         Must be called before user login.
         """
-        # TODO improve API with key input
         if access_pwd is not None or key_afn is not None:
             if key_afn is None:
                 if not self.access_password_is_valid(access_pwd):
@@ -4431,7 +4479,19 @@ class WorkBook:
                         'Dump default one', self.label, plugin_fn)
             self.dump_common_plugin()
 
-        # Check __users__ sheet - remove when all fixed
+
+        users_sheet = self.request_read_only_sheet('__users__')
+        logger.info('current version of form of loaded sheet __users__: %s',
+                    users_sheet.form_master)
+        logger.info('current version of USERS_FORM : %s',
+                    USERS_FORM.version())
+
+        if (version.parse(users_sheet.form_master.version()) <
+            version.parse(USERS_FORM.version())):
+            logger.info('Update form master for __users__ sheet')
+            users_sheet.set_form_master(USERS_FORM.new(),
+                                        save=True, overwrite=True)
+
         # try:
         #     users_sheet = self.request_read_only_sheet('__users__')
         #     if not users_sheet.form_master.has_key('Password_Hash') or \
@@ -4549,7 +4609,13 @@ class WorkBook:
                 password_is_valid(pwd, users.loc[user, 'Password_Hash']))
 
     def request_read_only_sheet(self, sheet_label, user=None):
-        if not self.logged_in:
+        if self.logged_in:
+            if sheet_label not in self.sheets:
+                raise SheetNotFound(sheet_label)
+            sheet = self[sheet_label]
+        elif sheet_label in self.read_only_sheets:
+            sheet = self.read_only_sheets[sheet_label]
+        else:
             user = if_none(user, self.user)
             sheet_folder = op.join(self.data_folder, WorkBook.SHEET_FOLDER)
             if not self.filesystem.exists(op.join(sheet_folder,
@@ -4560,10 +4626,7 @@ class WorkBook:
             logger.debug('Create requested r-o sheet %s for user %s',
                          sheet_label, user)
             sheet = DataSheet.from_files(user, sh_fs, None, workbook=self)
-        else:
-            if sheet_label not in self.sheets:
-                raise SheetNotFound(sheet_label)
-            sheet = self[sheet_label]
+            self.read_only_sheets[sheet_label] = sheet
 
         return sheet
 
@@ -4730,16 +4793,16 @@ class WorkBook:
         elif sheet_regexp is None:
             sheet_regexp = AnyMatch()
 
-        sheet_folder = op.join(self.data_folder, WorkBook.SHEET_FOLDER)
+        sheets_folder = op.join(self.data_folder, WorkBook.SHEET_FOLDER)
         logger.info('WorkBook %s: Load sheets from %s',
-                    self.label, sheet_folder)
+                    self.label, sheets_folder)
         sheets = {}
 
         sheet_list = self.plugin.sheet_order()
         logger.info('WorkBook %s: sheets order from common plugin: %s',
                      self.label, sheet_list)
 
-        sheet_folders = self.filesystem.listdir(sheet_folder,
+        sheet_folders = self.filesystem.listdir(sheets_folder,
                                                 list_folders_only=True)
 
         unknown_sheets = set(sheet_list).difference(sheet_folders)
@@ -4762,7 +4825,7 @@ class WorkBook:
         logger.debug('WorkBook %s: sheets to load from files: %s',
                      self.label, sheet_list)
         for sheet_label in sheet_list:
-            if not self.filesystem.exists(op.join(sheet_folder,
+            if not self.filesystem.exists(op.join(sheets_folder,
                                                   sheet_label)):
                 logger.warning('WorkBook %s: Skip loading sheet %s '\
                                '(no folder dfound)' %(self.label, sheet_label))
@@ -4770,8 +4833,7 @@ class WorkBook:
             if sheet_regexp.match(sheet_label) is not None:
                 logger.info('WorkBook %s: Reload data sheet %s' % \
                             (self.label, sheet_label))
-                # TODO: specify role here?
-                sh_fs = self.filesystem.change_dir(op.join(sheet_folder,
+                sh_fs = self.filesystem.change_dir(op.join(sheets_folder,
                                                            sheet_label))
 
                 sh = DataSheet.from_files(self.user, sh_fs,
@@ -7574,7 +7636,7 @@ class DataSheetModel(QtCore.QAbstractTableModel):
         self.view_validity = []
         self.sort_idx = []
         if self.view_df is not None:
-            view_validity_df = self.sheet.view_validity()
+            view_validity_df = self.sheet.view_validity(view_label)
             if self.sheet.show_index_in_ui():
                 self.columns, self.view = df_to_list_of_arrays(self.view_df
                                                                .reset_index())
@@ -7591,6 +7653,17 @@ class DataSheetModel(QtCore.QAbstractTableModel):
             if not self.sort_ascending:
                 self.sort_idx = self.sort_idx[::-1]
 
+        logger.debug('Refreshed view %s of sheet %s in Qt model for UI',
+                     view_label, self.sheet.label)
+        logger.debug('View_df shape: %s, view_array shape: (%d, %d)',
+                     self.view_df.shape,
+                     len(self.view[0]) if len(self.view) > 0 else 0,
+                     len(self.view),)
+        logger.debug('validify_df shape: %s, valididy_array shape: (%d, %d)',
+                     view_validity_df.shape,
+                     (len(self.view_validity[0])
+                      if len(self.view_validity) > 0 else 0),
+                     len(self.view_validity))
         self.endResetModel()
         self.layoutChanged.emit()
 

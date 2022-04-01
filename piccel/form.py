@@ -258,7 +258,7 @@ function snakeCaseToCamelCase(s) {
 
     def __init__(self, sections=None, default_language=None,
                  supported_languages=None, title='', label='Form',
-                 watchers=None):
+                 version='0', watchers=None):
         """
         - sections:
           IMPORTANT:
@@ -267,6 +267,7 @@ function snakeCaseToCamelCase(s) {
             submitted afterwards.
         """
         self.label = label
+        self.version_str = version
         self.notifier = Notifier(watchers)
 
         default_language = if_none(default_language, 'English')
@@ -351,6 +352,9 @@ function snakeCaseToCamelCase(s) {
         self.on_cancel = None
         self.set_language(default_language)
         self.to_next_section()
+
+    def version(self):
+        return self.version_str
 
     def freeze_key_on_update(self, key):
         for item in self.key_to_items[key]:
@@ -502,7 +506,8 @@ function snakeCaseToCamelCase(s) {
                     for sec_name, sec_d in d['sections'].items()}
         return Form(sections, d['default_language'],
                     d['supported_languages'], d.get('title', ''),
-                    label=d.get('label', 'Form'), watchers=watchers)
+                    label=d.get('label', 'Form'),
+                    version=d.get('version', '0'), watchers=watchers)
 
     @staticmethod
     def from_gform_json_file(json_fn, language, use_item_title_as_key=True,
@@ -668,6 +673,7 @@ function snakeCaseToCamelCase(s) {
     def to_dict(self):
         return {'title': self.tr.trs['title'],
                 'label' : self.label,
+                'version' : self.version(),
                 'sections' : {sn:s.to_dict() for sn,s in self.sections.items()},
                 'default_language' : self.tr.language,
                 'supported_languages' : list(self.tr.supported_languages)}
