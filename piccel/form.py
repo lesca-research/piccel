@@ -4204,7 +4204,7 @@ def make_item_widget(section_widget, item):
     _item_ui = ui.form_item_ui.Ui_Form()
     _item_ui.setupUi(item_widget)
 
-    refresh_title = refresh_text(item, 'title', _item_ui.title)
+    refresh_title = refresh_text(item, 'title', _item_ui.item_title)
     refresh_title()
     item.notifier.add_watcher('language_changed', refresh_title)
 
@@ -4276,7 +4276,7 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
             _section_ui = ui.section_ui.Ui_Form()
             _section_ui.setupUi(section_widget)
             refresh_title = refresh_text(section, 'title',
-                                         _section_ui.title_label,
+                                         _section_ui.section_title,
                                          hide_on_empty=True)
             refresh_title()
             section.notifier.add_watcher('language_changed', refresh_title)
@@ -4306,9 +4306,9 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
             # End of def set_section_ui
 
         set_section_ui(form.current_section_name, form.current_section)
-        self.title_label.setText(form.tr['title'])
+        self.form_title.setText(form.tr['title'])
 
-        refresh_title = refresh_text(form, 'title', self.title_label,
+        refresh_title = refresh_text(form, 'title', self.form_title,
                                      hide_on_empty=True)
         refresh_title()
         form.notifier.add_watcher('language_changed', refresh_title)
@@ -4334,6 +4334,7 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
                                      form.current_section_name)
                         form.set_language(self.language)
             radio_button.toggled.connect(ChoiceProcess(language))
+            radio_button.setStyleSheet(ui.main_qss.language_radio_style)
             if language == form.current_section.tr.language:
                 radio_language_group.button(idx).setChecked(True)
 

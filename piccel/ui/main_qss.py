@@ -2,15 +2,20 @@ from PyQt5 import QtGui
 
 section_bg_color_rgb = (78, 147, 122)
 section_fg_color_rgb = (255, 255, 255)
-style_defs = {
-    'default_bg_color' : (255, 248, 240),
-    'progress_note_header_bg_color' : section_bg_color_rgb,
-    'progress_note_header_fg_color' : section_fg_color_rgb,
-}
 
-default_bg_qcolor = QtGui.QColor(*style_defs['default_bg_color'])
+default_bg_color_rgb = (255, 248, 240)
+default_bg_qcolor = QtGui.QColor(*default_bg_color_rgb)
+
 section_bg_color = QtGui.QColor(*section_bg_color_rgb)
 section_fg_color = QtGui.QColor(*section_fg_color_rgb)
+
+form_bg_color = section_bg_color.darker(105)
+form_bg_color_rgb = form_bg_color.getRgb()[:3]
+form_fg_color_rgb = section_fg_color_rgb
+
+item_bg_color = section_bg_color.lighter(110)
+item_bg_color_rgb = item_bg_color.getRgb()[:3]
+item_fg_color_rgb = section_fg_color_rgb
 
 form_item_invalid_bg_color = QtGui.QColor(162, 37, 34) # some red
 form_item_invalid_fg_color = QtGui.QColor(255, 255, 255)
@@ -18,11 +23,29 @@ form_item_invalid_fg_color = QtGui.QColor(255, 255, 255)
 form_item_warning_bg_color = QtGui.QColor(224, 142, 69) # some orange
 form_item_warning_fg_color = QtGui.QColor(255, 255, 255)
 
+style_defs = {
+    'default_bg_color' : default_bg_color_rgb,
+    'form_fg_color_rgb' : form_fg_color_rgb,
+    'form_bg_color_rgb' : form_bg_color_rgb,
+    'section_fg_color_rgb' : section_fg_color_rgb,
+    'section_bg_color_rgb' : section_bg_color_rgb,
+    'item_fg_color_rgb' : item_fg_color_rgb,
+    'item_bg_color_rgb' : item_bg_color_rgb,
+    'progress_note_header_bg_color' : section_bg_color_rgb,
+    'progress_note_header_fg_color' : section_fg_color_rgb,
+}
+
+
 main_style = """
+QWidget {{
+    background-color: rgb{default_bg_color};
+}}
+
 QLabel {{
    font-family: "Verdana";
    font-size : 12pt;
    color: black;
+   background-color: rgba(255, 255, 255, 0);
 }}
 
 QTextEdit#textBrowser {{
@@ -31,27 +54,6 @@ QTextEdit#textBrowser {{
    color: black;
 }}
 
-QWidget {{
-    background-color: rgb{default_bg_color};
-}}
-
-QLabel[title=True] {{
-   color: white;
-   font-size : 14pt;
-   background-color: rgb(73, 88, 103);
-}}
-
-QLabel[item_title=True] {{
-   color: white;
-   font-size : 12pt;
-   background-color: rgb(162, 37, 34);
-}}
-
-QLabel[section_title=True] {{
-   color: white;
-   font-size : 14pt;
-   background-color: rgb(162, 37, 34);
-}}
 
 QLabel#report_header_label {{
    color: rgb{progress_note_header_fg_color};
@@ -68,15 +70,45 @@ QLabel#report_footer_label {{
    padding: 5px;
 }}
 
-
 QTextEdit#report_content {{
    font-family: "Verdana";
    font-size : 12pt;
    color: black;
 }}
 
-QFrame[title=True] {{
-   background-color: rgb(73, 88, 103);
+QFrame#frame_form_title {{
+   color: rgb{form_fg_color_rgb};
+   background-color: rgb{form_bg_color_rgb};
+}}
+
+QLabel#form_title {{
+   color: rgb{form_fg_color_rgb};
+   font-size : 14pt;
+   font-style : bold;
+}}
+
+QFrame#frame_section_title {{
+   color: rgb{section_fg_color_rgb};
+   background-color: rgb{section_bg_color_rgb};
+}}
+
+QLabel#section_title {{
+   color: rgb{section_fg_color_rgb};
+   font-size : 14pt;
+}}
+
+QFrame#frame_item_title {{
+   color: rgb{item_fg_color_rgb};
+   background-color: rgb{item_bg_color_rgb};
+   border-top-left-radius: 15px;
+   border-top-right-radius: 15px;
+   border-bottom-left-radius: 0px;
+   border-bottom-right-radius: 0px;
+}}
+
+QLabel#item_title {{
+   color: rgb{item_fg_color_rgb};
+   font-size : 12pt;
 }}
 
 QPushButton {{
@@ -142,6 +174,11 @@ QMenu::item:selected {{
     background: transparent;
 }}
 
+""".format(**style_defs)
+
+language_radio_style = \
+"""
+color: rgb{item_fg_color_rgb};
 """.format(**style_defs)
 
 error_color = QtGui.QColor('#9C0006')

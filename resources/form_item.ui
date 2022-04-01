@@ -75,20 +75,12 @@
        <number>0</number>
       </property>
       <item>
-       <widget class="QFrame" name="frame_title">
+       <widget class="QFrame" name="frame_item_title">
         <property name="sizePolicy">
          <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
           <horstretch>0</horstretch>
           <verstretch>0</verstretch>
          </sizepolicy>
-        </property>
-        <property name="styleSheet">
-         <string notr="true">color: rgb(255, 255, 255);
-background-color: rgb(136, 153,170);
-border-top-left-radius: 15px;
-border-top-right-radius: 15px;
-border-bottom-left-radius: 0px;
-border-bottom-right-radius: 0px;</string>
         </property>
         <property name="frameShape">
          <enum>QFrame::StyledPanel</enum>
@@ -111,15 +103,18 @@ border-bottom-right-radius: 0px;</string>
             </font>
            </property>
            <property name="styleSheet">
-            <string notr="true">color: rgb(255, 36, 0);</string>
+            <string notr="true">background-color: none;</string>
            </property>
            <property name="text">
-            <string>*</string>
+            <string/>
+           </property>
+           <property name="pixmap">
+            <pixmap resource="resources.qrc">:/icons/item_required_icon</pixmap>
            </property>
           </widget>
          </item>
          <item>
-          <widget class="QLabel" name="title">
+          <widget class="QLabel" name="item_title">
            <property name="sizePolicy">
             <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
              <horstretch>0</horstretch>
@@ -317,6 +312,8 @@ border-style: none;</string>
    </item>
   </layout>
  </widget>
- <resources/>
+ <resources>
+  <include location="resources.qrc"/>
+ </resources>
  <connections/>
 </ui>

@@ -11,6 +11,7 @@
         <file alias="editor_icon">edit-alt.svg</file>
         <file alias="editor_unsaved_icon">edit-alt-red.svg</file>
         <file alias="alert_icon">alert-circle-red.svg</file>
+        <file alias="item_required_icon">small-red-dot.svg</file>
         <file alias="form_variable_icon">database.svg</file>
         <file alias="form_unchecked_variable_icon">database_unchecked.svg</file>
         <file alias="form_checked_variable_icon">database_checked.svg</file>

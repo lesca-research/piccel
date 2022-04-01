@@ -41,7 +41,7 @@
       <enum>QFrame::Raised</enum>
      </property>
      <property name="title" stdset="0">
-      <bool>true</bool>
+      <bool>false</bool>
      </property>
      <layout class="QFormLayout" name="formLayout">
       <property name="leftMargin">

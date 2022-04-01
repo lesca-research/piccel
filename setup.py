@@ -16,6 +16,13 @@ here = op.abspath(op.dirname(__file__))
 short_description = 'Collaborative data collection tool'
 long_description = short_description
 
+def replace_in_file(fn, s, repl):
+    with open(fn) as fin:
+        content = fin.read()
+    content = content.replace(s, repl)
+    with open(fn, 'w') as fout:
+        fout.write(content)
+
 def make_resources():
     print('Make resources before setup')
     ui_module_path = op.join('piccel', 'ui', 'generated')
@@ -24,14 +31,20 @@ def make_resources():
         with open(op.join(ui_module_path, '__init__.py'), 'w') as fout:
             fout.write('')
     try:
+        dest_py_fn = op.join(ui_module_path, 'resources_rc.py')
+        rsrc_module_name = op.splitext(op.basename(dest_py_fn))[0]
+        cmd = ['pyrcc5', op.join('resources', 'resources.qrc'), '-o',
+               dest_py_fn]
+        subprocess.run(cmd)
+
         for ui_fn in glob(op.join('resources', '*.ui')):
             dest_py_fn = op.join(ui_module_path,
                                  '%s_ui.py' % op.splitext(op.basename(ui_fn))[0 ])
-            cmd = ['pyuic5', '-x', ui_fn, '-o', dest_py_fn]
+            cmd = ['pyuic5',  '-x', ui_fn, '-o', dest_py_fn]
             subprocess.run(cmd)
-        dest_py_fn = op.join(ui_module_path, 'resources.py')
-        cmd = ['pyrcc5', op.join('resources', 'resources.qrc'), '-o', dest_py_fn]
-        subprocess.run(cmd)
+            replace_in_file(dest_py_fn,
+                            'import %s' % rsrc_module_name,
+                            'from .%s import *' % rsrc_module_name)
     except FileNotFoundError:
         print('pyrcc5 command (PyQT5) not found')
         sys.exit(1)

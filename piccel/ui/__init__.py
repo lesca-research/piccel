@@ -9,7 +9,7 @@ from .generated import item_single_line_ui
 from .generated import item_text_multi_line_ui
 from .generated import login_widget_ui
 from .generated import progress_bar_ui
-from .generated import resources
+from .generated import resources_rc
 from .generated import section_ui
 from .generated import main_single_centered_widget_ui
 from .generated import main_single_centered_dialog_ui
