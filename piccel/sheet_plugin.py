@@ -2,9 +2,8 @@ import pandas as pd
 import numpy as np
 import inspect
 
-from .ui.widgets import show_critical_message_box
-
-from piccel.core import LazyFunc, SheetNotFound, strip_indent, UserRole
+from piccel.core import (LazyFunc, SheetNotFound, strip_indent, UserRole,
+                         UnauthorizedRole)
 
 import logging
 logger = logging.getLogger('piccel')
@@ -13,7 +12,7 @@ plugin_source_header = \
 """
 import pandas as pd
 import numpy as np
-from piccel import UserRole
+from piccel import UserRole, UnauthorizedRole
 from piccel.sheet_plugin import SheetPlugin
 from piccel.plugin_tools import map_set, And, Or, form_new
 from piccel.plugin_tools import (LescaDashboard, InterviewTracker,
@@ -21,7 +20,6 @@ from piccel.plugin_tools import (LescaDashboard, InterviewTracker,
                                  DEFAULT_INTERVIEW_PLAN_SHEET_LABEL,
                                  PollTracker, EmailledPollTracker,
                                  ParticipantStatusTracker)
-from piccel.ui.widgets import show_critical_message_box, show_info_message_box
 
 from piccel.form import Form
 from piccel.logging import logger
@@ -215,6 +213,9 @@ class SheetPlugin:
         """
         pass
 
+    def form_new_entry(self, form):
+        return form
+
     def action(self, entry_df, selected_column):
         """
         Called after clicking on a cell.
@@ -242,11 +243,12 @@ class SheetPlugin:
 class UserSheetPlugin(SheetPlugin):
 
     def version(self):
-        return '1.2022.04.01.4'
+        return '1.2022.04.02.4'
 
     def active_view(self, df):
         latest = self.sheet.latest_update_df(df)
-        return latest[latest['Status'] == 'active']
+        latest = latest[latest['Status'] == 'active']
+        return latest.sort_values(by=['User_Name'])
 
     def access_level(self):
         return UserRole.MANAGER
@@ -258,21 +260,31 @@ class UserSheetPlugin(SheetPlugin):
         base_views.update({'active' : self.active_view})
         return base_views
 
-    def action(self, entry_df, selected_column):
-        form, label = super().action(entry_df, selected_column)
-        latest = self.sheet.latest_update_df()
-        if (UserRole[latest.loc[entry_df.index[0], 'Role']] >
-            self.sheet.user_role):
-            form.cancel()
-            show_critical_message_box('Cannot edit a user with a more '\
-                                      'permissive role than the current user')
-            return None, None
-
+    def form_new_entry(self, form):
+        logger.debug('Fixing choices Role choices...')
         for item in form.key_to_items['Role']:
             fixed_choices = {}
             for choice, choice_tr in item.choices.items():
                 if UserRole[choice] <= self.sheet.user_role:
                     fixed_choices[choice] = choice_tr
+            logger.debug('Fixed choices in item %s: %s', item.label,
+                         fixed_choices)
             item.set_choices(fixed_choices)
+        return form
 
+    def action(self, entry_df, selected_column):
+        form, label = super().action(entry_df, selected_column)
+        latest = self.sheet.latest_update_df()
+        edited_user = entry_df['User_Name'].iat[0]
+        idx = self.sheet.df_index_from_value({'User_Name' : edited_user},
+                                             view='latest')
+        edited_user_role = latest.loc[idx, 'Role'].iat[0]
+        logger.debug('Request edition of user %s (%s) by %s (%s)',
+                     edited_user, edited_user_role,
+                     self.sheet.user, self.sheet.user_role.name)
+
+        if (UserRole[edited_user_role] > self.sheet.user_role):
+            form.cancel()
+            raise UnauthorizedRole('Cannot edit a user with a more '\
+                                   'permissive role than the current user')
         return form, label

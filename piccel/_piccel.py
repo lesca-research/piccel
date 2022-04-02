@@ -1660,12 +1660,7 @@ class DataSheet:
                 logger.debug2('df_to_str: format column %s', col)
                 f = lambda v: (self.form_master.format(col,v) \
                                if not pd.isna(v) else '')
-                # TODO: remove try
-                try:
-                    df[[col]] = df[[col]].applymap(f)
-                except AttributeError:
-                    print('error unformating %s' % col)
-                    from IPython import embed; embed()
+                df[[col]] = df[[col]].applymap(f)
 
         df = df.reset_index()
         df['__entry_id__'] = df['__entry_id__'].apply(lambda x: hex(x))
@@ -1688,7 +1683,6 @@ class DataSheet:
         if not self.plugin.all_watched():
             logger.debug('Cannot retrieve view %s for sheet %s because of '\
                          'missing sheets to watch', view_label, self.label)
-            from IPython import embed; embed()
             return pd.DataFrame(['Missing watched sheets'], columns=['Error'])
 
         if view_label is None:
@@ -1766,8 +1760,6 @@ class DataSheet:
             df = df.drop(conflicting_ids)
         ids_of_duplicates = set()
         latest_df = self.latest_update_df(df)
-        #if 'Security_Word' in cols_to_check:
-        #    from IPython import embed; embed()
         for col in cols_to_check:
             if next((i.allow_None for i in self.form_master.key_to_items[col]),
                     False):
@@ -1875,7 +1867,8 @@ class DataSheet:
             logger.error('Sheet %s: Cannot create form (no write access)',
                          self.label)
             return None
-        return self._new_form('append', form_id=form_id)
+        form = self._new_form('append', form_id=form_id)
+        return self.plugin.form_new_entry(form)
 
     def form_set_entry(self, entry_idx, form_id=None):
         if not self.has_write_access:
@@ -2183,12 +2176,7 @@ class DataSheet:
                     df[col].fillna(pd.NaT)
                     df[col] = df[col].astype(master_dt_col)
                 else:
-                    # TODO: remove try
-                    try:
-                        df[col] = df[col].astype(master_dt_col)
-                    except (ValueError, TypeError):
-                        print('value error entry df')
-                        from IPython import embed; embed()
+                    df[col] = df[col].astype(master_dt_col)
                     df[col].fillna(pd.NA)
 
     def _append_df(self, entry_df):
@@ -2363,7 +2351,7 @@ class TestDataSheet(unittest.TestCase):
 
     def setUp(self):
         # logger.setLevel(logging.DEBUG)
-        logger.setLevel("DEBUG2")
+        logger.setLevel(logging.DEBUG)
         self.tmp_dir = tempfile.mkdtemp()
 
         self.form_def_ts_data = {
@@ -3836,7 +3824,7 @@ class TestPiccelLogic(unittest.TestCase):
 class WorkBookFileError(Exception): pass
 class SheetLabelAlreadyUsed(Exception): pass
 class SheetDataOverwriteError(Exception): pass
-class UnauthorizedRole(Exception): pass
+from .core import UnauthorizedRole
 class InconsistentRoles(Exception): pass
 class PasswordChangeError(Exception): pass
 class NoAccessPasswordError(Exception): pass
@@ -5507,6 +5495,30 @@ class TestWorkBook(unittest.TestCase):
                            {'Password_Reset' : True})[0].submit()
 
         self.assertRaises(PasswordReset, wb.user_login, 'me', 'pwd_me')
+
+    def test_edit_users_role_check(self):
+        fs = LocalFileSystem(self.tmp_dir)
+        wb = WorkBook.create('Participant_info', fs, access_password='12345',
+                             admin_password='12T64', admin_user='admin')
+        self.assertEqual(wb.get_users(), {'admin' : UserRole.ADMIN})
+
+        sh_users = wb['__users__']
+        sh_users.add_new_entry({'User_Name' : 'Bobbie',
+                                'Security_Word' : 'yata',
+                                'Role' : UserRole.MANAGER.name})
+        wb.set_user_password('Bobbie', 'pwd_staff')
+        wb.user_login('Bobbie', 'pwd_staff')
+
+        sh_users = wb['__users__']
+        users_df = sh_users.get_df_view()
+        idx = sh_users.df_index_from_value({'User_Name' : 'admin'},
+                                              view='latest')
+        self.assertRaises(UnauthorizedRole, sh_users.action,
+                          users_df.loc[idx], 'Eval_Staff')
+        logger.debug('--- get form to enter new user as Bobbie ---')
+        form = sh_users.form_new_entry()
+        self.assertEqual(set(form.key_to_items['Role'][0].choices.keys()),
+                         {'VIEWER', 'EDITOR', 'REVIEWER', 'MANAGER'})
 
     def test_edit_users(self):
         fs = LocalFileSystem(self.tmp_dir)
@@ -8681,7 +8693,16 @@ class SheetWidget(QtWidgets.QWidget, ui.data_sheet_ui.Ui_Form):
                 column = row_df.columns[idx.column()-(row_df.index.name is not None)]
             logger.debug('f_cell_action, idx.row=%d, idx.col=%d, column=%s',
                          idx.row(), idx.column(), column)
-            action_result, action_label = sheet.action(row_df, column)
+            try:
+                action_result, action_label = sheet.action(row_df, column)
+            except Exception as e:
+                error_message = ('Error calling action for sheet %s' %
+                                 sheet.label)
+                details = format_exc()
+                logger.error('%s\n%s', error_message, details)
+                show_critical_message_box(repr(e))
+                action_result = None
+
             if action_result is None:
                 return
 

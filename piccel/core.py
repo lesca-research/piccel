@@ -205,6 +205,8 @@ class Hints:
 
 class SheetNotFound(Exception): pass
 
+class UnauthorizedRole(Exception): pass
+
 class FormEditionBlockedByPendingLiveForm(Exception): pass
 class FormEditionLocked(Exception): pass
 class FormEditionNotOpen(Exception): pass
