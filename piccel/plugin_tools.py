@@ -175,9 +175,11 @@ class LescaDashboard(SheetPlugin):
         # Get drop-outs and non drop-outs
         df_selected = self.df.loc[pids, 'Study_Status']
         pids_drop = set(df_selected[df_selected == 'drop_out'].index)
-        pids_ongoing = set(pids).difference(pids_drop)
+        pids_over = set(df_selected[df_selected == 'study_over'].index)
+        pids_ongoing = set(pids).difference(pids_drop).difference(pids_over)
         logger.debug('LescaDashboard - pids ongoing: %s', pids_ongoing)
         logger.debug('LescaDashboard - pids drop: %s', pids_drop)
+        logger.debug('LescaDashboard - pids over: %s', pids_over)
         return pids_ongoing, pids_drop
 
     def action(self, entry_df, selected_column):
@@ -619,7 +621,8 @@ class ParticipantStatusTracker:
     def check(self):
         expected_fields = {
             'Participant_ID' : 'text',
-            'Study_Status' : Choice('text', ['inactive']),
+            'Study_Status' : Choice('text', ['inactive', 'drop_out',
+                                             'study_over']),
             'User' : 'user_name',
             'Timestamp_Submission' : 'datetime'
         }

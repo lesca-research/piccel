@@ -3843,7 +3843,7 @@ class check_role(object):
                                     (args[0].label, func.__name__))
             if args[0].user_role.value < self.role.value:
                 raise UnauthorizedRole('User %s has role %s but '\
-                                       '%s requires at least' % \
+                                       'must be at least %s' % \
                                        (args[0].user, args[0].user_role,
                                         self.role))
             else:
@@ -5725,6 +5725,7 @@ class TestWorkBook(unittest.TestCase):
                           choices={
                               'ongoing' : {'French' : 'Etude en cours'},
                               'drop_out' : {'French' : "Sorti.e de l'étude"},
+                              'study_over' : {'French' : "Etude terminée"},
                               'inactive' : {'French' : "Entrée inactive"},
                           },
                           init_values={'Study_Status' : 'ongoing'},
@@ -5854,6 +5855,7 @@ class TestWorkBook(unittest.TestCase):
                              Or((eval_df, 'Planned', [False]),
                                 (eval_df, 'Outcome', ['FAIL']))
                              })
+
             def action(self, entry_df, selected_column):
                 super().action(entry_df, selected_column)
 
@@ -5895,8 +5897,19 @@ class TestWorkBook(unittest.TestCase):
                          set(pp_df['Participant_ID']))
         self.assertTrue((dashboard_df['Eval'] == 'eval_todo').all())
 
+        logger.debug('utest: Add new participant CE90012 with study over')
+        form = sh_pp.form_new_entry()
+        form.set_values_from_entry({'Participant_ID' : 'CE90001',
+                                    'Secure_ID' : '543678',
+                                    'Study_Status' : 'study_over'})
+        form.submit()
+
+        dashboard_df = sh_dashboard.get_df_view()
+        pid = 'CE90001'
+        eval_CE90001 = dashboard_df.loc[pid, 'Eval']
+        self.assertEqual(eval_CE90001, '')
+
         logger.debug('utest: Add new participant CE90002')
-        # Add new pp
         form = sh_pp.form_new_entry()
         form.set_values_from_entry({'Participant_ID' : 'CE90002',
                                     'Secure_ID' : '5432524'})
@@ -5979,6 +5992,7 @@ class TestWorkBook(unittest.TestCase):
                           choices={
                               'ongoing' : {'French' : 'Etude en cours'},
                               'drop_out' : {'French' : "Sorti.e de l'étude"},
+                              'study_over' : {'French' : "Etude complétée"},
                               'inactive' : {'French' : "Entrée inactive"},
                           },
                           allow_empty=False),
@@ -6151,6 +6165,7 @@ class TestWorkBook(unittest.TestCase):
                           choices={
                               'ongoing' : {'French' : 'Etude en cours'},
                               'drop_out' : {'French' : "Sorti.e de l'étude"},
+                              'study_over' : {'French' : "Etude complétée"},
                               'inactive' : {'French' : "Entrée inactive"},
                           },
                           init_values={'Study_Status' : 'ongoing'},
@@ -6775,6 +6790,7 @@ class TestWorkBook(unittest.TestCase):
                           choices={
                               'ongoing' : {'French' : 'Etude en cours'},
                               'drop_out' : {'French' : "Sorti.e de l'étude"},
+                              'study_over' : {'French' : "Etude complétée"},
                               'inactive' : {'French' : "Entrée inactive"},
                           },
                           init_values={'Study_Status' : 'ongoing'},
@@ -7210,6 +7226,7 @@ class TestWorkBook(unittest.TestCase):
                           choices={
                               'ongoing' : {'French' : 'Etude en cours'},
                               'drop_out' : {'French' : "Sorti.e de l'étude"},
+                              'study_over' : {'French' : "Etude complétée"},
                               'inactive' : {'French' : "Entrée inactive"},
                           },
                           init_values={'Study_Status' : 'ongoing'},

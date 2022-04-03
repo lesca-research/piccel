@@ -1589,6 +1589,8 @@ class FormItem:
         self.choices = None
         self.set_choices(choices, other_choice_label)
 
+        if isinstance(unique, str):
+            unique = bool(unique)
         self.unique = unique
         self.unique_validator = None
 
@@ -1602,9 +1604,16 @@ class FormItem:
                 number_interval[side] = [-np.inf, np.inf][side=='right']
         self.number_interval = pd.Interval(**number_interval)
 
+        if isinstance(allow_empty, str):
+            allow_empty = bool(allow_empty)
         self.allow_None = allow_empty
 
+        if isinstance(freeze_on_update, str):
+            freeze_on_update = bool(freeze_on_update)
         self.freeze_on_update = freeze_on_update
+
+        if isinstance(editable, str):
+            editable = bool(editable)
         self.set_editable(editable)
 
         self.access_level = (access_level if isinstance(access_level, UserRole) \
@@ -1638,8 +1647,10 @@ class FormItem:
     def set_init_values(self, init_values):
         if init_values is not None:
             assert(isinstance(init_values, dict))
-            assert(all(k1==k2 for k1,k2 in zip(init_values.keys(),
-                                               self.keys.keys())))
+            for k1,k2 in zip(init_values.keys(), self.keys.keys()):
+                if k1 != k2:
+                    raise Exception('key init value %s != item key %s' %
+                                    (k1, k2))
         self.init_values = init_values
 
     def set_regexp(self, regexp_str, regexp_invalid_message=''):
