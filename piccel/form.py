@@ -810,7 +810,7 @@ function snakeCaseToCamelCase(s) {
     def format_entry_dict(self, entry_dict, html=False):
         tps = self.get_vtypes()
         def _format(k, v):
-            if v is None:
+            if pd.isna(v):
                 if html:
                     return '<font color="grey">NA</font>'
                 else:
@@ -970,6 +970,7 @@ class DateTimeCollector:
         self.callback = if_none(callback_date_str, lambda s: None)
 
     def set_date(self, qdate):
+        logger.debug('DateTimeCollector set_date %s', qdate)
         if qdate is not None and not qdate.isNull():
             self.date = qdate.toPyDate()
             self.check_completion()
@@ -1001,6 +1002,7 @@ class DateTimeCollector:
              self.hours is not None:
             dt = datetime.combine(self.date, time(self.hours, self.minutes))
             date_str = dt.strftime(FormItem.DATETIME_FORMAT)
+        logger.debug('DateTimeCollector callback with %s', date_str)
         self.callback(date_str)
 
 class TestDateTimeCollector(unittest.TestCase):
@@ -1759,6 +1761,7 @@ class FormItem:
         if self.editable or force:
             for key in self.keys:
                 if self.generator is not None and \
+                   self.generator != '' and \
                    not self.generator.endswith('submission'):
                     logger.debug2('%s: Use generator %s for key %s',
                                  self, self.generator, key)
@@ -2021,6 +2024,33 @@ class TestForm(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir)
+
+    def test_validate_form_version(self):
+        self.assertTrue(form_version_is_valid('0'))
+        self.assertTrue(form_version_is_valid('1'))
+        self.assertTrue(form_version_is_valid('0.2020.01.03.3'))
+        self.assertTrue(form_version_is_valid('0.2020.01.03'))
+        self.assertTrue(form_version_is_valid('0.2020.01.3'))
+        self.assertTrue(form_version_is_valid('0.2020.1.3'))
+        self.assertTrue(form_version_is_valid('1.2020.01.03'))
+
+        self.assertFalse(form_version_is_valid(None))
+        self.assertFalse(form_version_is_valid(''))
+        self.assertFalse(form_version_is_valid('-1'))
+        self.assertFalse(form_version_is_valid('X'))
+        self.assertFalse(form_version_is_valid('1.2020.01x03'))
+        self.assertFalse(form_version_is_valid('2020.01.03'))
+        self.assertFalse(form_version_is_valid('a.2020.01.03'))
+        self.assertFalse(form_version_is_valid('1.2020.01.03.'))
+        self.assertFalse(form_version_is_valid('1.2020.001.03'))
+        self.assertFalse(form_version_is_valid('1.2020.01.03.b'))
+        self.assertFalse(form_version_is_valid('1.2020.0.1'))
+        self.assertFalse(form_version_is_valid('1.2020.14.03'))
+        self.assertFalse(form_version_is_valid('1.2020.02.30'))
+        self.assertFalse(form_version_is_valid('1.2020.02.-1'))
+        self.assertFalse(form_version_is_valid('-1.2020.02.30'))
+        self.assertFalse(form_version_is_valid('1.2020.02.30!'))
+
 
     def test_nexts(self):
         ns = nexts(['a', 'b', 'c', 'd'])
@@ -3622,6 +3652,28 @@ def link_spin_box(spin_box, dest_dict, dest_key, read_only=False):
     else:
         spin_box.setEnabled(False)
 
+FORM_VERSION_RE = \
+    re.compile(r'^\d(?:[.](?P<date>\d{4}[.]\d{1,2}[.]\d{1,2})(?:[.]\d)?)?$')
+
+def form_version_is_valid(form_version_str):
+    if form_version_str is None:
+        return False
+
+    match = FORM_VERSION_RE.match(form_version_str)
+
+    if match is None:
+        return False
+
+    date_str = match.group('date')
+    if date_str is not None:
+        DATE_FORMAT = '%Y.%m.%d'
+        try:
+            datetime.strptime(date_str, DATE_FORMAT).date()
+        except ValueError:
+            return False
+
+    return True
+
 class FormPropertyEditor(QtWidgets.QWidget,
                          ui.form_edit_ui.Ui_FormPropertyEditor):
     def __init__(self, read_only=False, parent=None):
@@ -3634,6 +3686,9 @@ class FormPropertyEditor(QtWidgets.QWidget,
                                 (self.title_field_english, 'English')]:
             link_line_edit(field, form_node.pdict['title'], language,
                            read_only=self.read_only, callback=validation)
+
+        link_line_edit(self.versionLineEdit, form_node.pdict, 'version',
+                       read_only=self.read_only, callback=validation)
 
 class SectionPropertyEditor(QtWidgets.QWidget,
                             ui.section_edit_ui.Ui_SectionPropertyEditor):
@@ -5009,12 +5064,6 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
 
         if model_item.node_type == 'form':
 
-            if pgv is not None:
-                act_sec_graph = (right_click_menu
-                                 .addAction(self.import_icon,
-                                            self.tr('Transitions graph')))
-                (act_sec_graph.triggered
-                 .connect(on_act(self.show_sections_graph)))
 
             test_menu = right_click_menu.addMenu(self.tr('Test'))
             for role in UserRole:
@@ -5031,6 +5080,13 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
         #     act_test = right_click_menu.addAction(self.tr('Import item(s)'))
         #     act_test.triggered.connect(partial(self.ask_import_items,
         #                                        model_index))
+
+            if pgv is not None:
+                act_sec_graph = (right_click_menu
+                                 .addAction(self.import_icon,
+                                            self.tr('Transitions graph')))
+                (act_sec_graph.triggered
+                 .connect(on_act(self.show_sections_graph)))
 
         if model_item.node_type != 'add_button':
             act_validate = right_click_menu.addAction(self.tr('Validate'))
@@ -5191,7 +5247,14 @@ class Node(object):
         new_state = self.state
         self.error_hint = ''
 
-        if self.node_type == 'choice':
+        if self.node_type == 'form':
+            logger.debug('form pdict version: %s', self.pdict['version'])
+            if self.pdict['version'] is None or self.pdict['version'] == '':
+                self.error_hint += 'Empty version'
+            elif not form_version_is_valid(self.pdict['version']):
+                self.error_hint += 'Invalid version format'
+
+        elif self.node_type == 'choice':
             vtype = self.parent().parent().pdict['vtype']
             unformat = FormItem.VTYPES[vtype]['unformat']
             invalid_msg = FormItem.VTYPES[vtype]['message invalid format']
@@ -5214,13 +5277,20 @@ class Node(object):
                 unformat = FormItem.VTYPES[vtype]['unformat']
                 invalid_msg = ('Init value error: %s' %
                                FormItem.VTYPES[vtype]['message invalid format'])
-                logger.debug('Check %s (%s), vtype=%s', self.label, self.node_type,
-                             vtype)
+                logger.debug('Check %s (%s), vtype=%s', self.label,
+                             self.node_type, vtype)
+                choices = None
+                for child in self.childItems:
+                    if child.node_type == 'choices':
+                        choices = [c.label for c in child.childItems
+                                   if c.node_type == 'choice']
+                if choices is not None and init_value not in choices:
+                    self.error_hint += 'Init value not in choices'
 
                 try:
                     unformat(init_value)
                 except ValueError:
-                    self.error_hint += invalid_msg
+                    self.error_hint += 'Invalid init value: %s' % invalid_msg
                 except Exception as e:
                     self.error_hint += repr(e)
 
@@ -5281,9 +5351,11 @@ class Node(object):
     def to_dict(self, selected_only=False):
         pdict_copy = self.pdict.copy()
         if self.node_type == 'form':
+            version = pdict_copy.pop('version', '0')
             return {
                 **pdict_copy,
                 **{'label' : self.label,
+                   'version' : version,
                    'sections':{s.label:s.to_dict() for s in self.childItems
                                if (s.node_type == self.child_type and \
                                    (not selected_only or s.state=='sel_checked'))}

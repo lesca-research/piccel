@@ -187,6 +187,8 @@ class LescaDashboard(SheetPlugin):
         participant_id = entry_df.index[0]
         logger.debug('action_lesca for %s, col %s' % \
                      (participant_id, selected_column))
+        logger.debug('self.status_tracker.tracked_columns(): %s',
+                     self.status_tracker.tracked_columns())
         if selected_column.startswith('PNotes'):
             if selected_column.endswith('Common'):
                 pn_sheet_label = 'Progress_Notes_Common' # project PN
@@ -197,17 +199,21 @@ class LescaDashboard(SheetPlugin):
                                                         participant_id})
         elif selected_column == 'Participant_ID':
             result_label = 'Progress Notes %s' % participant_id
-            result = self.collect_progress_notes(participant_id,
-                                                 self.progress_note_extractions())
-        elif selected_column == 'Study_Status':
+            try:
+                extractions = self.progress_note_extractions()
+                result = self.collect_progress_notes(participant_id,
+                                                     extractions)
+            except ColumnsNotFound as e:
+                raise ProgressNoteError('Cannot find columns in sheet %s: %s'
+                                        % (e.args[0], e.args[1]))
+
+        elif selected_column in self.status_tracker.tracked_columns():
             if self.workbook.user_role < UserRole.MANAGER:
                 raise UnauthorizedRole('Only a MANAGER user can change '\
-                                       'the study status')
+                                       '%s' % selected_column)
             else:
-                pkeys = {'Participant_ID' : participant_id}
-                result, result_label = form_update_or_new('Participants_Status',
-                                                          self.workbook,
-                                                          primary_keys=pkeys)
+                result, result_label = \
+                    self.status_tracker.action(entry_df, selected_column)
 
         if result is not None and isinstance(result, Form):
             form = result
@@ -219,35 +225,57 @@ class LescaDashboard(SheetPlugin):
 
     def progress_note_extractions(self):
         # TODO: handle language translations in Report?
-        return [
+        extractions =  [
             {'sheet_label' : 'Progress_Notes_Common',
              'context' : 'Général',
              'short_values' : ['Note_Type', 'Event_Date'],
-             'long_texts' : {'Détails' : "Description"},
+             'long_texts' : {"Description" : 'Détails'},
             },
             {'sheet_label' : 'Progress_Notes',
              'context' : 'Général',
              'short_values' : ['Note_Type', 'Event_Date'],
-             'long_texts' : {'Détails' : "Description"},
+             'long_texts' : {"Description" : 'Détails'},
             },
         ]
 
+        if self.workbook.has_sheet('Pre_Screening'):
+            extractions.append({
+                'sheet_label' : 'Pre_Screening',
+                'context' : 'Pré-screening',
+                'short_values' : ('Preferred_Language', 'Is_Interested',
+                                  'COVID19_Vaccine', 'FIC_transmission'),
+                'long_texts' : {"Comments_Other_Research" :
+                                'Autre(s) projet(s) de recherche',
+                                'Comments_Screening' : 'Commentaires'},
+            })
+
+        if self.workbook.has_sheet('Preliminary'):
+            extractions.append({
+                'sheet_label' : 'Preliminary',
+                'context' : 'Préliminaire',
+                'short_values' : ['Study_Consent', 'Tech_Tuto_Necessary',
+                                  'Preferred_Schedule'],
+                'long_texts' : {'Comments_Preliminary' : 'Commentaires'},
+            })
+
+        return extractions
+
     def collect_progress_notes(self, pid, extractions):
         """
-        extractions is a list of dict, each defining how to extract a progress note
-        entry
+        extractions is a list of dict, each defining how to extract
+        a progress note entry
         """
-        pnotes = ParticipantProgressNotes(pid, datetime.now().strftime(DATETIME_FMT))
+        pnotes = (ParticipantProgressNotes(pid, datetime.now()
+                                           .strftime(DATETIME_FMT)))
         for extraction in extractions:
             sheet_label = extraction['sheet_label']
             if not self.workbook.has_sheet(sheet_label):
                 continue
 
             sheet_df = self.workbook[sheet_label].latest_update_df()
-            selected_df = sheet_df[sheet_df.Participant_ID==pid]
+            selected_df = sheet_df[sheet_df.Participant_ID==pid].copy()
             if selected_df.shape[0] == 0:
                 continue
-
 
                 # if not (pd.isna(text) or text == NA_STRING):
                 #     long_texts.append((title, text))
@@ -257,14 +285,23 @@ class LescaDashboard(SheetPlugin):
                     return default
                 return v
 
+            df_columns = set(selected_df.columns)
             short_values = extraction.get('short_values',[])
-            missing = set(short_values).difference(selected_df.columns)
-            if len(missing) > 0:
-                raise ColumnsNotFound(missing)
+            missing_short = set(short_values).difference(df_columns)
+            short_values = [c for c in short_values if c not in missing_short]
+            for missing_column in missing_short:
+                selected_df[missing_column] = \
+                    '<font color=red> Variable manquante </font>'
             for _, row in selected_df.iterrows():
                 long_texts = []
-                for title, column in extraction.get('long_texts', {}).items():
-                    long_texts.append((title, if_na(row[column], 'Non renseigné')))
+                for column, title in extraction.get('long_texts', {}).items():
+                    if column in df_columns:
+                        long_texts.append((title,
+                                           if_na(row[column], 'Non renseigné')))
+                    else:
+                        text = ('<font color=red> Variable %s manquante </font>' %
+                                column)
+                        long_texts.append((title, text))
                 pnotes.add(ProgressNoteEntry(row.Timestamp_Submission,
                                              row.get('User', 'na'),
                                              extraction['context'],
@@ -324,7 +361,9 @@ class ParticipantProgressNotes:
 
         footer_text = 'Report generated on %s' % self.update_date
 
-        return Report(pgs_soup.prettify(), header_text, footer_text)
+        html_body = pgs_soup.prettify()
+        logger.debug2(html_body)
+        return Report(html_body, header_text, footer_text)
 
 class ProgressNoteEntry:
 
@@ -373,8 +412,12 @@ class ProgressNoteEntry:
                 val = val.strftime(DATETIME_FMT)
             elif isinstance(val, date):
                 val = val.strftime(DATE_FMT)
-
-            td.string = '%s' % val
+            elif pd.isna(val):
+                val = '<i> NA </i>'
+            logger.debug2("value to append: %s", val)
+            sub_soup = BeautifulSoup("%s" % val, "html.parser")
+            logger.debug2("html version of value: %s", sub_soup)
+            td.append(sub_soup)
             tr.append(td)
 
         soup = BeautifulSoup()
@@ -399,7 +442,8 @@ class ProgressNoteEntry:
             soup.body.append(htag)
 
             ptag = main_soup.new_tag('p')
-            ptag.string = text
+            sub_soup = BeautifulSoup("%s" % text, "html.parser")
+            ptag.append(sub_soup)
             soup.body.append(ptag)
 
         soup.append(main_soup.new_tag('hr'))
@@ -605,12 +649,22 @@ def dashboard_error_if_none(df, dashboard_df, column, error):
 
 class ParticipantStatusTracker:
     def __init__(self, participant_sheet_label, progress_notes_sheet_label,
-                 workbook, dashboard_column_status='Study_Status'):
+                 workbook, dashboard_column_status='Study_Status',
+                 eligibility_sheet_label='Eligibility'):
         self.participant_sheet_label = participant_sheet_label
         self.progress_notes_sheet_label = progress_notes_sheet_label
-        self.eligibility_sheet_label = 'Eligibility'
         self.workbook = workbook
         self.dashboard_column_status = dashboard_column_status
+
+        self.eligibility_tracker = None
+        if  self.workbook.has_sheet(eligibility_sheet_label):
+            self.eligibility_tracker = \
+                PollTracker(eligibility_sheet_label,
+                            self.workbook,
+                            poll_answer_column='Included',
+                            poll_answer_expected_vtype='boolean',
+                            answer_translations={True:'included',
+                                                 False:'excluded'})
 
         errors = self.check()
         if len(errors) > 0:
@@ -638,23 +692,28 @@ class ParticipantStatusTracker:
         errors.extend(check_sheet(self.workbook, self.progress_notes_sheet_label,
                                   expected_fields=expected_fields))
 
-        if (self.eligibility_sheet_label is not None and
-            self.workbook.has_sheet(self.eligibility_sheet_label)):
-            expected_fields = {
-                'Participant_ID' : 'text',
-                'Included' : 'boolean',
-                'User' : 'user_name',
-                'Timestamp_Submission' : 'datetime'
-            }
-            errors.extend(check_sheet(self.workbook, self.eligibility_sheet_label,
-                                      expected_fields=expected_fields))
-
         return errors
+
+    def tracked_columns(self):
+        if self.eligibility_tracker is not None:
+            return (self.dashboard_column_status,
+                    self.eligibility_tracker.dashboard_column)
+        else:
+            return (self.dashboard_column_status,)
 
     def action(self, entry_df, selected_column):
         participant_id = entry_df.index[0]
-        return form_update_or_new(self.participant_sheet_label, self.workbook,
-                                  {'Participant_ID' : participant_id})
+        logger.debug('ParticipantStatusTracker.action on %s for %s',
+                     selected_column, participant_id)
+        if selected_column == self.dashboard_column_status:
+            return form_update_or_new(self.participant_sheet_label,
+                                      self.workbook,
+                                      {'Participant_ID' : participant_id})
+        elif (self.eligibility_tracker is not None and
+              selected_column == self.eligibility_tracker.dashboard_column):
+            return self.eligibility_tracker.action(entry_df, selected_column)
+
+        return None, None
 
     def track(self, dashboard_df, pids):
         """
@@ -663,11 +722,12 @@ class ParticipantStatusTracker:
         If eligibility indicates not included -> excluded
         Else: Display current participant status in participant_status_sheet
         """
-        # dashboard_df.loc[:, self.dashboard_column_status] = 'error'
+        if self.eligibility_tracker is not None:
+            self.eligibility_tracker.track(dashboard_df, pids)
 
         pnotes_df = latest_sheet_data(self.workbook,
                                       self.progress_notes_sheet_label,
-                                      filter_dict={'Participant_ID' : list(pids)})
+                                      filter_dict={'Participant_ID':list(pids)})
 
         # Keep only drop-related progress notes:
         mask_drop = pnotes_df.Note_Type.isin(['withdrawal', 'exclusion'])
@@ -697,16 +757,16 @@ class ParticipantStatusTracker:
 
         new_dropped = pns_drop_fresher.index
 
-        if (self.eligibility_sheet_label is not None
-            and self.workbook.has_sheet(self.eligibility_sheet_label)):
+        if self.eligibility_tracker is not None:
+            eligibility_sheet_label = self.eligibility_tracker.poll_sheet_label
             eligibility_df = latest_sheet_data(self.workbook,
-                                               self.eligibility_sheet_label,
+                                               eligibility_sheet_label,
                                                view='latest',
                                                index_column='Participant_ID',
                                                indexes=pids)
             if dashboard_error_if_none(status_df, dashboard_df,
                                        self.dashboard_column_status,
-                                       'error %s' % self.eligibility_sheet_label):
+                                       'error %s' % eligibility_sheet_label):
                 return
 
             eligibility_fresher, status_fresher = \
@@ -722,22 +782,23 @@ class ParticipantStatusTracker:
 class PollTracker:
     def __init__(self, poll_sheet_label, workbook, default_status=None,
                  dashboard_column=None, poll_answer_column=None,
-                 answered_tag=None):
+                 poll_answer_expected_vtype='text', answered_tag=None,
+                 answer_translations=None):
         self.poll_sheet_label = poll_sheet_label
         self.workbook = workbook
         self.dashboard_column = if_none(dashboard_column, poll_sheet_label)
         self.poll_answer_column = poll_answer_column
+        self.poll_answer_vtype = poll_answer_expected_vtype
         self.answered_tag = if_none(answered_tag, "%s_done" % poll_sheet_label)
         self.default_status = if_none(default_status,
                                       '%s_todo' % poll_sheet_label.lower())
+        self.answer_translations = if_none(answer_translations, {})
 
     def check(self):
-        # TODO insure that poll_answer_column is in fields
-        #      (field can have any type)
         logger.debug('PollTracker for %s: check sheets', self.poll_sheet_label)
         expected_fields = {'Participant_ID' : 'text'}
         if self.poll_answer_column is not None:
-            expected_fields[self.poll_answer_column] = None
+            expected_fields[self.poll_answer_column] = self.poll_answer_vtype
 
         return check_sheet(self.workbook, self.poll_sheet_label,
                            expected_fields=expected_fields)
@@ -764,6 +825,13 @@ class PollTracker:
             else:
                 dashboard_df.loc[poll_df.index, self.dashboard_column] = \
                     self.answered_tag
+
+        if len(poll_df.index) > 0 and self.answer_translations is not None:
+            logger.debug('Apply answer translation for tracking of poll %s',
+                         self.poll_sheet_label)
+            sel = (dashboard_df.loc[poll_df.index, self.dashboard_column]
+                   .replace(self.answer_translations))
+            dashboard_df.update(sel)
 
     def action(self, entry_df, poll_column):
         poll_status = entry_df[poll_column].iat[0]
@@ -1427,12 +1495,14 @@ class InterviewTracker:
                                       else pd.NA)
                     return plan_df['Callback_Days'].apply(f_ts)
 
+                # TODO: overdue when send mail is False
                 map_set(dashboard_df, column_status,
                         conditions={'%s_scheduled' % interview_tag:
                          And((plan_df_fresher, 'Plan_Action', ['plan']),
                              (plan_df_fresher, 'Send_Email', [False]),
                              (plan_df_fresher, 'Date_Is_Set', [True]),
-                             (plan_df_fresher, 'Interview_Date', IsNotNA())),
+                             (plan_df_fresher, 'Interview_Date',
+                              GreaterEqual(date_now))),
                          '%s_callback_tbd' % interview_tag:
                          And((plan_df_fresher, 'Plan_Action', ['plan']),
                              (plan_df_fresher, 'Date_Is_Set', [False]),
@@ -1443,7 +1513,8 @@ class InterviewTracker:
                          And((plan_df_fresher, 'Plan_Action', ['plan']),
                              (plan_df_fresher, 'Date_Is_Set', [False]),
                              (plan_df_fresher, 'Callback_Days', IsNotNA()),
-                             (plan_df_fresher, 'Timestamp_Submission', Lower(cb_ts))),
+                             (plan_df_fresher, 'Timestamp_Submission',
+                              Lower(cb_ts))),
                          '%s_email_pending' % interview_tag:
                          And((plan_df_fresher, 'Plan_Action', ['plan']),
                              (plan_df_fresher, 'Interview_Date', IsNotNA()),
@@ -1491,12 +1562,15 @@ class InterviewTracker:
                            + pd.to_timedelta(plan_df_for_cb_tbd['Callback_Days'],
                                              unit='d') \
                            - date_now).dt.days
+                _fdays = lambda d : '%s_callback_%dD' % (interview_tag,d)
                 dashboard_df.loc[pids_callback_tbd, column_status] = \
-                    cb_days.apply(lambda d : '%s_callback_%dD' % (interview_tag,d))
+                    cb_days.apply(_fdays)
 
-            mask_interview_tbd = (dashboard_df
-                                  .loc[plan_df_fresher.index, column_status] \
-                                  == '%s_tbd' % interview_tag)
+            sel_plan_fresher = dashboard_df.loc[plan_df_fresher.index,
+                                                column_status]
+            tbd_tags = ('%s_tbd' % interview_tag,
+                        '%s_scheduled' % interview_tag)
+            mask_interview_tbd = sel_plan_fresher.isin(tbd_tags)
             pids_interview_tbd = mask_interview_tbd[mask_interview_tbd].index
             if len(pids_interview_tbd) > 0:
                 plan_df_for_tbd = plan_df_fresher.loc[pids_interview_tbd]
@@ -1542,9 +1616,6 @@ class InterviewTracker:
         if 0:
             print('dashboard_df after map_set from interview_df')
             print(dashboard_df)
-
-        if 0 and len(pids_drop) > 0:
-            from IPython import embed; embed()
 
         # Process status of drops
         status = dashboard_df.loc[pids_drop, column_status]

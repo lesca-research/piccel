@@ -499,7 +499,8 @@ class LocalFileSystem:
             for bfn in files:
                 rdir = op.relpath(wroot, self.root_folder)
                 fn = op.normpath(op.join(rdir, bfn))
-                self.current_stats.pop(fn, None)
+                if self.track_changes:
+                    self.current_stats.pop(fn)
 
         logger.debug2('Remove folder %s', full_folder)
         shutil.rmtree(full_folder)
@@ -530,7 +531,8 @@ class LocalFileSystem:
     def remove(self, fn):
         logger.debug2('Remove file %s', fn)
         os.remove(op.join(self.root_folder, fn))
-        self.current_stats.pop(fn)
+        if self.track_changes:
+            self.current_stats.pop(fn)
 
     def save(self, fn, content_str='', overwrite=False, crypt=True):
         fn = op.normpath(fn)
@@ -546,7 +548,8 @@ class LocalFileSystem:
         with open(afn, 'w') as fout:
             fout.write(content_str)
 
-        self.current_stats[fn] = self.file_size(fn)
+        if self.track_changes:
+            self.current_stats[fn] = self.file_size(fn)
 
     def load(self, fn, crypted_content=True):
         afn = op.join(self.root_folder, fn)
@@ -4001,6 +4004,9 @@ class JobBase:
     def __init__(self, workbook):
         self.workbook = workbook
 
+    def version(self):
+        return '0'
+
     def who_can_run(self):
         return None
 
@@ -6772,10 +6778,13 @@ class TestWorkBook(unittest.TestCase):
 
         # Create data sheet participant info (no form)
         sheet_id = 'Participants_Status'
-        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002', 'CE0003'],
-                              'Study_Status' : ['ongoing', 'ongoing', 'ongoing'],
+        pp_df = pd.DataFrame({'Participant_ID' : ['CE0001', 'CE0002',
+                                                  'CE0003', 'CE0004'],
+                              'Study_Status' : ['ongoing', 'ongoing',
+                                                'ongoing', 'ongoing'],
                               'Timestamp_Submission' :
                               [datetime(2021,9,9,10,10),
+                               datetime(2021,9,9,10,10),
                                datetime(2021,9,9,10,10),
                                datetime(2021,9,9,10,10)]})
         items = [FormItem({'Participant_ID' :
@@ -6989,6 +6998,34 @@ class TestWorkBook(unittest.TestCase):
                     title={'French':'Common progress note'})
         sh_pnote = DataSheet('Progress_Notes', form, user=user)
 
+        # Create eligibility sheet
+        sheet_id = 'Eligibility'
+        items = [FormItem({'Participant_ID' :
+                           {'French':'Code Participant'}},
+                          unique=True,
+                          default_language='French',
+                          freeze_on_update=True,
+                          supported_languages={'French'}),
+                 FormItem(keys={'Included' : None},
+                          vtype='boolean', supported_languages={'French'},
+                          default_language='French',
+                          allow_empty=False),
+                 FormItem({'User' : None},
+                          vtype='user_name',
+                          default_language='French',
+                          supported_languages={'French'},
+                          allow_empty=False),
+                 FormItem(keys={'Timestamp_Submission':None},
+                          vtype='datetime',
+                          supported_languages={'French'},
+                          default_language='French')]
+        sections = {'section1' : FormSection(items, default_language='French',
+                                             supported_languages={'French'})}
+        form = Form(sections, default_language='French',
+                    supported_languages={'French'},
+                    title={'French':'Eligibility'})
+        sh_eligibility = DataSheet(sheet_id, form, user=user)
+
         # Create dashboard sheet that gets list of participants from p_info
         # and compute evaluation status.
         class DashboardInterview(LescaDashboard):
@@ -7015,7 +7052,9 @@ class TestWorkBook(unittest.TestCase):
                                         pids_drop=pids_drop)
 
             def action(self, entry_df, selected_column):
+                logger.debug('Call LescaDashboard.action...')
                 result, result_label = super().action(entry_df, selected_column)
+                logger.debug('LescaDashboard.action returned:', result)
                 if result is None:
                     result, result_label = \
                         self.eval_tracker.action(entry_df, selected_column)
@@ -7028,6 +7067,7 @@ class TestWorkBook(unittest.TestCase):
         wb.add_sheet(sh_pnote)
         wb.add_sheet(sh_plan)
         wb.add_sheet(sh_eval)
+        wb.add_sheet(sh_eligibility)
         wb.add_sheet(sh_pp)
 
         logger.debug('---- Create user Bobbie ----')
@@ -7038,6 +7078,34 @@ class TestWorkBook(unittest.TestCase):
 
         logger.debug('---- Login as Bobbie ----')
         wb.user_login('Bobbie', 'pwd_staff')
+
+        pid = 'CE0004'
+        logger.debug('---- Pid %s: Plan interview date, with sent email ----',
+                     pid)
+        idate = datetime(2021,11,10,10,10)
+        ts = datetime(2021,11,10,11,19)
+        dashboard_df = wb['Dashboard'].get_df_view()
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
+        form.set_values_from_entry({'Plan_Action' : 'plan',
+                                    'Interview_Date' : idate,
+                                    'Staff' : 'dunno',
+                                    'Availability' : 'ignored',
+                                    'Date_Is_Set' : True,
+                                    'Send_Email' : True,
+                                    'Email_Status' : 'to_send',
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+        logger.debug('---- Pid %s: Fill eligibility: exclude ----', pid)
+        ts = datetime(2021,11,10,11,20)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eligibility')
+        form.set_values_from_entry({'Included' : False,
+                                    'Timestamp_Submission' : ts})
+        form.submit()
+        dashboard_df = wb['Dashboard'].get_df_view()
+        self.assertEqual(dashboard_df.loc[pid, 'Eligibility'], 'excluded')
+        self.assertEqual(dashboard_df.loc[pid, 'Study_Status'], 'confirm_drop')
 
         pid = 'CE0003'
         logger.debug('---- Pid %s: Drop without interview or prior planning ----',
@@ -7704,17 +7772,17 @@ class DataSheetModel(QtCore.QAbstractTableModel):
             if not self.sort_ascending:
                 self.sort_idx = self.sort_idx[::-1]
 
-        logger.debug('Refreshed view %s of sheet %s in Qt model for UI',
-                     view_label, self.sheet.label)
-        logger.debug('View_df shape: %s, view_array shape: (%d, %d)',
-                     self.view_df.shape,
-                     len(self.view[0]) if len(self.view) > 0 else 0,
-                     len(self.view),)
-        logger.debug('validify_df shape: %s, valididy_array shape: (%d, %d)',
-                     view_validity_df.shape,
-                     (len(self.view_validity[0])
-                      if len(self.view_validity) > 0 else 0),
-                     len(self.view_validity))
+            logger.debug('Refreshed view %s of sheet %s in Qt model for UI',
+                         view_label, self.sheet.label)
+            logger.debug('View_df shape: %s, view_array shape: (%d, %d)',
+                         self.view_df.shape,
+                         len(self.view[0]) if len(self.view) > 0 else 0,
+                         len(self.view),)
+            logger.debug('validify_df shape: %s, valididy_array shape: (%d, %d)',
+                         view_validity_df.shape,
+                         (len(self.view_validity[0])
+                          if len(self.view_validity) > 0 else 0),
+                         len(self.view_validity))
         self.endResetModel()
         self.layoutChanged.emit()
 
@@ -9092,6 +9160,7 @@ class PiccelApp(QtWidgets.QApplication):
             logger.debug('Available cfg fn: %s', cfg_fns)
             recent_files = cfg_fns
 
+        recent_files = sorted(set(recent_files))
         self.selector_screen = SelectorWindow(recent_files, self.open_file,
                                               self.on_create)
         # self.selector_screen = QtWidgets.QWidget()
@@ -9458,7 +9527,13 @@ class PiccelApp(QtWidgets.QApplication):
                     with open(plugin_fn, 'r') as fin:
                         plugin_str = fin.read()
                 sheet = DataSheet(sheet_label, form, plugin_code_str=plugin_str)
-                error = self.add_sheet(sheet)
+                try:
+                    error = self.add_sheet(sheet)
+                except UnauthorizedRole as e:
+                    logger.error(e.args[0])
+                    show_critical_message_box(e.args[0])
+                    return
+
                 if error is not None:
                     errors.append(error)
 
@@ -9495,7 +9570,6 @@ class PiccelApp(QtWidgets.QApplication):
                                            self.logic.workbook.user_role)
         except SheetDataOverwriteError:
             error = 'Sheet data folder already exists for %s' % sheet.label
-
         return error
 
 
