@@ -4325,6 +4325,10 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
         self.setupUi(self)
         self.origin_sheet_label = origin_sheet_label
 
+        self.current_role = (user_role
+                             if user_role != UserRole.ADMIN
+                             else UserRole.MANAGER)
+
         close_callback = if_none(close_callback, lambda w: w.close())
 
         # Enable form buttons based on form notifications
@@ -4350,6 +4354,7 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
         self.item_labels = []
         def make_section_widget(section_label, section):
             section_widget = QtWidgets.QWidget(self)
+            section_widget.item_by_access_level = defaultdict(list)
             section_widget.setObjectName("section_widget_" + section_label + \
                                          section.tr.language)
             _section_ui = ui.section_ui.Ui_Form()
@@ -4364,8 +4369,21 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
                 if user_role >= item.access_level:
                     item_widget = make_item_widget(section_widget, item)
                     _section_ui.verticalLayout.addWidget(item_widget)
+                    (section_widget.item_by_access_level[item.access_level]
+                     .append(item_widget))
             return section_widget
 
+        def filter_items_by_role():
+            logger.debug('set_section_ui, filter items with '\
+                         'access level lower than %s', self.current_role)
+            for role, item_widgets in (self.current_section_widget
+                                      .item_by_access_level.items()):
+                if role <= self.current_role:
+                    [item_widget.show() for item_widget in item_widgets]  
+                else:
+                    [item_widget.hide() for item_widget in item_widgets]  
+            
+        self.current_section_widget = None
         def set_section_ui(section_label, section):
             #if self.current_section_widget is not None:
             #    self.current_section_widget.hide()
@@ -4379,12 +4397,15 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
                                                              QtCore.Qt.AlignTop)
             else:
                 section_widget = section_widgets[section_label]
+
             logger.debug('set_section_ui, show widget of %s, ',
                          section_label)
             section_widget.show()
+            self.current_section_widget = section_widget
             # End of def set_section_ui
 
         set_section_ui(form.current_section_name, form.current_section)
+        filter_items_by_role()
         self.form_title.setText(form.tr['title'])
 
         refresh_title = refresh_text(form, 'title', self.form_title,
@@ -4418,11 +4439,38 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
                 radio_language_group.button(idx).setChecked(True)
 
         # Set button actions
+        def show_role_menu():
+            role_action_group = QtWidgets.QActionGroup(self)
+            def on_role_triggered(role, state):
+                if state:
+                    self.current_role = role
+                    filter_items_by_role()
+            role_menu = QtWidgets.QMenu(self.button_select_role)
+            first = True
+            for role in reversed(UserRole):
+                if role <= user_role:
+                    role_action = role_menu.addAction(role.name)
+                    role_action.setActionGroup(role_action_group)
+                    if first:
+                        action_1 = role_action
+                        first = False
+                    role_action.setCheckable(True)
+                    role_action.triggered.connect(partial(on_role_triggered,
+                                                          role))
+                    if self.current_role == role:
+                        role_action.setChecked(True)
+                    
+            logger.debug('Show role menu (current: %s, main: %s)',
+                         self.current_role, user_role)
+            role_menu.exec_(QtGui.QCursor.pos(), action_1)
+
+        self.button_select_role.clicked.connect(show_role_menu)
+        
         def prev_sec():
             # gen_section = lambda : set_section_ui(form.previous_section(),
             #                                       form.to_previous_section())
             # self.section_widget = \
-            #     dict_lazy_setdefault(sections, form.previous_section(),
+                #     dict_lazy_setdefault(sections, form.previous_section(),
             #                          gen_section)
             logger.debug('Prev_sec, hide widget of %s, ',
                          form.current_section_name)
@@ -4437,14 +4485,14 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
                 show_critical_message_box(msg, detailed_text=details)
 
             self.scroll_section.ensureVisible(0, 0)
-        self.button_previous.clicked.connect(prev_sec)
+            self.button_previous.clicked.connect(prev_sec)
 
         def next_sec():
             # def gen_section():
             #     gen_section = lambda : set_section_ui(form.next_section(),
             #                                       form.to_next_section())
             # self.section_widget = \
-            #     dict_lazy_setdefault(sections, form.next_section(),
+                #     dict_lazy_setdefault(sections, form.next_section(),
             #                          gen_section)
             logger.debug('Next_sec, hide widget of %s',
                          form.current_section_name)
@@ -4498,7 +4546,7 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
                 details = format_exc()
                 logger.error('%s\n%s', msg, details)
                 show_critical_message_box(msg, detailed_text=details)
-            close_callback(self)
+                close_callback(self)
 
         self.button_submit.clicked.connect(submit)
 
@@ -4618,7 +4666,7 @@ class FormFileEditor(QtWidgets.QWidget, ui.form_editor_file_ui.Ui_Form):
                 self._end_tmp_form_session()
                 self.current_form_fn = form_fn
                 self._start_tmp_form_session()
-            self.pending_changes_tracker.set_pending_change_state(False)
+                self.pending_changes_tracker.set_pending_change_state(False)
             return True
         else:
             return False
@@ -5036,7 +5084,7 @@ class FormEditor(QtWidgets.QWidget, ui.form_editor_widget_ui.Ui_FormEditor):
 
         if model_item.node_type == 'item_single_var':
             action = right_click_menu.addAction(self.multi_variable_icon,
-                                                self.tr("To group of variables"))
+                                                self.tr("To group of variables")) 
             f = partial(self.model.convert_item_to_multi_var, model_index)
             action.triggered.connect(on_act(f))
 

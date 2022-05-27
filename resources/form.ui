@@ -87,15 +87,15 @@
        </widget>
       </item>
       <item>
-       <widget class="QPushButton" name="pushButton">
+       <widget class="QPushButton" name="button_select_role">
         <property name="maximumSize">
          <size>
-          <width>20</width>
+          <width>40</width>
           <height>16777215</height>
          </size>
         </property>
         <property name="text">
-         <string>v</string>
+         <string>R</string>
         </property>
         <property name="flat">
          <bool>true</bool>
