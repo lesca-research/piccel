@@ -4546,6 +4546,7 @@ class FormWidget(QtWidgets.QWidget, ui.form_ui.Ui_Form):
                 details = format_exc()
                 logger.error('%s\n%s', msg, details)
                 show_critical_message_box(msg, detailed_text=details)
+            else:
                 close_callback(self)
 
         self.button_submit.clicked.connect(submit)

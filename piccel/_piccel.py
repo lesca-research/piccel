@@ -1959,7 +1959,7 @@ class DataSheet:
                 # Happens when live form is reloaded
                 pass
 
-        logger.debug2('Sheet %s: call form.set_on_submission', self.label)
+        logger.debug('Sheet %s: call form.set_on_submission', self.label)
         form.set_on_submission(LazyFunc(self.on_submitted_entry, form_id=form_id))
         form.set_on_cancel(LazyFunc(self.clean_live_form, form_id=form_id))
 
