@@ -1541,7 +1541,7 @@ class DataSheet:
         input_pdf = PyPDF2.PdfFileReader(fpdf)
 
         for i in range(0, input_pdf.getNumPages()):
-            output.addPage(input_pdf.getPage(i))
+            output.add_page(input_pdf.pages[i])
 
         with open(output_pdf_fn, 'wb') as fout:
             if password is not None:
@@ -1683,7 +1683,9 @@ class DataSheet:
     @if_plugin_valid
     def get_df_view(self, view_label=None):
 
-        if not self.plugin.all_watched():
+        # missing_watched_sheets = self.plugin.missing_watched_sheets() # TODO
+        # if len(missing_watched_sheets) > 0:
+        if not self.plugin.all_watched(): 
             logger.debug('Cannot retrieve view %s for sheet %s because of '\
                          'missing sheets to watch', view_label, self.label)
             return pd.DataFrame(['Missing watched sheets'], columns=['Error'])
