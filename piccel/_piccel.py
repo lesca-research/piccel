@@ -6449,12 +6449,13 @@ class TestWorkBook(unittest.TestCase):
         self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Bobbie')
         self.assertEqual(df.loc[pid, 'Eval_Plan'], 'eval_plan')
 
-        logger.debug('------- Pid %s: Plan interview date, no email --------',
-                     pid)
+        logger.debug('------- Pid %s: Plan interview date in 20 days, ' +
+                     'no email --------', pid)
         idate = datetime(2021,10,10,10,10)
         ts = datetime(2021,9,10,10,11)
+        wb['Dashboard'].plugin.date_now = idate - timedelta(days=20)
         form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
-                                                        'Eval_Plan')
+                                                 'Eval_Plan')
         print('action_label:', action_label)
         self.assertTrue(action_label.endswith('Update'))
         self.assertTrue(action_label.startswith(plan_sheet_label))
@@ -6468,7 +6469,29 @@ class TestWorkBook(unittest.TestCase):
         # TODO: test Date_Is_Set False but date is not None
         form.submit()
         df = wb['Dashboard'].get_df_view()
-        self.assertEqual(df.loc[pid, 'Eval'], 'eval_scheduled')
+        self.assertEqual(df.loc[pid, 'Eval'], 'eval_20D')
+        self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Bobbie')
+        self.assertEqual(df.loc[pid, 'Eval_Plan'],
+                         idate.strftime(DATETIME_FMT))
+
+        logger.debug('------- Pid %s: Plan interview date overdue, ' +
+                     'no email --------', pid)
+
+        idate = datetime(2021,10,15,10,10)
+        ts = datetime(2021,9,10,10,12)
+        wb['Dashboard'].plugin.date_now = idate + timedelta(days=1)
+        form, action_label = sh_dashboard.action(dashboard_df.loc[[pid]],
+                                                 'Eval_Plan')
+        form.set_values_from_entry({'Plan_Action' : 'plan',
+                                    'Interview_Date' : idate,
+                                    'Availability' : 'ignored',
+                                    'Date_Is_Set' : True,
+                                    'Send_Email' : False,
+                                    'Timestamp_Submission' : ts})
+        # TODO: test Date_Is_Set False but date is not None
+        form.submit()
+        df = wb['Dashboard'].get_df_view()
+        self.assertEqual(df.loc[pid, 'Eval'], 'eval_not_done')
         self.assertEqual(df.loc[pid, 'Eval_Staff'], 'Bobbie')
         self.assertEqual(df.loc[pid, 'Eval_Plan'],
                          idate.strftime(DATETIME_FMT))
@@ -7698,7 +7721,7 @@ class TestEncryption(unittest.TestCase):
 
         message = 'This is secret'
         crypted_message = crypter.encrypt_str(message)
-        crypter2 = Encrypter.from_key(crypter.get_key())
+        crypter2 = Encrypter.from_key(crypter.get_key(), salt)
         self.assertEqual(message, crypter2.decrypt_to_str(crypted_message))
 
 
