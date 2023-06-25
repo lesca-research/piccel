@@ -4,7 +4,7 @@ import sys
 import os
 import os.path as op
 from glob import glob
-from setuptools import setup, find_packages
+from distutils.core import setup
 import subprocess
 
 version = {}
@@ -54,12 +54,12 @@ make_resources()
 setup(name='piccel', version=version['__version__'],
       description=short_description,
       long_description=long_description,
-      author='Thomas Vincent', license='MIT',
+      author='Thomas Vincent', license='GPLv3',
       classifiers=['Development Status :: 3 - Alpha',
                    'Intended Audience :: Science/Research',
                    'Intended Audience :: Information Technology',
                    'Intended Audience :: End Users/Desktop',
-                   'License :: OSI Approved :: MIT License',
+                   'License :: OSI Approved :: GNU General Public License v3 (GPLv3)',
                    'Environment :: X11 Applications :: Qt'
                    'Natural Language :: English',
                    'Natural Language :: French',
@@ -68,23 +68,17 @@ setup(name='piccel', version=version['__version__'],
                    'Operating System :: Microsoft :: Windows',
                    'Topic :: Office/Business :: Groupware',
                    'Topic :: Database',
-                   'Programming Language :: Python :: 3.8',],
+                   'Programming Language :: Python :: 3.10',],
       keywords='piccel spreadsheet form data capture encryption cloud',
       packages=find_packages(exclude=['test']),
       python_requires='>=3',
-      install_requires=['packaging', 'numpy', 'pandas<1.0.6', 'cryptography', 'appdirs',
+      install_requires=['packaging', 'numpy', 'pandas>=2', 'cryptography', 'appdirs',
                         'beautifulsoup4', 'bcrypt', 'html5lib'],
       extras_require={"PDF":  ['weasyprint', 'PyPDF2']},
       entry_points={
           'console_scripts': [
               'piccel = piccel.commands.piccel:main',
-              'piccel_extract_logic = piccel.commands.piccel_extract_logic:main',
-              'piccel_convert_gform = piccel.commands.piccel_convert_gform:main',
-              'piccel_import_logic = piccel.commands.piccel_import_logic:main',
-              'piccel_form_edit = piccel.commands.piccel_form_edit:main',
               'piccel_decrypt = piccel.commands.piccel_crypt:decrypt_cmd',
               'piccel_encrypt = piccel.commands.piccel_crypt:encrypt_cmd',
-              'piccel_test_widget = piccel.commands.piccel_test_widget:main',
-              'piccel_dump_access_key = piccel.commands.piccel_dump_access_key:main'
           ],
       })
