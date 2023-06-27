@@ -4,8 +4,9 @@ import sys
 import os
 import os.path as op
 from glob import glob
-from distutils.core import setup
 import subprocess
+
+from setuptools import setup, find_packages
 
 version = {}
 with open("piccel/version.py") as fp:
@@ -72,8 +73,7 @@ setup(name='piccel', version=version['__version__'],
       keywords='piccel spreadsheet form data capture encryption cloud',
       packages=find_packages(exclude=['test']),
       python_requires='>=3',
-      install_requires=['packaging', 'numpy', 'pandas>=2', 'cryptography', 'appdirs',
-                        'beautifulsoup4', 'bcrypt', 'html5lib'],
+      install_requires=['pyfakefs'],
       extras_require={"PDF":  ['weasyprint', 'PyPDF2']},
       entry_points={
           'console_scripts': [
