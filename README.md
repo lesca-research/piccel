@@ -14,9 +14,4 @@ Installation
 python setup.py install
 ```
 
-Project configuration
-------------------------------
-
-Main configuration file
-
 

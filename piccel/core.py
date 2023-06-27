@@ -1,12 +1,12 @@
 from collections import defaultdict
 from traceback import format_exc
 
+import numpy as np
 import pandas as pd
 
 from .logging import logger
 
 from PyQt5 import QtCore, QtGui, QtWidgets
-
 
 class on_str(object):
     def __init__(self, func):
@@ -52,7 +52,7 @@ def df_index_from_value(df, value_dict):
     #     m &= (df[key] == value)
     return df_filter_from_dict(df, value_dict).index.to_list()
 
-import numpy as np
+
 def df_filter_from_dict(df, value_dict):
 
     if df.shape[0] == 0:
