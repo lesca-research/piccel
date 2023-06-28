@@ -36,28 +36,46 @@ class SymmetricAESGCMEncrypter:
 
     KEY_SALT_SIZE = 128
 
-    def __init__(self, password, key_salt_bytes=None, get_password=getpass):
+    def __init__(self, get_password=getpass):
         self.get_password = get_password
-        if password is None:
-            password = self.get_password()
-        self.key_salt_bytes = \
-            if_none(key_salt_bytes,
-                    secrets.token_bytes(SymmetricAESGCMEncrypter.KEY_SALT_SIZE))
-        if len(self.key_salt_bytes) != SymmetricAESGCMEncrypter.KEY_SALT_SIZE:
-            raise InvalidSaltSize('Size of salt must be %s' %
-                                  SymmetricAESGCMEncrypter.KEY_SALT_SIZE)
+        self.gcm = None
 
-        self.gcm = AESGCM(derive_key(password, self.key_salt_bytes))
+    @classmethod
+    def new(cls, password, key_salt_bytes=None, get_password=getpass):
+        encrypter = SymmetricAESGCMEncrypter(get_password=lambda: password)
+        encrypter._insure_init(key_salt_bytes)
+        encrypter.set_password_input_func(get_password)
+        return encrypter
 
     def set_password_input_func(self, password_func):
         self.get_password = password_func
 
+    def _insure_init(self, key_salt_bytes=None):
+
+        if (key_salt_bytes is not None and
+            len(key_salt_bytes) != SymmetricAESGCMEncrypter.KEY_SALT_SIZE):
+            raise InvalidSaltSize('Size of salt must be %s' %
+                                  SymmetricAESGCMEncrypter.KEY_SALT_SIZE)
+
+        if self.gcm is None: # No previous key init
+            self.key_salt_bytes = \
+                if_none(key_salt_bytes,
+                        secrets.token_bytes(SymmetricAESGCMEncrypter.KEY_SALT_SIZE))
+            self.gcm = AESGCM(derive_key(self.get_password(), self.key_salt_bytes))
+        else:
+            if (key_salt_bytes is not None and
+                self.key_salt_bytes != key_salt_bytes):
+                logger.warning('Different key salt found in content to decrypt')
+                self.key_salt_bytes = key_salt_bytes
+                self.gcm = AESGCM(derive_key(self.get_password(),
+                                             self.key_salt_bytes))
+
     def encrypt_str(self, content_str):
-        key_salt_hex = self.key_salt_bytes.hex()
+        self._insure_init()
         # Save key salt to be able to decrypt in a self-contained manner
         nonce = secrets.token_bytes(12)
         return json.dumps({
-            'key_salt_hex' : key_salt_hex,
+            'key_salt_hex' : self.key_salt_bytes.hex(),
             'nonce_hex' : nonce.hex(),
             'crypted_content_hex' : (self.gcm.encrypt(nonce, content_str.encode(),
                                                       None)
@@ -66,43 +84,28 @@ class SymmetricAESGCMEncrypter:
 
     def decrypt_to_str(self, crypted_str):
         content = json.loads(crypted_str)
+        self._insure_init(bytes.fromhex(content['key_salt_hex']))
 
-        if 'key_salt_hex' not in content:
-            raise IOError('Bad format')
-
-        if self.key_salt_bytes.hex() != content['key_salt_hex']:
-            logger.warning('Different key salt found in content to decrypt. '\
-                           'Encryption key needs to be built again.')
-            if self.get_password is None:
-                raise IOError('Cannot decrypt because cannot get password again')
-            else:
-                loaded_key_salt_bytes = bytes.fromhex(content['key_salt_hex'])
-                gcm = AESGCM(derive_key(self.get_password(),
-                                        loaded_key_salt_bytes))
-        else:
-            gcm = self.gcm
-
-        return gcm.decrypt(bytes.fromhex(content['nonce_hex']),
-                           bytes.fromhex(content['crypted_content_hex']),
-                           None).decode()
+        return self.gcm.decrypt(bytes.fromhex(content['nonce_hex']),
+                                bytes.fromhex(content['crypted_content_hex']),
+                                None).decode()
 
 import tempfile
 from pyfakefs.fake_filesystem_unittest import TestCase
-
 
 class TestEncryption(TestCase):
 
     def test_crypter(self):
         password = "password"
         salt_bytes = secrets.token_bytes(SymmetricAESGCMEncrypter.KEY_SALT_SIZE)
-        crypter = SymmetricAESGCMEncrypter(password, salt_bytes)
+        crypter = SymmetricAESGCMEncrypter.new(password)
         message = 'Secret message!!'
         self.assertEqual(crypter.decrypt_to_str(crypter.encrypt_str(message)),
                          message)
 
     def test_auto_salt(self):
         password = "password"
-        crypter = SymmetricAESGCMEncrypter(password)
+        crypter = SymmetricAESGCMEncrypter.new(password)
         message = 'Secret message!!'
         self.assertEqual(crypter.decrypt_to_str(crypter.encrypt_str(message)),
                          message)
@@ -111,6 +114,10 @@ class TestEncryption(TestCase):
         password = "password"
         def give_pwd():
             return password
-        crypter = SymmetricAESGCMEncrypter(None, get_password=give_pwd)
-        self.assertEqual(crypter.decrypt_to_str(crypter.encrypt_str('message')),
-                         'message')
+                
+        crypter1 = SymmetricAESGCMEncrypter(give_pwd)
+        crypted_msg = crypter1.encrypt_str('message')
+
+        crypter2 = SymmetricAESGCMEncrypter(give_pwd)
+        self.assertEqual(crypter2.decrypt_to_str(crypted_msg), 'message')
+        
