@@ -22,13 +22,19 @@ import secrets
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from hashlib import scrypt
 import base64
+from time import time
 
 from ..core import if_none
 from ..logging import logger, debug2, debug3
 
-def derive_key(password_str, salt_bytes):
-    return scrypt(password_str.encode(), salt=salt_bytes,
-                  n=16384, r=8, p=1, dklen=32)
+def derive_key(password_str, salt_bytes, fast):
+    if fast:
+        return scrypt(password_str.encode(), salt=salt_bytes,
+                      n=16384, r=8, p=1, dklen=32)
+    else:
+        # 0.5s on Intel Celeron N5105
+        return scrypt(password_str.encode(), salt=salt_bytes,
+                      n=16384, r=15, p=4, dklen=32)
 
 class InvalidSaltSize(Exception): pass
 
@@ -36,13 +42,16 @@ class SymmetricAESGCMEncrypter:
 
     KEY_SALT_SIZE = 128
 
-    def __init__(self, get_password=getpass):
+    def __init__(self, get_password=getpass, fast_key_derivation=False):
         self.get_password = get_password
         self.gcm = None
+        self.fast_key_derivation = fast_key_derivation
 
     @classmethod
-    def new(cls, password, key_salt_bytes=None, get_password=getpass):
-        encrypter = SymmetricAESGCMEncrypter(get_password=lambda: password)
+    def new(cls, password, key_salt_bytes=None, get_password=getpass,
+            fast_key_derivation=False):
+        encrypter = SymmetricAESGCMEncrypter(get_password=lambda: password,
+                                             fast_key_derivation=fast_key_derivation)
         encrypter._insure_init(key_salt_bytes)
         encrypter.set_password_input_func(get_password)
         return encrypter
@@ -61,14 +70,16 @@ class SymmetricAESGCMEncrypter:
             self.key_salt_bytes = \
                 if_none(key_salt_bytes,
                         secrets.token_bytes(SymmetricAESGCMEncrypter.KEY_SALT_SIZE))
-            self.gcm = AESGCM(derive_key(self.get_password(), self.key_salt_bytes))
+            self.gcm = AESGCM(derive_key(self.get_password(), self.key_salt_bytes,
+                                         self.fast_key_derivation))
         else:
             if (key_salt_bytes is not None and
                 self.key_salt_bytes != key_salt_bytes):
                 logger.warning('Different key salt found in content to decrypt')
                 self.key_salt_bytes = key_salt_bytes
                 self.gcm = AESGCM(derive_key(self.get_password(),
-                                             self.key_salt_bytes))
+                                             self.key_salt_bytes,
+                                             self.fast_key_derivation))
 
     def encrypt_str(self, content_str):
         self._insure_init()
@@ -98,14 +109,14 @@ class TestEncryption(TestCase):
     def test_crypter(self):
         password = "password"
         salt_bytes = secrets.token_bytes(SymmetricAESGCMEncrypter.KEY_SALT_SIZE)
-        crypter = SymmetricAESGCMEncrypter.new(password)
+        crypter = SymmetricAESGCMEncrypter.new(password, fast_key_derivation=True)
         message = 'Secret message!!'
         self.assertEqual(crypter.decrypt_to_str(crypter.encrypt_str(message)),
                          message)
 
     def test_auto_salt(self):
         password = "password"
-        crypter = SymmetricAESGCMEncrypter.new(password)
+        crypter = SymmetricAESGCMEncrypter.new(password, fast_key_derivation=True)
         message = 'Secret message!!'
         self.assertEqual(crypter.decrypt_to_str(crypter.encrypt_str(message)),
                          message)
@@ -115,9 +126,16 @@ class TestEncryption(TestCase):
         def give_pwd():
             return password
                 
-        crypter1 = SymmetricAESGCMEncrypter(give_pwd)
+        crypter1 = SymmetricAESGCMEncrypter(give_pwd, fast_key_derivation=True)
         crypted_msg = crypter1.encrypt_str('message')
 
-        crypter2 = SymmetricAESGCMEncrypter(give_pwd)
+        crypter2 = SymmetricAESGCMEncrypter(give_pwd, fast_key_derivation=True)
         self.assertEqual(crypter2.decrypt_to_str(crypted_msg), 'message')
         
+
+    def test_computation_time(self):
+        t0 = time()
+        SymmetricAESGCMEncrypter.new('password', fast_key_derivation=False)
+        t = time() - t0
+        self.assertLess(t, 3)
+        self.assertGreater(t, 0.3)
