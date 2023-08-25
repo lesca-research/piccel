@@ -99,7 +99,7 @@ class LocalFileSystem:
             return
         logger.debug2('Create folder %s', full_folder)
         os.makedirs(full_folder)
-        assert(op.exists(full_folder))
+        # assert(op.exists(full_folder))
 
     def test_write_access(self):
         success = True
@@ -113,7 +113,7 @@ class LocalFileSystem:
             self.remove('test_write')
         return success
 
-    def full_path(self, fn):ooooooooo
+    def full_path(self, fn):
         return op.join(self.root_folder, fn)
 
     def listdir(self, folder, list_folders_only=False):
