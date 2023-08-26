@@ -169,6 +169,9 @@ class Var:
 
         self.column_position = column_position
 
+    def is_index(self):
+        return self.index_position is not None
+
     def asdict(self):
         return {
             'var_label' : self.var_label,
@@ -185,12 +188,16 @@ class FixedVariables:
         self.variables = {v.var_label:v for v in variables}
 
     def __iter__(self):
-        return (v.asdict() for v in self.variables.values())
+        return iter(self.variables.values())
 
     def validate_dtypes(self):
         return False # stub
 
+    def refresh(self):
+        pass
+
 class PersistentVariables:
+    
     META_VARS = [
         Var('var_label', 'string', index_position=0),
         Var('var_type', 'variable_type'),
@@ -200,17 +207,69 @@ class PersistentVariables:
         Var('is_used', 'boolean'),
         Var('column_position', 'int'),
     ]
+
     def __init__(self, parent_store):
+        self.parent_store = parent_store
         self.store = DataStore(parent_store.filesystem,
                                label=parent_store.label + '_vars', 
                                variables=PersistentVariables.META_VARS,
                                use_annotations=False,
-                               validate_entry=parent_store.validate_var_entry,
-                               watchers={'pushed_entry' :
-                                         parent_store.on_pushed_variable})
+                               validate_entry=self.validate_entry,
+                               notifications={'pushed_entry' :
+                                              parent_store.on_pushed_variable})
 
     def __iter__(self):
         return (Var(idx, **row) for idx, row in self.store.head_df().iterrows())
+
+    def refresh(self):
+        self.store.refresh()
+    
+    def validate_entry(self, new_entry):
+        current_vars_df = self.store.head_df()
+        # Check only modified variables
+        new_entry = new_entry.set_index('var_label')
+        modified_vars = new_entry.index.intersection(current_vars_df)
+        new_entry = new_entry.loc[modified_vars]
+        previous = current_vars_df.loc[modified_vars]
+
+        def index_vars(var_df):
+            m_index = ~pd.isna(var_df['index_position'])
+            return var_df.index[m_index].sort()
+
+        if self.parent_store.variables_are_locked():
+            # allow only change in index or column order
+            pos_cols = ['index_position', 'column_position']            
+            if ( (index_vars(previous) != index_vars(new_entry)).any() or
+                 (previous.drop(columns=pos_cols) !=
+                  new_entry.drop(columns=pos_cols)).any(axis=None) ):
+                raise LockedVariables()
+            else:
+                if (previous[[pos_cols]] !=
+                    new_entry[[pos_cols]]).any(axis=None):
+                    self.invalidate_cached_views()
+                # else no change in new entry, nothing to do
+        else:
+            if self.parent_store.data_is_empty(): # no data yet, allow any change
+                return true_df_like(new_entry)
+            else:
+                full_df = self.parent_store.full_df()
+                for var_label, mod_var in new_entry.iterrows():
+                    current_var = current_vars_df.loc[var_label]
+                    # check type change
+                    if ( (current_var['var_type'], mod_var['var_type']) not in
+                         ALLOWED_VARIABLE_TYPE_CHANGE ):
+                        raise VariableChangeError(var_label)
+                    # check uniqueness / index
+                    if ( (not current_var['is_unique'] and
+                          mod_var['is_unique']) or
+                         (pd.isna(current_var['index_position']) and
+                          not pd.isna(mod_var['index_position'])) ):
+                        raise VariableChangeError(var_label)
+                    # check nullable
+                    if ((current_var['nullable'] and
+                        not  mod_var['nullable']) and
+                        pd.isna(full_df[var_label]).any()):
+                        raise VariableChangeError(var_label)
 
 def df_like(df, fill_value=pd.NA, dtype=None):
     new_df = pd.DataFrame().reindex_like(df).fillna(fill_value)
@@ -230,8 +289,8 @@ class PersistentLogic:
                                label=parent_store.label + '_code', 
                                variables=PersistentLogic.STORE_VARS,
                                use_annotations=False,
-                               watchers={'pushed_entry' :
-                                         self.on_pushed_entry})
+                               notifications={'pushed_entry' :
+                                              self.on_pushed_entry})
 
     def on_pushed_entry(self, new_entry):
         for idx, row in new_entry.iterrows():
@@ -322,7 +381,7 @@ class DataStore:
         Var('flag_symbol', 'symbol'),
     ]
 
-    FLAG_VARIABLES = [
+    FLAG_ENTRY_VARS = [
         Var('index_hash', 'int', index_position=0),
         Var('index_repr', 'string'),
         Var('variable', 'string'),
@@ -341,13 +400,16 @@ class DataStore:
     DATA_FILE_EXT = '.csv'
 
     def __init__(self, filesystem, label=None, variables=None,
-                 use_annotations=True, logic=None, watchers=None):
+                 use_annotations=True, logic=None, validate_entry=None,
+                 notifications=None):
         """
         For variables and logic, use persistent versions with history if they
         are None.
         """
 
         expected_label = DataStore.label_from_filesystem(filesystem)
+        logger.debug('Resolve data directory. Given label=%s, label from fs=%s',
+                     label, expected_label)
         if label is None:
             # ASSUME filesystem points to store directory
             if not DataStore.is_valid_datastore_label(expected_label):
@@ -370,9 +432,9 @@ class DataStore:
             self.filesystem = filesystem.clone()
             self.label = label
 
-        self.log = DataStoreLogger(logger, {'store_label' : label})
+        self.logger = DataStoreLogger(logger, {'store_label' : label})
 
-        self.notifier = Notifier(watchers if watchers is not None else {})
+        self.notifier = Notifier(notifications)
 
         self.df = pd.DataFrame(columns=DataStore.PRIVATE_COLS)
         for col in DataStore.TRACKING_INDEX_LEVELS:
@@ -390,29 +452,30 @@ class DataStore:
         if use_annotations:
             self.flag_defs_ds = DataStore(self.filesystem,
                                           label=self.label + '_flag_defs',
-                                          variables=DataStore.FLAG_DEFS_VARS,
+                                          variables=DataStore.FLAG_DEF_VARS,
                                           use_annotations=False,
-                                          watchers={'pushed_entry':
-                                                    self.on_pushed_flag_def})
+                                          notifications={'pushed_entry':
+                                                         self.on_pushed_flag_def})
 
             self.flag_ds = DataStore(self.filesystem,
                                      label=self.label + '_flags',
-                                     variables=DataStore.FLAGS_VARIABLES,
+                                     variables=DataStore.FLAG_ENTRY_VARS,
                                      use_annotations=False,
-                                     watchers={'pushed_entry':
-                                               self.on_pushed_flag_def})
+                                     notifications={'pushed_entry':
+                                                    self.on_pushed_flag_def})
 
             self.note_ds = DataStore(self.filesystem,
                                      label=self.label + '_notes',
                                      variables=DataStore.NOTES_VARIABLES,
                                      use_annotations=False,
-                                     watchers={'pushed_entry':
-                                               self.on_pushed_note})
+                                     notifications={'pushed_entry':
+                                                    self.on_pushed_note})
 
-        if logic is not None:
-            self.logic = logic # expect DataStoreLogic
-        else:
-            self.logic = PersistentLogic(self)
+        if 0:
+            if logic is not None:
+                self.logic = logic # expect DataStoreLogic
+            else:
+                self.logic = PersistentLogic(self)
 
         self.user = None
 
@@ -421,12 +484,15 @@ class DataStore:
 
         self._refresh_data()
 
+    def data_is_empty(self):
+        return self.df.empty
+
     def _refresh_data(self):
         modified_files, new_files, deleted_files = \
             self.filesystem.external_changes()
-        self.logger.debug2('Files externally added: %s', new_files)
-        self.logger.debug2('Files externally modified: %s', modified_files)
-        self.logger.debug2('Files externally deleted: %s', deleted_files)
+        self.logger.debug('Files externally added: %s', new_files)
+        self.logger.debug('Files externally modified: %s', modified_files)
+        self.logger.debug('Files externally deleted: %s', deleted_files)
 
         def _is_data_file(fn):
             return (fn.startswith('data') and
@@ -437,10 +503,12 @@ class DataStore:
         deleted_data_files = [fn for fn in deleted_files if _is_data_file(fn)]
 
         def _load_entry(data_fn):
-            df_content = self.filesystem.load(data_fn)
-            entry_df = self.df_from_str(df_content)
-            entry_df['__fn__'] = data_fn
-            self.merge(entry_df) # will notify added_entries
+            content = json.loads(self.filesystem.load(data_fn))
+            # TODO unpack comment, user, ts
+            entry_dfs = {k:self.df_from_str(df_content)
+                         for k,df_content in content.items()}
+            entry_dfs['value']['__fn__'] = data_fn
+            self.merge_df(entry_dfs) # will notify added_entries
 
         for del_fn in deleted_data_files:
             to_delete = self.df.index[self.df['__fn__'] == del_fn]
@@ -458,11 +526,15 @@ class DataStore:
 
         self.filesystem.accept_all_changes('data')
 
-    def merge(self, other_df):
+    def merge_df(self, other_df):
         if other_df.index.names != DataStore.TRACKING_INDEX_LEVELS:
             raise Exception()
+        
+    def push_records(self, records):
+        return [(0, 0, 0)] # stub
 
-    def push_record(self, record, comment=None, timestamp=None):
+    def push_record(self, record, comment=None, tracking_index=None,
+                    timestamp=None):
         value_df = pd.DataFrame.from_records([record])
         if comment is None:
             comment_df = df_like(value_df, fill_value=pd.NA, dtype='string')
@@ -477,9 +549,7 @@ class DataStore:
         user_df = df_like(value_df, fill_value=if_none(self.user, pd.NA),
                           dtype='string')
 
-        self.push_df(value_df, comment_df, timestamp=timestamp)
-
-        # put in push_df:
+        self.push_df(value_df, comment_df, user_df, timestamp_df)
 
     def push_df(self, value_df, comment_df, user_df, timestamp_df):
         dfs = {'value_df' : value_df,
@@ -487,7 +557,7 @@ class DataStore:
                'user_df' : user_df,
                'timestamp_df' : timestamp_df}
         if not set(DataStore.TRACKING_INDEX_LEVELS).issubset(value_df.columns):
-            index_variables = self.variables.index_variables()
+            index_variables = [v for v in self.variables if v.is_index()]
             if len(index_variables) > 0:
                 index_to_update = ...
                 index_new = ...
@@ -504,36 +574,6 @@ class DataStore:
         idx = self.merge_df(dfs)
         data_fn = self.save_entry(dfs)
         self.df.loc[idx, '__fn__'] = data_fn
-
-    def reload_all_data(self):
-        """ Data is cleared before loading """
-        self.logger.debug('Reload all data')
-        data_folder = 'data'
-
-        data_bfns = [fn for fn in self.filesystem.listdir(data_folder) \
-                     if fn.endswith(DataStore.DATA_FILE_EXT)]
-
-        if logger.level >= logging.DEBUG:
-            self.logger.debug('Available data files:\n%s',
-                              self.label, '\n'.join(data_bfns))
-        if len(data_bfns) > 0:
-            if self.df.shape[0] > 0:
-                self.delete_all_entries()
-            # Associated views will be cleared
-            # Expect watchers to react
-            for data_bfn in data_bfns:
-                data_fn = op.join(data_folder, data_bfn)
-                self.logger.debug('Load data in %s', data_fn)
-                df_content = self.filesystem.load(data_fn)
-                entry_df = self.df_from_str(df_content)
-                if not data_fn.endswith('main.csv'):
-                    entry_df['__fn__'] = data_fn
-                self._merge_df(entry_df) # previously _append_df
-            self.fix_conflicting_entries()
-            self.invalidate_cached_views()
-        else:
-            logger.debug('No sheet data to load in %s', data_folder)
-        self.filesystem.accept_all_changes(data_folder)
 
     def delete_all_entries(self):
         self.notifier.notify('pre_clear_data')
@@ -633,54 +673,6 @@ class DataStore:
     @classmethod
     def label_from_filesystem(self, fs):
         return PurePath(fs.root_folder).parts[-1]
-
-    def validate_var_entry(self, new_entry):
-
-        current_vars_df = self.variables.store.head_df()
-        # Check only modified variables
-        new_entry = new_entry.set_index('var_label')
-        modified_vars = new_entry.index.intersection(current_vars_df)
-        new_entry = new_entry.loc[modified_vars]
-        previous = current_vars_df.loc[modified_vars]
-
-        def index_vars(var_df):
-            m_index = ~pd.isna(var_df['index_position'])
-            return var_df.index[m_index].sort()
-
-        if self.variables_are_locked():
-            # allow only change in index or column order
-            pos_cols = ['index_position', 'column_position']            
-            if ( (index_vars(previous) != index_vars(new_entry)).any() or
-                 (previous.drop(columns=pos_cols) !=
-                  new_entry.drop(columns=pos_cols)).any(axis=None) ):
-                raise LockedVariables()
-            else:
-                if (previous[[pos_cols]] !=
-                    new_entry[[pos_cols]]).any(axis=None):
-                    self.invalidate_cached_views()
-                # else no change in new entry, nothing to do
-        else:
-            if self.df.empty: # no data yet, allow any change
-                return true_df_like(new_entry)
-            else:
-                full_df = self.full_df()
-                for var_label, mod_var in new_entry.iterrows():
-                    current_var = current_vars_df.loc[var_label]
-                    # check type change
-                    if ( (current_var['var_type'], mod_var['var_type']) not in
-                         ALLOWED_VARIABLE_TYPE_CHANGE ):
-                        raise VariableChangeError(var_label)
-                    # check uniqueness / index
-                    if ( (not current_var['is_unique'] and
-                          mod_var['is_unique']) or
-                         (pd.isna(current_var['index_position']) and
-                          not pd.isna(mod_var['index_position'])) ):
-                        raise VariableChangeError(var_label)
-                    # check nullable
-                    if ((current_var['nullable'] and
-                        not  mod_var['nullable']) and
-                        pd.isna(full_df[var_label]).any()):
-                        raise VariableChangeError(var_label)
         
     @classmethod
     def is_valid_variable_label(cls, label):
@@ -698,12 +690,6 @@ class DataStore:
 
     def set_user(self, user):
         self.user = user
-
-    def push_records(self, records):
-        return [(0, 0, 0)] # stub
-
-    def push_record(self, record, tracking_index=None):
-        return (0, 0, 0) # stub
 
     def push_variable(self, var_label, var_type, nullable=True,
                       index_position=None, is_unique=False, is_used=True,
@@ -769,16 +755,17 @@ class DataStore:
         # Arrange tracking index
         pass
 
-    def full_df(self, view):
+    def full_df(self, view='value'):
         return pd.DataFrame() # stub
 
-    def head_df(self, view):
+    def head_df(self, view='value'):
         return pd.DataFrame() # stub
 
 class TestDataStore(TestCase):
 
     def setUp(self):
         self.setUpPyfakefs()
+        logger.setLevel(logging.DEBUG)
         self.tmp_dir = tempfile.mkdtemp()
         self.filesystem = LocalFileSystem(self.tmp_dir)        
         
@@ -1068,11 +1055,11 @@ class TestDataStore(TestCase):
         ds.set_user('me')
         ds.push_variable('v1', 'string')
         ds.push_record({'v1' : 'test'})
-        ds.push_variable('v1', 'string', unique=True)
+        ds.push_variable('v1', 'string', is_unique=True)
         
-        self.assertRaise(InvalidValueError, ds.push_record, {'v1' : 'test'})
+        self.assertRaises(InvalidValueError, ds.push_record, {'v1' : 'test'})
 
-        ds.push_variable('v1', 'string', unique=False)
+        ds.push_variable('v1', 'string', is_unique=False)
         ds.push_record({'v1' : 'test'})
         self.assertRaises(VariableChangeError, ds.push_variable, 'v1', 'string',
                           unique=True)
@@ -1081,7 +1068,7 @@ class TestDataStore(TestCase):
         ds = DataStore(self.filesystem, 'test_ds')
         ds.set_user('me')
         ds.push_variable('v1', 'string', nullable=False)
-        self.assertRaise(InvalidValueError, ds.push_record, {'v1' : None})
+        self.assertRaises(InvalidValueError, ds.push_record, {'v1' : None})
 
         ds.push_variable('v1', 'string', nullable=True)
         ds.push_record({'v1' : None})
@@ -1123,8 +1110,8 @@ class TestDataStore(TestCase):
         ds.push_variable('v1', 'string')
         ds.push_variable('v2', 'int')
         ds.push_variable('v3', 'string')
-        self.assertSequenceEqual(ds.head_df().columns,
-                                 ['v1', 'v2', 'v3'])
+        self.assertListEqual(ds.head_df().columns,
+                             ['v1', 'v2', 'v3'])
 
         ds2 = DataStore.from_files(self.filesystem)
 
@@ -1133,28 +1120,28 @@ class TestDataStore(TestCase):
         ds.push_variable('v3', 'string', column_position=2)
         ds.push_variable('v4', 'string')
 
-        self.assertSequenceEqual(ds.head_df().columns,
-                                 ['v2', 'v3', 'v1', 'v4'])
+        self.assertListEqual(ds.head_df().columns,
+                         ['v2', 'v3', 'v1', 'v4'])
         
         ds.push_variable('v1', 'string', column_position=1)
-        self.assertSequenceEqual(ds.head_df().columns,
-                                 ['v2', 'v1', 'v3'])
-        
+        self.assertListEqual(ds.head_df().columns,
+                         ['v2', 'v1', 'v3'])
+
         ds.push_variables({'var_label': ['v4'],
                            'position' : [10]})
-        self.assertSequenceEqual(ds.head_df().columns,
-                                 ['v2', 'v1', 'v3', 'v4'])
+        self.assertListEqual(ds.head_df().columns,
+                         ['v2', 'v1', 'v3', 'v4'])
         ds2.refresh()
-        self.assertSequenceEqual(ds2.head_df().columns,
-                                 ['v2', 'v1', 'v3', 'v4'])
+        self.assertListEqual(ds2.head_df().columns,
+                         ['v2', 'v1', 'v3', 'v4'])
         
         ds.push_variables({'var_label': ['va'],
                            'position' : [1.5]})
-        self.assertSequenceEqual(ds.head_df().columns,
-                                 ['v2', 'va', 'v1', 'v3', 'v4'])
+        self.assertListEqual(ds.head_df().columns,
+                         ['v2', 'va', 'v1', 'v3', 'v4'])
         ds2.refresh()
-        self.assertSequenceEqual(ds2.head_df().columns,
-                                 ['v2', 'va', 'v1', 'v3', 'v4'])
+        self.assertListEqual(ds2.head_df().columns,
+                         ['v2', 'va', 'v1', 'v3', 'v4'])
 
     def test_flag_indexed_head_df(self):
         ds = DataStore(self.filesystem, 'test_ds')
@@ -1162,20 +1149,20 @@ class TestDataStore(TestCase):
         ds.push_variable('vid', 'string', index=0)
         ds.push_variable('age', 'int')
 
-        ds.push_flag(0, 'to_check', 'triangle_orange')
-        ds.push_flag(1, 'double_checked', 'tick_mark_green')
+        ds.push_flag_def(0, 'to_check', 'triangle_orange')
+        ds.push_flag_def(1, 'double_checked', 'tick_mark_green')
 
         tidx = ds.push_record({'vid' : 'ID1', 'age' : 111})
-        ds.flag(tidx, 'age', 1) # flag using tracking index
-        ds.flag('ID1', 'age', 1<<2) # flag using head index
+        ds.push_flag(tidx, 'age', 1) # flag using tracking index
+        ds.push_flag('ID1', 'age', 1<<2) # flag using head index
 
         symbols_full_df = ds.full_df('single_flag_symbols')
-        self.assertSequenceEqual(symbols_full_df.loc[tidx, 'age'],
-                                 ['double_checked'])
+        self.assertListEqual(symbols_full_df.loc[tidx, 'age'],
+                             ['double_checked'])
 
         symbols_head_df = ds.head_df('single_flag_symbols')
-        self.assertSequenceEqual(symbols_head_df.loc['ID1', 'age'],
-                                 ['tick_mark_green'])
+        self.assertListEqual(symbols_head_df.loc['ID1', 'age'],
+                             ['tick_mark_green'])
 
     def test_flag_definition(self):
         ds = DataStore(self.filesystem, 'test_ds')
@@ -1192,7 +1179,7 @@ class TestDataStore(TestCase):
         self.assertEqual(ds.flag_index_as_label(1), 'question_mark')
 
         self.assertRaises(InvalidFlagIndex, ds.flag_index_as_symbols, 3)
-        self.assertRaises(InvalidFlagIndex, ds.push_flag_definition,
+        self.assertRaises(InvalidFlagIndex, ds.push_flag_def,
                           flag_index=65, flag_label='f',
                           flag_symbol='triangle_orange')
 
@@ -1202,7 +1189,7 @@ class TestDataStore(TestCase):
         self.assertSequenceEqual(single_flag_symbols_df.loc[tidx1, 'v1'],
                                  ['dummy'])
 
-        ds.push_flag_definition(1, 'error', 'cross_red')
+        ds.push_flag_def(1, 'error', 'cross_red')
 
         single_flag_symbols_df = ds.full_df('single_flag_symbols')
         self.assert_equal(single_flag_symbols_df.loc[tidx1, 'v1'],
@@ -1213,9 +1200,9 @@ class TestDataStore(TestCase):
         ds.set_user('me')
         ds.push_variable('v1', 'string')
 
-        ds.push_flag_definition(0, 'to_check', 'triangle_orange')
-        ds.push_flag_definition(1, 'dummy', 'question_mark')
-        ds.push_flag_definition(2, 'double_checked', 'tick_mark_green')
+        ds.push_flag_def(0, 'to_check', 'triangle_orange')
+        ds.push_flag_def(1, 'dummy', 'question_mark')
+        ds.push_flag_def(2, 'double_checked', 'tick_mark_green')
     
         tidx = ds.push_records([{'v1' : 'has flags'},
                                 {'v1' : 'one flag'},
@@ -1252,9 +1239,9 @@ class TestDataStore(TestCase):
         ds.set_user('me')
         ds.push_variable('v1', 'string')
 
-        ds.push_flag_definition(0, 'to_check', 'triangle_orange')
-        ds.push_flag_definition(1, 'dummy', 'question_mark')
-        ds.push_flag_definition(2, 'double_checked', 'tick_mark_green')
+        ds.push_flag_def(0, 'to_check', 'triangle_orange')
+        ds.push_flag_def(1, 'dummy', 'question_mark')
+        ds.push_flag_def(2, 'double_checked', 'tick_mark_green')
 
         ds.flag('id1', 'v1', 1<<1)
         self.assertSequenceEqual(ds.flags_of('id1', 'v1'),
@@ -1268,7 +1255,7 @@ class TestDataStore(TestCase):
         ds1 = DataStore(self.filesystem, 'test_ds')
         ds1.set_user('me')
 
-        ds2 = DataStore.from_files(self.filesystem)
+        ds2 = DataStore(self.filesystem)
 
         v_def = {'var_label' : 'v1', 'var_type' : 'string'}
         ds1.push_variable(**v_def)
@@ -1279,7 +1266,7 @@ class TestDataStore(TestCase):
         ds2.refresh()
         assert_frame_equal(ds2.head_df(), pd.DataFrame({'v1' : ['first_val']}))
 
-        ds1.push_flag_definition(0, 'to_check', 'triangle_orange')
+        ds1.push_flag_def(0, 'to_check', 'triangle_orange')
 
         idx = ds1.push_record({'v1' : 'has flag'})
         ds.flag(idx, 'v1', 0)
@@ -1423,7 +1410,7 @@ class TestDataStore(TestCase):
     def test_conflict_unique(self):
         ds1 = DataStore(self.filesystem, 'test_ds')
         ds1.set_user('me')
-        ds1.push_variable('v1', 'string', unique=True)
+        ds1.push_variable('v1', 'string', is_unique=True)
         
         ds2 = DataStore.from_files(self.filesystem)
 
