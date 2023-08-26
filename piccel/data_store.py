@@ -3,6 +3,7 @@
 from itertools import product
 from datetime import datetime, date, timezone
 from copy import deepcopy
+from pathlib import PurePath
 
 import numpy as np
 import pandas as pd
@@ -127,6 +128,10 @@ VTYPES['symbol']['validate_value'] = lambda v: v in FLAGS_SYMBOLS
 VTYPES['flag_index'] = deepcopy(VTYPES['int'])
 VTYPES['flag_index']['validate_value'] = lambda v: (v >= 0) and (v < 64)
 
+
+VTYPES['ds_code_entry'] = deepcopy(VTYPES['string'])
+# TODO: add validation & conversion to compiled code object
+
 ALLOWED_VARIABLE_TYPE_CHANGE = {
     ('int', 'number'),
     ('boolean', 'int'),
@@ -150,16 +155,19 @@ class Var:
     def __init__(self, var_label, var_type, index_position=None, is_unique=False,
                  is_used=True, nullable=True, column_position=None):
 
-        self.index_position = index_position
-
         self.var_label = var_label
 
         if var_type not in VTYPES:
             raise BadVariableType(var_type)
         self.var_type = var_type
 
+        self.index_position = index_position
+
         self.is_unique = is_unique
         self.is_used = is_used
+        self.nullable = nullable
+
+        self.column_position = column_position
 
     def asdict(self):
         return {
@@ -196,7 +204,7 @@ class PersistentVariables:
         self.store = DataStore(parent_store.filesystem,
                                label=parent_store.label + '_vars', 
                                variables=PersistentVariables.META_VARS,
-                               use_flags=False,
+                               use_annotations=False,
                                validate_entry=parent_store.validate_var_entry,
                                watchers={'pushed_entry' :
                                          parent_store.on_pushed_variable})
@@ -211,7 +219,7 @@ def df_like(df, fill_value=pd.NA, dtype=None):
 
 class PersistentLogic:
     STORE_VARS = [
-        Var('code_entry', 'ds_code_entry', is_index=True),
+        Var('code_entry', 'ds_code_entry', index_position=0),
         Var('code', 'string')
     ]
 
@@ -221,7 +229,7 @@ class PersistentLogic:
         self.store = DataStore(parent_store.filesystem,
                                label=parent_store.label + '_code', 
                                variables=PersistentLogic.STORE_VARS,
-                               use_flags=False,
+                               use_annotations=False,
                                watchers={'pushed_entry' :
                                          self.on_pushed_entry})
 
@@ -234,7 +242,7 @@ class TestVariable(TestCase):
 
     def test_fixed_variables(self):
         v1 = Var('v1', 'string')
-        v2 = Var('v2_idx', 'int', is_index=True)
+        v2 = Var('v2_idx', 'int', index_position=0)
         v3 = Var('v3', 'boolean')
         vs = FixedVariables([v1, v2, v3])
         self.assertSequenceEqual(list(vs),
@@ -303,10 +311,10 @@ class DataStore:
     # 'pushed_entry', 'deleted_entry', 'variables_changed', 'flags_changed'
     # 'pushed_annotation'
 
-    TRACKING_INDEX_LEVELS = ('__entry_id__',
+    TRACKING_INDEX_LEVELS = ['__entry_id__',
                              '__update_idx__',
-                             '__conflict_idx__')
-    PRIVATE_COLS = TRACKING_INDEX_LEVELS + ('__fn__',)
+                             '__conflict_idx__']
+    PRIVATE_COLS = TRACKING_INDEX_LEVELS + ['__fn__']
 
     FLAG_DEF_VARS = [
         Var('flag_index', 'flag_index', index_position=0, nullable=False),
@@ -351,7 +359,7 @@ class DataStore:
             # -> move to subdirectory
             if not DataStore.is_valid_datastore_label(label):
                 raise InvalidDataStoreLabel(label)
-            if not self.filesystem.exists(label):
+            if not filesystem.exists(label):
                 filesystem.makedirs(label)
             self.filesystem = filesystem.change_dir(label)
             self.label = label
@@ -424,7 +432,7 @@ class DataStore:
             return (fn.startswith('data') and
                     fn.endswith(DataStore.DATA_FILE_EXT))
 
-        new_data_files = [fn for fn in new_files if _is_data_file(fn)]]
+        new_data_files = [fn for fn in new_files if _is_data_file(fn)]
         modified_data_files = [fn for fn in modified_files if _is_data_file(fn)]
         deleted_data_files = [fn for fn in deleted_files if _is_data_file(fn)]
 
@@ -526,9 +534,6 @@ class DataStore:
         else:
             logger.debug('No sheet data to load in %s', data_folder)
         self.filesystem.accept_all_changes(data_folder)
-        else:
-            self.filesystem.makedirs(data_folder)
-            logger.debug('Data folder %s is empty', data_folder)
 
     def delete_all_entries(self):
         self.notifier.notify('pre_clear_data')
