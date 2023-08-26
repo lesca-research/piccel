@@ -116,27 +116,26 @@ class refresh_text:
 
 class Notifier:
 
-    def __init__(self, watchers=None):
-        self.watchers = defaultdict(list)
-        if watchers is not None:
-            self.add_watchers(watchers)
+    def __init__(self, notifications=None):
+        self.on_events = defaultdict(list)
+        if notifications is not None:
+            self.add_callbacks(notifications)
 
-    def add_watchers(self, watchers):
-        """ watchers : dict(event : [callables]) """
-        for signal, watcher_list in watchers.items():
-            for watcher in watcher_list:
-                self.add_watcher(signal, watcher)
+    def add_callbacks(self, callbacks):
+        """ callbacks : dict(event : callable]) """
+        for event, callback in callbacks.items():
+                self.add_callback(event, callback)
 
-    def add_watcher(self, event, watcher):
-        self.watchers[event].append(watcher)
+    def add_callback(self, event, callback):
+        self.on_events[event].append(callback)
 
     def notify(self, event, *args, **kwargs):
-        for watcher in self.watchers[event]:
+        for on_event in self.on_events[event]:
             try:
-                watcher(*args, **kwargs)
+                on_event(*args, **kwargs)
             except Exception as e:
                 logger.error('Error during notification of event %s, ' \
-                             'while calling %s', event, watcher)
+                             'while calling %s', event, on_event)
                 logger.error(format_exc())
                 raise e
 
