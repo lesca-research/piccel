@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from itertools import product
+from itertools import product, chain
 from datetime import datetime, date, timezone
 from copy import deepcopy
 from pathlib import PurePath
@@ -504,31 +504,44 @@ class DataStore:
 
         def _load_entry(data_fn):
             content = json.loads(self.filesystem.load(data_fn))
-            # TODO unpack comment, user, ts
             entry_dfs = {k:self.df_from_str(df_content)
-                         for k,df_content in content.items()}
+                         for k, df_content in content.items()}
             entry_dfs['value']['__fn__'] = data_fn
             self.merge_df(entry_dfs) # will notify added_entries
 
-        for del_fn in deleted_data_files:
-            to_delete = self.df.index[self.df['__fn__'] == del_fn]
-            self.df = self.df.drop(index=to_delete)
-            self.notifier.notify('deleted_entries', to_delete)
+        to_delete = set()
+        for del_fn in chain(deleted_data_files, modified_data_files):
+            m_delete = self.dfs['value']['__fn__'] == del_fn
+            to_delete.update(to_self.dfs['value'].index[m_delete])
+        for df_label, df in self.dfs:
+            self.dfs[df_label] = df.drop(index=to_delete)
+        self.notifier.notify('deleted_entries', to_delete)
 
-        for mod_fn in modified_data_files:
-            to_reload = self.df.index[self.df['__fn__'] == mod_fn]
-            self.df = self.df.drop(index=to_reload)
-            self.notifier.notify('deleted_entries', to_reload)
-            _load_entry(mod_fn)
+        entry_dfs = defaultdict(list)
+        for data_fn in chain(modified_data_files, new_data_files):
+            content = json.loads(self.filesystem.load(data_fn))
+            for k in self.dfs.keys():
+                entry_df = self.df_from_str(content[k])
+                if k == 'value':
+                    entry_dfs[k]['__fn__'] = data_fn
+                entry_dfs[k].append(entry_df)
 
-        for new_fn in new_data_files:
-            _load_entry(new_fn)
-
+        entry_dfs = {k:pd.concat(dfs) for k,dfs in entry_dfs.items()}
         self.filesystem.accept_all_changes('data')
 
-    def merge_df(self, other_df):
-        if other_df.index.names != DataStore.TRACKING_INDEX_LEVELS:
-            raise Exception()
+    def merge_df(self, other_dfs):
+        """
+        other_dfs: dict(label : panda.DataFrame)
+        where labels are 'value_df', 'comment_df', 'user_df', 'timestamp_df'
+        """
+        for df in other_dfs.values():
+            if df.index.names != DataStore.TRACKING_INDEX_LEVELS:
+                raise Exception('Can only merge df with tracking index')
+
+        for df_label, df in self.dfs.items():
+            self.dfs[df_label] = pd.concat((self.dfs[df_label],
+                                            other_dfs[df_label]))
+        self.check_data_consistency()
         
     def push_records(self, records):
         return [(0, 0, 0)] # stub
@@ -552,20 +565,38 @@ class DataStore:
         self.push_df(value_df, comment_df, user_df, timestamp_df)
 
     def push_df(self, value_df, comment_df, user_df, timestamp_df):
-        dfs = {'value_df' : value_df,
-               'comment_df' : comment_df,
-               'user_df' : user_df,
-               'timestamp_df' : timestamp_df}
-        if not set(DataStore.TRACKING_INDEX_LEVELS).issubset(value_df.columns):
+        dfs = {'value' : value_df,
+               'comment' : comment_df,
+               'user' : user_df,
+               'timestamp' : timestamp_df}
+        t_levels = DataStore.TRACKING_INDEX_LEVELS
+        if not set(t_levels).issubset(value_df.columns):
             index_variables = [v for v in self.variables if v.is_index()]
             if len(index_variables) > 0:
-                index_to_update = ...
-                index_new = ...
+                value_df = value_df.set_index(index_variables)
+                main_df = self.dfs['value'].set_index(index_variables)
+                to_update = value_df.index.intersection(main_df.index)
+                value_df = pd.concat(
+                    (value_df.loc[to_update],
+                     main_df.loc[to_update][t_levels]), axis=1)
+                # TODO increment version indices
+                new = value_df.index.difference(main_df.index)
+                new_ids = pd.DataFrame(
+                    [(self.new_entry_id(), 0, 0) for _ in new],
+                    names=DataStore.TRACKING_INDEX_LEVELS) #TODO fix to get df
+                pd.concat((value_df.loc[new], new_ids), axis=1)))
+                value_df = pd.concat(
+                    (value_df,
+                     pd.concat((value_df.loc[new],
+                                new_entry_ids), axis=1)))
             else:
-                index_new = pd.MultiIndex.from_tuples(
+                new_ids = pd.DataFrame(
                     [(self.new_entry_id(), 0, 0) for _ in value_df.index],
                     names=DataStore.TRACKING_INDEX_LEVELS)
-            
+
+                value_df = pd.concat((value_df,
+                                      new_entry_ids), axis=1)))
+                
             # apply index change to comment, user, ts
         else:
             for k, df in dfs.items():
@@ -573,7 +604,7 @@ class DataStore:
 
         idx = self.merge_df(dfs)
         data_fn = self.save_entry(dfs)
-        self.df.loc[idx, '__fn__'] = data_fn
+        self.dfs['value'].loc[idx, '__fn__'] = data_fn
 
     def delete_all_entries(self):
         self.notifier.notify('pre_clear_data')
@@ -740,20 +771,6 @@ class DataStore:
             is_valid &= self.annotation_ds.validate_dtypes()
 
         return is_valid
-
-    def push(self, value_df, comment_df=None, flags_df=None):
-        self._push(value_df,
-                   null_df_if_none(comment_df, value_df),
-                   null_df_if_none(flags_df, value_df))
-
-    def _push(self, value_df, comment_df, flags_dfs):
-        """
-        ASSUME: all dfs have same index & columns
-        ASSUME: flags_dfs has all flags
-        """
-        # TODO: make df with user + timestamp
-        # Arrange tracking index
-        pass
 
     def full_df(self, view='value'):
         return pd.DataFrame() # stub
