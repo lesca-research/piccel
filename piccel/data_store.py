@@ -564,6 +564,17 @@ class DataStore:
 
         self.push_df(value_df, comment_df, user_df, timestamp_df)
 
+    @classmethod
+    def new_tracking_ids(cls, size):
+        new_ids = pd.DataFrame({
+            t_levels[0] : [self.new_entry_id() for _ in range(size)],
+            t_levels[1] : [0] * size,
+            t_levels[2] : [0] * size
+        })
+        for col in DataStore.TRACKING_INDEX_LEVELS:
+            new_ids[col] = new_ids[col].astype(np.int64)
+        return new_ids
+
     def push_df(self, value_df, comment_df, user_df, timestamp_df):
         dfs = {'value' : value_df,
                'comment' : comment_df,
@@ -576,28 +587,22 @@ class DataStore:
                 value_df = value_df.set_index(index_variables)
                 main_df = self.dfs['value'].set_index(index_variables)
                 to_update = value_df.index.intersection(main_df.index)
+                # TODO loop over all dfs (comment, user, ts)
                 value_df = pd.concat(
                     (value_df.loc[to_update],
                      main_df.loc[to_update][t_levels]), axis=1)
                 # TODO increment version indices
                 new = value_df.index.difference(main_df.index)
-                new_ids = pd.DataFrame(
-                    [(self.new_entry_id(), 0, 0) for _ in new],
-                    names=DataStore.TRACKING_INDEX_LEVELS) #TODO fix to get df
-                pd.concat((value_df.loc[new], new_ids), axis=1)))
                 value_df = pd.concat(
                     (value_df,
                      pd.concat((value_df.loc[new],
-                                new_entry_ids), axis=1)))
+                                DataStore.new_tracking_ids(len(new)), axis=1)))
+                )
             else:
-                new_ids = pd.DataFrame(
-                    [(self.new_entry_id(), 0, 0) for _ in value_df.index],
-                    names=DataStore.TRACKING_INDEX_LEVELS)
-
+                # TODO loop over all dfs (comment, user, ts)
                 value_df = pd.concat((value_df,
-                                      new_entry_ids), axis=1)))
-                
-            # apply index change to comment, user, ts
+                                      DataStore.new_tracking_ids(len_new)),
+                                     axis=1)))
         else:
             for k, df in dfs.items():
                 dfs[k] = df.set_index(DataStore.TRACKING_INDEX_LEVELS)
