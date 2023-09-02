@@ -371,7 +371,7 @@ class DataStore:
     # 'pushed_annotation'
 
     TRACKING_INDEX_LEVELS = ['__entry_id__',
-                             '__update_idx__',
+                             '__version_idx__',
                              '__conflict_idx__']
     PRIVATE_COLS = TRACKING_INDEX_LEVELS + ['__fn__']
 
@@ -576,34 +576,53 @@ class DataStore:
         return new_ids
 
     def push_df(self, value_df, comment_df, user_df, timestamp_df):
-        dfs = {'value' : value_df,
-               'comment' : comment_df,
-               'user' : user_df,
-               'timestamp' : timestamp_df}
+        other_dfs = {'value' : value_df,
+                     'comment' : comment_df,
+                     'user' : user_df,
+                     'timestamp' : timestamp_df}
         t_levels = DataStore.TRACKING_INDEX_LEVELS
         if not set(t_levels).issubset(value_df.columns):
             index_variables = [v for v in self.variables if v.is_index()]
             if len(index_variables) > 0:
-                value_df = value_df.set_index(index_variables)
+                other_value_df = value_df.set_index(index_variables)
                 main_df = self.dfs['value'].set_index(index_variables)
-                to_update = value_df.index.intersection(main_df.index)
-                # TODO loop over all dfs (comment, user, ts)
-                value_df = pd.concat(
-                    (value_df.loc[to_update],
-                     main_df.loc[to_update][t_levels]), axis=1)
-                # TODO increment version indices
+                to_update = other_value_df.index.intersection(main_df.index)
+                update_tracking_ids = main_df.loc[to_update][t_levels]
+                update_tracking_ids['__verion_idx__'] = \
+                    update_tracking_ids['__verion_idx__'] + 1
                 new = value_df.index.difference(main_df.index)
-                value_df = pd.concat(
-                    (value_df,
-                     pd.concat((value_df.loc[new],
-                                DataStore.new_tracking_ids(len(new)), axis=1)))
-                )
-            else:
-                # TODO loop over all dfs (comment, user, ts)
-                value_df = pd.concat((value_df,
-                                      DataStore.new_tracking_ids(len_new)),
-                                     axis=1)))
-        else:
+                new_ids = DataStore.new_tracking_ids(len(new))
+                for k, df in other_dfs.items():
+                    df = df.set_index(index_variables)
+                    df = pd.concat((df.loc[to_update], update_tracking_ids),
+                                   axis=1)
+                    df = pd.concat((df,
+                                    pd.concat((df.loc[new], new_ids, axis=1))))
+                    other_dfs[k] = df.set_index(t_levels)
+            else: # pushed df has no entry tracking index and
+                  # there is no index variable
+                new_ids = DataStore.new_tracking_ids(value_df.shape[0])
+                for k, df in other_dfs.items():
+                    df = pd.concat((df, new_ids, axis=1))))
+                    other_dfs[k] = df.set_index(t_levels)
+        else: # pushed df already has entry tracking index
+            other_value_df = value_df.set_index(t_levels)
+            to_update = (other_value_df.index
+                         .intersection(self.dfs['value'].index))
+            # TODO convert index to DataFrame
+            update_tracking_ids = self.dfs['value'].loc[to_update].index
+            update_tracking_ids['__verion_idx__'] = \
+                update_tracking_ids['__verion_idx__'] + 1
+            new = value_df.index.difference(main_df.index)
+            new_ids = DataStore.new_tracking_ids(len(new))
+            for k, df in other_dfs.items():
+                df = df.set_index(t_levels)
+                df = pd.concat((df.loc[to_update], update_tracking_ids),
+                               axis=1)
+                df = pd.concat((df,
+                            pd.concat((df.loc[new], new_ids, axis=1))))
+                other_dfs[k] = df.set_index(t_levels)
+
             for k, df in dfs.items():
                 dfs[k] = df.set_index(DataStore.TRACKING_INDEX_LEVELS)
 
