@@ -150,6 +150,7 @@ class InvalidFlagIndex(Exception): pass
 class LockedVariables(Exception): pass
 class InvalidIndex(Exception): pass
 class VariableChangeError(Exception): pass
+class IndexNotFound(Exception): pass
 
 class Var:
     def __init__(self, var_label, var_type, index_position=None, is_unique=False,
@@ -529,20 +530,53 @@ class DataStore:
         entry_dfs = {k:pd.concat(dfs) for k,dfs in entry_dfs.items()}
         self.filesystem.accept_all_changes('data')
 
-    def merge_df(self, other_dfs):
+    def merge_df(self, other_dfs, check_validity=True):
         """
         other_dfs: dict(label : panda.DataFrame)
-        where labels are 'value_df', 'comment_df', 'user_df', 'timestamp_df'
+        where labels are 'value', 'comment', 'user', 'timestamp'
         """
+
+        # TODO distinguish head and non-head entries in notifications
+        # notify updated full entries, new full entries
+        # notify update head entries, new head entries
         for df in other_dfs.values():
             if df.index.names != DataStore.TRACKING_INDEX_LEVELS:
                 raise Exception('Can only merge df with tracking index')
 
+        # TODO: resolve conflicts
+        conflicting = (other_dfs['value'].index
+                       .intersection(self.dfs['value'].index))
+        # TODO increase conflict_index while sorting by timestamp
+        # TODO update other_dfs.index with fixed conflicts
+        # TODO sort_index
+
+        other_value_df = other_dfs['value']
+        main_value_df = pd.concat((self.dfs[df_label], other_value_df))
+        validity = self.validity(main_value_df)
+        m_invalid = validity.loc[other_value_df.index] != ''
+        other_invalid_index = other_value_df[m_invalid]
+        if len(other_invalid_index) > 0:
+            if self.check_validity:
+                raise InvalidMerge(other_invalid_index)
+            else:
+                # TODO notify invalid entries
+                self.validity = validity
+
         for df_label, df in self.dfs.items():
-            self.dfs[df_label] = pd.concat((self.dfs[df_label],
-                                            other_dfs[df_label]))
-        self.check_data_consistency()
-        
+            if df_label == 'value':
+                self.dfs[df_label] = main_value_df
+            else:
+                self.dfs[df_label] = pd.concat((self.dfs[df_label],
+                                                other_dfs[df_label]))
+        # TODO: notify merge
+
+        # max_ver_idx = max version_idx from other & main
+        # new entry: other_df.ver_idx == max_ver_idx and ver_idx == 0 
+        # new  full-only entry: where other.ver_idx is less than max_ver_idx
+        # updated entry: other.ver_idx == max_version_idx
+        #                and ver_idx greater than 0
+        return other_value_df.index
+
     def push_records(self, records):
         return [(0, 0, 0)] # stub
 
@@ -562,7 +596,7 @@ class DataStore:
         user_df = df_like(value_df, fill_value=if_none(self.user, pd.NA),
                           dtype='string')
 
-        self.push_df(value_df, comment_df, user_df, timestamp_df)
+        return self.push_df(value_df, comment_df, user_df, timestamp_df)
 
     @classmethod
     def new_tracking_ids(cls, size):
@@ -584,7 +618,10 @@ class DataStore:
         if not set(t_levels).issubset(value_df.columns):
             index_variables = [v for v in self.variables if v.is_index()]
             if len(index_variables) > 0:
-                other_value_df = value_df.set_index(index_variables)
+                try:
+                    other_value_df = value_df.set_index(index_variables)
+                except KeyError:
+                    raise IndexNotFound(index_variables)
                 main_df = self.dfs['value'].set_index(index_variables)
                 to_update = other_value_df.index.intersection(main_df.index)
                 update_tracking_ids = main_df.loc[to_update][t_levels]
@@ -598,19 +635,18 @@ class DataStore:
                                    axis=1)
                     df = pd.concat((df,
                                     pd.concat((df.loc[new], new_ids, axis=1))))
-                    other_dfs[k] = df.set_index(t_levels)
+                    other_dfs[k] = df
             else: # pushed df has no entry tracking index and
                   # there is no index variable
                 new_ids = DataStore.new_tracking_ids(value_df.shape[0])
                 for k, df in other_dfs.items():
-                    df = pd.concat((df, new_ids, axis=1))))
-                    other_dfs[k] = df.set_index(t_levels)
+                    other_dfs[k] = pd.concat((df, new_ids, axis=1))))
+
         else: # pushed df already has entry tracking index
             other_value_df = value_df.set_index(t_levels)
             to_update = (other_value_df.index
                          .intersection(self.dfs['value'].index))
-            # TODO convert index to DataFrame
-            update_tracking_ids = self.dfs['value'].loc[to_update].index
+            update_tracking_ids = self.dfs['value'].loc[to_update].index.to_frame()
             update_tracking_ids['__verion_idx__'] = \
                 update_tracking_ids['__verion_idx__'] + 1
             new = value_df.index.difference(main_df.index)
@@ -620,16 +656,16 @@ class DataStore:
                 df = pd.concat((df.loc[to_update], update_tracking_ids),
                                axis=1)
                 df = pd.concat((df,
-                            pd.concat((df.loc[new], new_ids, axis=1))))
-                other_dfs[k] = df.set_index(t_levels)
+                                pd.concat((df.loc[new], new_ids, axis=1))))
 
-            for k, df in dfs.items():
-                dfs[k] = df.set_index(DataStore.TRACKING_INDEX_LEVELS)
+        for k, df in other_dfs.items():
+            other_dfs[k] = df.set_index(t_levels)
 
-        idx = self.merge_df(dfs)
+        tracking_index = self.merge_df(dfs)
         data_fn = self.save_entry(dfs)
         self.dfs['value'].loc[idx, '__fn__'] = data_fn
 
+        return tracking_index
     def delete_all_entries(self):
         self.notifier.notify('pre_clear_data')
         self.df = self.df.drop(self.df.index)
@@ -944,7 +980,7 @@ class TestDataStore(TestCase):
 
         ds1.set_user('me')
         ds1.push_variable('v1', 'string')
-        tidx1 = ds1.push_records({'v1' : 'test'})
+        tidx1 = ds1.push_record({'v1' : 'test'})
         tidx2 = ds1.push_record({'v1' : 'other test'})
         ds2.refresh()
 
@@ -1002,7 +1038,7 @@ class TestDataStore(TestCase):
         ds = DataStore(self.filesystem, 'test_ds')
         ds.set_user('me')
         ds.push_variable('v1', 'string')
-        ds.push_records({'v1' : 'test'})
+        ds.push_record({'v1' : 'test'})
         tidx = ds.push_record({'v1' : 'other test'})
 
         assert_frame_equal(ds.head_df().reset_index(drop=True),
