@@ -572,7 +572,7 @@ class DataStore:
 
         # max_ver_idx = max version_idx from other & main
         # new entry: other_df.ver_idx == max_ver_idx and ver_idx == 0 
-        # new  full-only entry: where other.ver_idx is less than max_ver_idx
+        # new full-only entry: where other.ver_idx is less than max_ver_idx
         # updated entry: other.ver_idx == max_version_idx
         #                and ver_idx greater than 0
         return other_value_df.index
