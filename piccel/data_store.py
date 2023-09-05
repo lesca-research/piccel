@@ -286,6 +286,8 @@ class PersistentLogic:
     def __init__(self, parent_store):
 
         # TODO pass code validation function
+        # TODO adapt notifications and process updates/new entries
+        #      see merge_df
         self.store = DataStore(parent_store.filesystem,
                                label=parent_store.label + '_code', 
                                variables=PersistentLogic.STORE_VARS,
@@ -368,6 +370,7 @@ class DataStoreLogger(logging.LoggerAdapter):
 class DataStore:
 
     # nofitications:
+    # TODO adapt see merge_df
     # 'pushed_entry', 'deleted_entry', 'variables_changed', 'flags_changed'
     # 'pushed_annotation'
 
@@ -451,6 +454,7 @@ class DataStore:
         self.flag_ds = None
         self.note_ds = None
         if use_annotations:
+            # TODO adapt notifications
             self.flag_defs_ds = DataStore(self.filesystem,
                                           label=self.label + '_flag_defs',
                                           variables=DataStore.FLAG_DEF_VARS,
@@ -536,14 +540,10 @@ class DataStore:
         where labels are 'value', 'comment', 'user', 'timestamp'
         """
 
-        # TODO distinguish head and non-head entries in notifications
-        # notify updated full entries, new full entries
-        # notify update head entries, new head entries
         for df in other_dfs.values():
             if df.index.names != DataStore.TRACKING_INDEX_LEVELS:
                 raise Exception('Can only merge df with tracking index')
 
-        # TODO: resolve conflicts
         conflicting = (other_dfs['value'].index
                        .intersection(self.dfs['value'].index))
         # TODO increase conflict_index while sorting by timestamp
@@ -578,7 +578,19 @@ class DataStore:
         return other_value_df.index
 
     def push_records(self, records):
-        return [(0, 0, 0)] # stub
+        all_records = {}
+        for record in records:
+            for k in record:
+                if k not in all_records:
+                    all_records[k] = []
+        
+        for record in records:
+            for k in all_records:
+                if k in record:
+                    all_records[k].append(record[k])
+                else:
+                    all_records[k].append(None)
+        return self.push_record(all_records)
 
     def push_record(self, record, comment=None, tracking_index=None,
                     timestamp=None):
@@ -638,6 +650,7 @@ class DataStore:
                     other_dfs[k] = df
             else: # pushed df has no entry tracking index and
                   # there is no index variable
+                  # all pushed entries are considered new
                 new_ids = DataStore.new_tracking_ids(value_df.shape[0])
                 for k, df in other_dfs.items():
                     other_dfs[k] = pd.concat((df, new_ids, axis=1))))
@@ -646,7 +659,8 @@ class DataStore:
             other_value_df = value_df.set_index(t_levels)
             to_update = (other_value_df.index
                          .intersection(self.dfs['value'].index))
-            update_tracking_ids = self.dfs['value'].loc[to_update].index.to_frame()
+            update_tracking_ids = (self.dfs['value'].loc[to_update]
+                                   .index.to_frame())
             update_tracking_ids['__verion_idx__'] = \
                 update_tracking_ids['__verion_idx__'] + 1
             new = value_df.index.difference(main_df.index)
@@ -657,15 +671,16 @@ class DataStore:
                                axis=1)
                 df = pd.concat((df,
                                 pd.concat((df.loc[new], new_ids, axis=1))))
+                other_dfs[k] = df
 
         for k, df in other_dfs.items():
             other_dfs[k] = df.set_index(t_levels)
 
         tracking_index = self.merge_df(dfs)
         data_fn = self.save_entry(dfs)
-        self.dfs['value'].loc[idx, '__fn__'] = data_fn
-
+        self.dfs['value'].loc[tracking_index, '__fn__'] = data_fn
         return tracking_index
+
     def delete_all_entries(self):
         self.notifier.notify('pre_clear_data')
         self.df = self.df.drop(self.df.index)
