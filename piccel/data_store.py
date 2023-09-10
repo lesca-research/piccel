@@ -1,26 +1,26 @@
 # -*- coding: utf-8 -*-
-
 from itertools import product, chain
 from datetime import datetime, date, timezone
 from copy import deepcopy
+from collections import defaultdict
 from pathlib import PurePath
+import tempfile
+import logging
 
 import numpy as np
 import pandas as pd
 from pandas.testing import assert_frame_equal, assert_series_equal
 
 from .core import if_none, Notifier
-import logging
+from .io.filesystem import LocalFileSystem
 from .logging import logger, debug2, debug3
 
-import tempfile
 from pyfakefs.fake_filesystem_unittest import TestCase
 #from unittest import TestCase
-from .io.filesystem import LocalFileSystem
 
 DATE_FORMAT = '%Y-%m-%d'
 QDATE_FORMAT = 'yyyy-MM-dd'
-DATETIME_FORMAT = '%Y-%m-%d %H:%M:%S.%f'
+DATETIME_FORMAT = '%Y-%m-%d %H:%M:%S.%f' # TODO handle timezone?
 
 def unformat_boolean(s):
     if s == 'True':
@@ -91,7 +91,8 @@ VTYPES = {
         'validate_dtype_pd' : pd.api.types.is_float_dtype,
         'null_value' : 0.0,
         'na_value' : np.nan,
-        'corner_cases' : {'0':0, '0.0':0, '-1.4':-1.4, '3.141592653589793':np.pi},
+        'corner_cases' : {'0':0, '0.0':0, '-1.4':-1.4,
+                          '3.141592653589793':np.pi},
         'bad_format_cases' : ['False', 'true', 'text', 'np.pi'],
     },
     'date' : {
@@ -109,7 +110,7 @@ VTYPES = {
         'unformat' : lambda s : datetime.fromisoformat(s),
         'format' : lambda d : d.isoformat(),
         'validate_dtype_pd' : pd.api.types.is_datetime64_dtype,
-        'null_value' : datetime.now().astimezone(),
+        'null_value' : datetime.now(),
         'na_value' : pd.NaT,
         'corner_cases' : {'2011-11-04 00:05:23.283+00:00':
                           datetime(2011, 11, 4, 0, 5, 23, 283000,
@@ -217,7 +218,7 @@ class PersistentVariables:
                                use_annotations=False,
                                validate_entry=self.validate_entry,
                                notifications={'pushed_entry' :
-                                              parent_store.on_pushed_variable})
+                                              parent_store.change_variable_def})
 
     def __iter__(self):
         return (Var(idx, **row) for idx, row in self.store.head_df().iterrows())
@@ -379,6 +380,8 @@ class DataStore:
                              '__conflict_idx__']
     PRIVATE_COLS = TRACKING_INDEX_LEVELS + ['__fn__']
 
+    DATA_LABELS = ('value', 'timestamp', 'user', 'comment')
+
     FLAG_DEF_VARS = [
         Var('flag_index', 'flag_index', index_position=0, nullable=False),
         Var('flag_label', 'string', is_unique=True),
@@ -440,14 +443,20 @@ class DataStore:
 
         self.notifier = Notifier(notifications)
 
-        self.df = pd.DataFrame(columns=DataStore.PRIVATE_COLS)
-        for col in DataStore.TRACKING_INDEX_LEVELS:
-            self.df[col] = self.df[col].astype(np.int64)
-        self.df['__fn__'] = self.df['__fn__'].astype('string')
-        self.df = self.df.set_index(DataStore.TRACKING_INDEX_LEVELS)
+        self.dfs = {}
+        for label in DataStore.DATA_LABELS:
+            df = pd.DataFrame(columns=DataStore.PRIVATE_COLS)
+            for col in DataStore.TRACKING_INDEX_LEVELS:
+                df[col] = df[col].astype(np.int64)
+            if label == 'value':
+                df['__fn__'] = df['__fn__'].astype('string')
+            df = df.set_index(DataStore.TRACKING_INDEX_LEVELS)
+            self.dfs[label] = df
 
         if variables is not None:
             self.variables = FixedVariables(variables)
+            self.change_variable_def([(None, variable)
+                                      for variable.asdict() in self.variables])
         else:
             self.variables = PersistentVariables(self)
 
@@ -495,9 +504,12 @@ class DataStore:
     def _refresh_data(self):
         modified_files, new_files, deleted_files = \
             self.filesystem.external_changes()
-        self.logger.debug('Files externally added: %s', new_files)
-        self.logger.debug('Files externally modified: %s', modified_files)
-        self.logger.debug('Files externally deleted: %s', deleted_files)
+        if len(new_files) != 0:
+            self.logger.debug('Files externally added: %s', new_files)
+        if len(modified_files) != 0:
+            self.logger.debug('Files externally modified: %s', modified_files)
+        if len(deleted_files) != 0:
+            self.logger.debug('Files externally deleted: %s', deleted_files)
 
         def _is_data_file(fn):
             return (fn.startswith('data') and
@@ -518,7 +530,7 @@ class DataStore:
         for del_fn in chain(deleted_data_files, modified_data_files):
             m_delete = self.dfs['value']['__fn__'] == del_fn
             to_delete.update(to_self.dfs['value'].index[m_delete])
-        for df_label, df in self.dfs:
+        for df_label, df in self.dfs.items():
             self.dfs[df_label] = df.drop(index=to_delete)
         self.notifier.notify('deleted_entries', to_delete)
 
@@ -544,15 +556,53 @@ class DataStore:
             if df.index.names != DataStore.TRACKING_INDEX_LEVELS:
                 raise Exception('Can only merge df with tracking index')
 
-        conflicting = (other_dfs['value'].index
-                       .intersection(self.dfs['value'].index))
-        # TODO increase conflict_index while sorting by timestamp
-        # TODO update other_dfs.index with fixed conflicts
-        # TODO sort_index
+        main_value_df = self.dfs['value'].copy()
+        main_value_df['indices'] = np.arange(main_value_df.shape[0],
+                                             dtype=int)
+        main_index = main_value_df.index.to_numpy()
 
-        other_value_df = other_dfs['value']
-        main_value_df = pd.concat((self.dfs[df_label], other_value_df))
-        validity = self.validity(main_value_df)
+        conflicting = (other_dfs['value'].index
+                       .intersection(main_value_df.index)
+                       .to_frame())
+        done = set()
+        other_value_df = other_dfs['value'].copy()
+        other_value_df['indices'] = np.arange(other_value_df.shape[0],
+                                              dtype=int)
+        other_index = other_value_df.index.to_numpy()
+        for eid, vidx, cidx in conflicting:
+            if (eid, vidx) not in done:
+                done.add((eid, vidx))
+                o = (other_value_df.loc[(eid, vidx)].__timestamp__
+                     .reset_index())
+                o['origin'] = 'other'
+                o['__entry_id__'] = eid
+                o['__version_idx__'] = vid
+                
+                m = (main_value_df.loc[(eid, vidx)].__timestamp__
+                     .reset_index())
+                m['origin'] = 'main'
+                m['__entry_id__'] = eid
+                m['__version_idx__'] = vid
+                
+                om = pd.concat((o, m)).sort_values(by=['__timestamp__'])
+                om['__conflict_idx__'] = np.arange(om.shape[0],
+                                                   dtype=np.int64)
+                om = om.set_index(DataStore.TRACKING_INDEX_LEVELS)
+
+                om_other = om[om.origin == 'other']
+                other_index[(om_other.indices,)] = \
+                    om_other.index
+
+                om_main = om[om.origin == 'main']
+                main_index[(om_main.indices,)] = \
+                    om_main.index
+
+        other_value_df.index = pd.MultiIndex.from_tuples(other_index)
+                   
+        main_value_df.index = pd.MultiIndex.from_tuples(main_index)
+
+        merged_value_df = pd.concat((main_value_df, other_value_df))
+        validity = self.validity(merged_value_df)
         m_invalid = validity.loc[other_value_df.index] != ''
         other_invalid_index = other_value_df[m_invalid]
         if len(other_invalid_index) > 0:
@@ -562,12 +612,17 @@ class DataStore:
                 # TODO notify invalid entries
                 self.validity = validity
 
-        for df_label, df in self.dfs.items():
+        for df_label in self.dfs:
             if df_label == 'value':
-                self.dfs[df_label] = main_value_df
+                self.dfs[df_label] = merged_value_df
             else:
-                self.dfs[df_label] = pd.concat((self.dfs[df_label],
-                                                other_dfs[df_label]))
+                main_df = self.dfs[df_label]
+                main_df.index = main_value_df.index
+
+                other_df = other_dfs[df_label]
+                other_df.index = other_value_df.index
+                self.dfs[df_label] = pd.concat((main_df, other_df))
+
         # TODO: notify merge
 
         # max_ver_idx = max version_idx from other & main
@@ -576,6 +631,14 @@ class DataStore:
         # updated entry: other.ver_idx == max_version_idx
         #                and ver_idx greater than 0
         return other_value_df.index
+
+
+    def validity(self, df):
+        # TODO check uniqueness of index variables
+        # TODO check dtypes
+        # TODO check uniques
+        # TODO check nullables
+        pass
 
     def push_records(self, records):
         all_records = {}
@@ -602,8 +665,9 @@ class DataStore:
 
         timestamp_df = df_like(value_df,
                                fill_value=if_none(timestamp,
-                                                  datetime.now().astimezone()),
+                                                  datetime.now()),
                                dtype='datetime64[ns]')
+        #TODO: handle timezone?
 
         user_df = df_like(value_df, fill_value=if_none(self.user, pd.NA),
                           dtype='string')
@@ -628,7 +692,8 @@ class DataStore:
                      'timestamp' : timestamp_df}
         t_levels = DataStore.TRACKING_INDEX_LEVELS
         if not set(t_levels).issubset(value_df.columns):
-            index_variables = [v for v in self.variables if v.is_index()]
+            index_variables = [v.var_label for v in self.variables
+                               if v.is_index()]
             if len(index_variables) > 0:
                 try:
                     other_value_df = value_df.set_index(index_variables)
@@ -646,14 +711,15 @@ class DataStore:
                     df = pd.concat((df.loc[to_update], update_tracking_ids),
                                    axis=1)
                     df = pd.concat((df,
-                                    pd.concat((df.loc[new], new_ids, axis=1))))
+                                    pd.concat((df.loc[new], new_ids),
+                                              axis=1)))
                     other_dfs[k] = df
             else: # pushed df has no entry tracking index and
                   # there is no index variable
                   # all pushed entries are considered new
                 new_ids = DataStore.new_tracking_ids(value_df.shape[0])
                 for k, df in other_dfs.items():
-                    other_dfs[k] = pd.concat((df, new_ids, axis=1))))
+                    other_dfs[k] = pd.concat((df, new_ids), axis=1)
 
         else: # pushed df already has entry tracking index
             other_value_df = value_df.set_index(t_levels)
@@ -670,7 +736,8 @@ class DataStore:
                 df = pd.concat((df.loc[to_update], update_tracking_ids),
                                axis=1)
                 df = pd.concat((df,
-                                pd.concat((df.loc[new], new_ids, axis=1))))
+                                pd.concat((df.loc[new], new_ids),
+                                          axis=1)))
                 other_dfs[k] = df
 
         for k, df in other_dfs.items():
@@ -695,10 +762,11 @@ class DataStore:
             self.note_ds.refresh()
         self._refresh_data()
 
-    def on_pushed_variable(self, changes):
+    def change_variable_def(self, changes):
         # ASSUME validation has been done before push
         for var_old, var_new in changes:
             if var_old is not None:
+                # TODO adapt with self.dfs
                 label_old = var_old['var_label']
                 if var_new is not None: # modified variable
                     label_new = var_new['var_label']
@@ -752,12 +820,18 @@ class DataStore:
             else: # new variable
                 vlabel = var_new['var_label'] 
                 tdef = VTYPES[var_new['var_type']]
-                if var_new['nullable']:
-                    fill_value = pd.na
+                for d_label, tdef in (('value', VTYPES[var_new['var_type']]),
+                                      ('timestamp', VTYPES['datetime']),
+                                      ('user', VTYPES['string']),
+                                      ('comment', VTYPES['string'])):
+                if d_label != 'value' or var_new['nullable']:
+                    fill_value = tdef['na_value']
                 else:
                     fill_value = tdef['null_value']
-                self.df[vlabel] = fill_value
-                self.df[vlabel] = self.df[vlabel].astype(tdef['dtype_pd'])
+                self.dfs[d_label][vlabel] = fill_value
+                self.dfs[d_label][vlabel] = \
+                    self.dfs[d_label][vlabel].astype(tdef['dtype_pd'])
+
                 self.notifier.notify('column_added', vlabel)
 
             self.invalidate_cached_views()
@@ -800,7 +874,15 @@ class DataStore:
     def push_variable(self, var_label, var_type, nullable=True,
                       index_position=None, is_unique=False, is_used=True,
                       column_position=None):
-        return self.variables.store.push_record({}) # stub
+        return self.variables.store.push_record({
+            'var_label' : var_label,
+            'var_type' : var_type,
+            'nullable' : nullable,
+            'index_position' : index_position,
+            'is_unique' : is_unique,
+            'is_used' : is_used,
+            'column_position' : column_position,
+        })
 
     def invalid_entries(self):
         return []
