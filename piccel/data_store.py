@@ -218,7 +218,7 @@ class PersistentVariables:
                                use_annotations=False,
                                validate_entry=self.validate_entry,
                                notifications={'pushed_entry' :
-                                              parent_store.change_variable_def})
+                                              parent_store.on_variable_changes})
 
     def __iter__(self):
         return (Var(idx, **row) for idx, row in self.store.head_df().iterrows())
@@ -455,7 +455,7 @@ class DataStore:
 
         if variables is not None:
             self.variables = FixedVariables(variables)
-            self.change_variable_def([(None, variable)
+            self.on_variable_changes([(None, variable)
                                       for variable.asdict() in self.variables])
         else:
             self.variables = PersistentVariables(self)
@@ -762,8 +762,12 @@ class DataStore:
             self.note_ds.refresh()
         self._refresh_data()
 
-    def change_variable_def(self, changes):
+    def on_variable_changes(self, changes):
         # ASSUME validation has been done before push
+
+        if len(changes) != 0:
+            self.invalidate_cached_views() # do it before notifications because
+                                           # notifiees can request updated views
         for var_old, var_new in changes:
             if var_old is not None:
                 # TODO adapt with self.dfs
@@ -772,27 +776,31 @@ class DataStore:
                     label_new = var_new['var_label']
 
                     if label_old != label_new:
-                        self.df = self.df.rename({label_old : label_new})
+                        for dlabel, df in self.dfs.items():
+                            self.dfs[dlabel] = df.rename({label_old : label_new})
                         self.notifier.notify('column_renamed', label_old,
                                              label_new)
 
                     if var_old['var_type'] != var_new['var_type']:
                         dtype_new = VTYPES[var_new['var_new']]['dtype_pd']
-                        self.df[label_new] = (self.df[label_new]
-                                              .astype(dtype_new))
+                        for dlabel, df in self.dfs.items():
+                            self.dfs[dlabel][label_new] = (df[label_new]
+                                                           .astype(dtype_new))
                         self.notifier.notify('column_values_changed', label_new)
 
                     if var_old['nullable'] and not var_new['nullable']:
-                        nans = pd.isna(self.df[label_new])
+                        nans = pd.isna(self.dfs['value'][label_new])
                         if nans.any():
                             na_fill = VTYPES[var_new['var_new']]['null_value']
                             self.log.warning(('%s becomes nullable but has '
                                               '%d NA values. They will be filled '
                                               'with %s'), label_new, na_fill)
-                            self.df[label_new] = (self.df[label_new]
-                                                  .fillna(na_fill))
+                            for dlabel, df in self.dfs.items():
+                                self.dfs[dlabel][label_new] = \
+                                    (df[label_new].fillna(na_fill))
+                            index_changed = self.dfs['value'].index[nans]
                             self.notifier.notify('values_changed',
-                                                 self.df[[label_new]][nans])
+                                                 index_changed, label_new)
 
                     if var_old['index_position'] != var_new['index_position']:
                         if pd.isna(var_new['index_position']):
@@ -802,7 +810,7 @@ class DataStore:
                             self.notifier.notify('head_index_added', label_new)
 
                     if var_old['is_used'] != var_new['is_used']:
-                        if var_new['is_used']:
+                        if not var_new['is_used']:
                             self.notifier.notify('head_column_removed',
                                                  label_new)
                         else:
@@ -815,29 +823,35 @@ class DataStore:
                                              var_old['column_position'],
                                              var_new['column_position'])
                 else: # deleted variable
-                    self.df = self.df.drop(column=[var_old['var_label']])
+                    for dlabel, df in self.dfs.items():
+                        self.dfs[dlabel] = df.drop(column=[var_old['var_label']])
                     self.notifier.notify('column_removed', var_old['var_label'])
             else: # new variable
-                vlabel = var_new['var_label'] 
+                vlabel = var_new['var_label']
                 tdef = VTYPES[var_new['var_type']]
                 for d_label, tdef in (('value', VTYPES[var_new['var_type']]),
                                       ('timestamp', VTYPES['datetime']),
                                       ('user', VTYPES['string']),
                                       ('comment', VTYPES['string'])):
-                if d_label != 'value' or var_new['nullable']:
-                    fill_value = tdef['na_value']
-                else:
-                    fill_value = tdef['null_value']
-                self.dfs[d_label][vlabel] = fill_value
-                self.dfs[d_label][vlabel] = \
-                    self.dfs[d_label][vlabel].astype(tdef['dtype_pd'])
+                    if d_label != 'value' or var_new['nullable']:
+                        fill_value = tdef['na_value']
+                    else:
+                        fill_value = tdef['null_value']
+                    self.dfs[d_label][vlabel] = fill_value
+                    self.dfs[d_label][vlabel] = \
+                        self.dfs[d_label][vlabel].astype(tdef['dtype_pd'])
 
                 self.notifier.notify('column_added', vlabel)
 
-            self.invalidate_cached_views()
-
     def invalidate_cached_views(self):
-        raise NotImplementedError()
+        self.logger.debug('invalidate cached views')
+        for view in self.views:
+            self.cached_views[view] = None
+
+            # should be cached_views['__validity__']
+            # self.cached_validity[view] = None
+
+            # self.cached_inconsistent_entries = None
 
     def on_pushed_flag_def(self, flag_entry):
         # TODO actually check if change is worth notifying
