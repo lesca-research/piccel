@@ -557,30 +557,35 @@ class DataStore:
                 raise Exception('Can only merge df with tracking index')
 
         main_value_df = self.dfs['value'].copy()
-        main_value_df['indices'] = np.arange(main_value_df.shape[0],
-                                             dtype=int)
+        main_value_df['__origin_idx__'] = np.arange(main_value_df.shape[0],
+                                                    dtype=int)
+        main_value_df['__timestamp__'] = self.dfs['timestamp'].max()
         main_index = main_value_df.index.to_numpy()
 
+        # Sort out conflicting entries (same entry id and version index)
+        # There can already be some conflicting entries in main
+        # So gather them all, sort by timestamp and reassign conflict indexes
         conflicting = (other_dfs['value'].index
                        .intersection(main_value_df.index)
                        .to_frame())
         done = set()
         other_value_df = other_dfs['value'].copy()
-        other_value_df['indices'] = np.arange(other_value_df.shape[0],
-                                              dtype=int)
+        other_value_df['__origin_idx__'] = np.arange(other_value_df.shape[0],
+                                                     dtype=int)
+        other_value_df['__timestamp__'] = other_dfs['timestamp'].max()
         other_index = other_value_df.index.to_numpy()
         for eid, vidx, cidx in conflicting:
             if (eid, vidx) not in done:
                 done.add((eid, vidx))
                 o = (other_value_df.loc[(eid, vidx)].__timestamp__
                      .reset_index())
-                o['origin'] = 'other'
+                o['__origin__'] = 'other'
                 o['__entry_id__'] = eid
                 o['__version_idx__'] = vid
                 
                 m = (main_value_df.loc[(eid, vidx)].__timestamp__
                      .reset_index())
-                m['origin'] = 'main'
+                m['__origin__'] = 'main'
                 m['__entry_id__'] = eid
                 m['__version_idx__'] = vid
                 
@@ -589,18 +594,21 @@ class DataStore:
                                                    dtype=np.int64)
                 om = om.set_index(DataStore.TRACKING_INDEX_LEVELS)
 
-                om_other = om[om.origin == 'other']
-                other_index[(om_other.indices,)] = \
+                om_other = om[om.__origin__ == 'other']
+                other_index[(om_other.__origin_indices__,)] = \
                     om_other.index
 
-                om_main = om[om.origin == 'main']
-                main_index[(om_main.indices,)] = \
+                om_main = om[om.__origin__ == 'main']
+                main_index[(om_main.__origin_indices__,)] = \
                     om_main.index
 
         other_value_df.index = pd.MultiIndex.from_tuples(other_index)
-                   
         main_value_df.index = pd.MultiIndex.from_tuples(main_index)
 
+        # First try to merge value and see if merged data is valid
+        # if ok, merge eveything
+        
+        # TODO: duplicate head values for all columns in main not in other
         merged_value_df = pd.concat((main_value_df, other_value_df))
         validity = self.validity(merged_value_df)
         m_invalid = validity.loc[other_value_df.index] != ''
@@ -617,10 +625,11 @@ class DataStore:
                 self.dfs[df_label] = merged_value_df
             else:
                 main_df = self.dfs[df_label]
-                main_df.index = main_value_df.index
+                main_df.index = main_value_df.index # propagate fixed conflicts
 
                 other_df = other_dfs[df_label]
-                other_df.index = other_value_df.index
+                other_df.index = other_value_df.index # propagate fixed conflicts
+                # TODO: duplicate head values for all columns in main not in other
                 self.dfs[df_label] = pd.concat((main_df, other_df))
 
         # TODO: notify merge
@@ -848,7 +857,7 @@ class DataStore:
         for view in self.views:
             self.cached_views[view] = None
 
-            # should be cached_views['__validity__']
+            # should be cached_views['__validity__']:
             # self.cached_validity[view] = None
 
             # self.cached_inconsistent_entries = None
