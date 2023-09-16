@@ -204,10 +204,10 @@ class PersistentVariables:
         Var('var_label', 'string', index_position=0),
         Var('var_type', 'variable_type'),
         Var('nullable', 'boolean'),
-        Var('index_position', 'int'),
+        Var('index_position', 'int', is_unique=True),
         Var('is_unique', 'boolean'),
         Var('is_used', 'boolean'),
-        Var('column_position', 'int'),
+        Var('column_position', 'int'), # TODO use float for easier moves
     ]
 
     def __init__(self, parent_store):
@@ -397,10 +397,9 @@ class DataStore:
 
     NOTES_VARIABLES = [
         Var('index_hash', 'int', index_position=0),
-        Var('timestamp', 'datetime', index_position=1),
         Var('index_repr', 'string'),
         Var('variable', 'string'),
-        Var('note', 'int'),
+        Var('note', 'string'),
         Var('archived', 'boolean'),
     ]
 
@@ -444,6 +443,7 @@ class DataStore:
         self.notifier = Notifier(notifications)
 
         self.dfs = {}
+        self.head_dfs = {}
         for label in DataStore.DATA_LABELS:
             df = pd.DataFrame(columns=DataStore.PRIVATE_COLS)
             for col in DataStore.TRACKING_INDEX_LEVELS:
@@ -452,11 +452,12 @@ class DataStore:
                 df['__fn__'] = df['__fn__'].astype('string')
             df = df.set_index(DataStore.TRACKING_INDEX_LEVELS)
             self.dfs[label] = df
-
+            self.head_dfs[label] = None
+            
         if variables is not None:
             self.variables = FixedVariables(variables)
-            self.on_variable_changes([(None, variable)
-                                      for variable.asdict() in self.variables])
+            self.on_variable_changes([(None, variable.asdict())
+                                      for variable in self.variables])
         else:
             self.variables = PersistentVariables(self)
 
@@ -605,10 +606,19 @@ class DataStore:
         other_value_df.index = pd.MultiIndex.from_tuples(other_index)
         main_value_df.index = pd.MultiIndex.from_tuples(main_index)
 
+        # TODO: duplicate head values for all columns in main not in other
+        other_columns = set(other_value_df.columns)
+        if set(self.main_value_df.columns) != other_columns:
+            updating = other_value_df.index[other_value_df.__version_idx__ != 0]
+            before_update = updating.__version_idx__ - 1
+            head_df = self.head_df('value', index=before_update)
+            selected_cols = [c for c in self.main_value_df.columns
+                             if c not in other_columns]
+            other_value_df = pd.concat((other_value_df, head_df[selected_cols]),
+                                       axis=0)
         # First try to merge value and see if merged data is valid
         # if ok, merge eveything
-        
-        # TODO: duplicate head values for all columns in main not in other
+
         merged_value_df = pd.concat((main_value_df, other_value_df))
         validity = self.validity(merged_value_df)
         m_invalid = validity.loc[other_value_df.index] != ''
@@ -637,8 +647,11 @@ class DataStore:
         # max_ver_idx = max version_idx from other & main
         # new entry: other_df.ver_idx == max_ver_idx and ver_idx == 0 
         # new full-only entry: where other.ver_idx is less than max_ver_idx
-        # updated entry: other.ver_idx == max_version_idx
-        #                and ver_idx greater than 0
+        # updated entry: ver_idx greater than 0
+        # updated non-head entry: other.ver_idx less than max_version_idx
+        #                         and ver_idx greater than 0
+        # updated head entry: other.ver_idx == max_version_idx
+        #                     and ver_idx greater than 0
         return other_value_df.index
 
 
@@ -708,11 +721,17 @@ class DataStore:
                     other_value_df = value_df.set_index(index_variables)
                 except KeyError:
                     raise IndexNotFound(index_variables)
-                main_df = self.dfs['value'].set_index(index_variables)
-                to_update = other_value_df.index.intersection(main_df.index)
-                update_tracking_ids = main_df.loc[to_update][t_levels]
-                update_tracking_ids['__verion_idx__'] = \
-                    update_tracking_ids['__verion_idx__'] + 1
+                main_df = self.dfs['value']
+                if self.dfs['value'].shape[0]:
+                    # TODO: hanlde empty main dfs everything
+                    # TODO: fix empty index in init
+                    main_df = main_df.set_index(index_variables)
+                    to_update = other_value_df.index.intersection(main_df.index)
+                    update_tracking_ids = main_df.loc[to_update][t_levels]
+                    update_tracking_ids['__verion_idx__'] = \
+                        update_tracking_ids['__verion_idx__'] + 1
+                else:
+                    to_update = []
                 new = value_df.index.difference(main_df.index)
                 new_ids = DataStore.new_tracking_ids(len(new))
                 for k, df in other_dfs.items():
@@ -779,7 +798,6 @@ class DataStore:
                                            # notifiees can request updated views
         for var_old, var_new in changes:
             if var_old is not None:
-                # TODO adapt with self.dfs
                 label_old = var_old['var_label']
                 if var_new is not None: # modified variable
                     label_new = var_new['var_label']
@@ -854,8 +872,8 @@ class DataStore:
 
     def invalidate_cached_views(self):
         self.logger.debug('invalidate cached views')
-        for view in self.views:
-            self.cached_views[view] = None
+        for dlabel in DataStore.DATA_LABELS:
+            self.head_dfs[dlabel] = None
 
             # should be cached_views['__validity__']:
             # self.cached_validity[view] = None
@@ -1047,7 +1065,6 @@ class TestDataStore(TestCase):
         self._test_push_data()
 
     def test_datafile_multi_entry_deletion(self):
-        # TODO do not check actual files, only check refresh & reload
         ds1 = DataStore(self.filesystem, 'test_ds')
         ds2 = DataStore(self.filesystem)
         ds1.set_user('me')
