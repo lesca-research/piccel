@@ -576,6 +576,7 @@ class DataStore:
         conflicting = (other_dfs['value'].index
                        .intersection(main_value_df.index)
                        .to_frame())
+        from IPython import embed; embed()
         done = set()
         other_value_df = other_dfs['value'].copy()
         other_value_df['__origin_idx__'] = np.arange(other_value_df.shape[0],
@@ -727,88 +728,57 @@ class DataStore:
         return new_ids
 
     def push_df(self, value_df, comment_df, user_df, timestamp_df):
-        other_dfs = {'value' : value_df,
-                     'comment' : comment_df,
-                     'user' : user_df,
-                     'timestamp' : timestamp_df}
         t_levels = DataStore.TRACKING_INDEX_LEVELS
         if not set(t_levels).issubset(value_df.columns):
             index_variables = [v.var_label for v in self.variables
                                if v.is_index()]
             if len(index_variables) > 0:
                 try:
-                    other_value_df = value_df.set_index(index_variables)
+                    value_df = value_df.set_index(index_variables)
                 except KeyError:
                     raise IndexNotFound(index_variables)
-                main_df = self.dfs['value']
-                if self.dfs['value'].shape[0] != 0:
-                    # TODO: hanlde empty main dfs everywhere
-                    # TODO: fix empty index in init
-                    main_df = main_df.set_index(index_variables)
-                    # to_update = other_value_df.index.intersection(main_df.index)
-                    # update_tracking_ids = main_df.loc[to_update][t_levels]
-                    # update_tracking_ids['__verion_idx__'] = \
-                    #     update_tracking_ids['__verion_idx__'] + 1
-                    # new = other_value_df.index.difference(main_df.index)
-
-                    other_value_df = other_value_df.join(main_df[t_levels])
-                    other_value_df['__verion_idx__'] = \
-                        other_value_df['__verion_idx__'] + 1
+                main_df = self.dfs['value'].set_index(index_variables)
+                # Resolve entries that are updates of existing ones
+                if main_df.shape[0] != 0:
+                    value_df = value_df.join(main_df[t_levels])
+                    value_df['__version_idx__'] = value_df['__version_idx__'] + 1
                 else:
-                    other_value_df[t_levels] = pd.NA
-                    # to_update = []
-                    # new = other_value_df.index
-
-                m_new = pd.isna(other_value_df.__entry_id__)
-                other_value_df[m_new, '__entry_id__'] = \
-                    self.new_tracking_ids(m_new.sum())
-                other_value_df[m_new, '__version_idx__'] = 0
-                other_value_df[m_new, '__conflict_idx__'] = 0
-                for col in t_levels:
-                    other_value_df[col] = other_value_df[col].astype(np.int64)
-
-                    # df = df.set_index(index_variables)
-                    # if len(to_update) != 0:
-                    #     df = pd.concat((df.loc[to_update], update_tracking_ids),
-                    #                    axis=1)
-                    # try:
-                    #     df = pd.concat((df, pd.concat((df.loc[new], new_ids),
-                    #                                   axis=1)))
-                    # except:
-                    #     from IPython import embed; embed()
+                    value_df['__entry_id__'] = pd.NA
+                    value_df['__version_idx__'] = pd.NA
+                    value_df['__conflict_idx__'] = pd.NA
                     
+                m_new = pd.isna(value_df.__entry_id__)
+                value_df.loc[m_new, '__entry_id__'] = \
+                    [self.new_entry_id() for _ in range(m_new.sum())]
+                value_df.loc[m_new, '__version_idx__'] = 0
+                value_df.loc[m_new, '__conflict_idx__'] = 0
+                for col in t_levels:
+                    value_df[col] = value_df[col].astype(np.int64)
 
             else: # pushed df has no entry tracking index and
                   # there is no index variable
                   # all pushed entries are considered new
-                new_ids = self.new_tracking_ids(value_df.shape[0])
-                for k, df in other_dfs.items():
-                    other_dfs[k] = pd.concat((df, new_ids), axis=1)
+                value_df['__entry_id__'] = \
+                    [self.new_entry_id() for _ in range(value_df.shape[0])]
+                value_df['__version_idx__'] = 0
+                value_df['__conflict_idx__'] = 0
 
         else: # pushed df already has entry tracking index
-            other_value_df = value_df.set_index(t_levels)
-            to_update = (other_value_df.index
-                         .intersection(self.dfs['value'].index))
-            update_tracking_ids = (self.dfs['value'].loc[to_update]
-                                   .index.to_frame())
-            update_tracking_ids['__verion_idx__'] = \
-                update_tracking_ids['__verion_idx__'] + 1
-            new = value_df.index.difference(main_df.index)
-            new_ids = DataStore.new_tracking_ids(len(new))
-            for k, df in other_dfs.items():
-                df = df.set_index(t_levels)
-                df = pd.concat((df.loc[to_update], update_tracking_ids),
-                               axis=1)
-                df = pd.concat((df,
-                                pd.concat((df.loc[new], new_ids),
-                                          axis=1)))
-                other_dfs[k] = df
+              # TODO: utest push from previous version
+            m_update = (self.dfs['value'].index.isin(value_df[t_levels]))
+            value_df.loc[m_update, '__verion_idx__'] = \
+                value_df.loc[m_update, '__verion_idx__'] + 1
 
-        for k, df in other_dfs.items():
-            if k != 'value':
-                df[t_levels] = other_value_df[t_levels]
-            other_dfs[k] = df.set_index(t_levels)
-
+        comment_df[t_levels] = value_df[t_levels]
+        user_df[t_levels] = value_df[t_levels]
+        timestamp_df[t_levels] = value_df[t_levels]
+        
+        other_dfs = {
+            'value' : value_df.set_index(t_levels),
+            'comment' : comment_df.set_index(t_levels),
+            'user' : user_df.set_index(t_levels),
+            'timestamp' : timestamp_df.set_index(t_levels),
+        }
         tracking_index = self.import_df(other_dfs)
         data_fn = self.save_entry(other_dfs)
         self.dfs['value'].loc[tracking_index, '__fn__'] = data_fn
