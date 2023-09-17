@@ -7,6 +7,10 @@ from pathlib import PurePath
 import tempfile
 import logging
 
+# UUID1: MAC addr + current timestamp with nanosec precision
+# UUID4: 122 bytes random number
+from uuid import uuid1, uuid4
+
 import numpy as np
 import pandas as pd
 from pandas.testing import assert_frame_equal, assert_series_equal
@@ -277,6 +281,7 @@ def df_like(df, fill_value=pd.NA, dtype=None):
     new_df = pd.DataFrame().reindex_like(df).fillna(fill_value)
     if dtype is not None:
         new_df = new_df.astype(dtype)
+    return new_df
 
 class PersistentLogic:
     STORE_VARS = [
@@ -288,7 +293,7 @@ class PersistentLogic:
 
         # TODO pass code validation function
         # TODO adapt notifications and process updates/new entries
-        #      see merge_df
+        #      see import_df
         self.store = DataStore(parent_store.filesystem,
                                label=parent_store.label + '_code', 
                                variables=PersistentLogic.STORE_VARS,
@@ -371,7 +376,7 @@ class DataStoreLogger(logging.LoggerAdapter):
 class DataStore:
 
     # nofitications:
-    # TODO adapt see merge_df
+    # TODO adapt see import_df
     # 'pushed_entry', 'deleted_entry', 'variables_changed', 'flags_changed'
     # 'pushed_annotation'
 
@@ -525,7 +530,9 @@ class DataStore:
             entry_dfs = {k:self.df_from_str(df_content)
                          for k, df_content in content.items()}
             entry_dfs['value']['__fn__'] = data_fn
-            self.merge_df(entry_dfs) # will notify added_entries
+            # TODO: align entry_dfs with current variables
+            # TODO: put NA for variables in main_df but not in loaded entry
+            self.import_df(entry_dfs) # will notify added_entries
 
         to_delete = set()
         for del_fn in chain(deleted_data_files, modified_data_files):
@@ -547,7 +554,7 @@ class DataStore:
         entry_dfs = {k:pd.concat(dfs) for k,dfs in entry_dfs.items()}
         self.filesystem.accept_all_changes('data')
 
-    def merge_df(self, other_dfs, check_validity=True):
+    def import_df(self, other_dfs, check_validity=True):
         """
         other_dfs: dict(label : panda.DataFrame)
         where labels are 'value', 'comment', 'user', 'timestamp'
@@ -591,8 +598,7 @@ class DataStore:
                 m['__version_idx__'] = vid
                 
                 om = pd.concat((o, m)).sort_values(by=['__timestamp__'])
-                om['__conflict_idx__'] = np.arange(om.shape[0],
-                                                   dtype=np.int64)
+                om['__conflict_idx__'] = np.arange(om.shape[0], dtype=np.int64)
                 om = om.set_index(DataStore.TRACKING_INDEX_LEVELS)
 
                 om_other = om[om.__origin__ == 'other']
@@ -618,7 +624,6 @@ class DataStore:
                                        axis=0)
         # First try to merge value and see if merged data is valid
         # if ok, merge eveything
-
         merged_value_df = pd.concat((main_value_df, other_value_df))
         validity = self.validity(merged_value_df)
         m_invalid = validity.loc[other_value_df.index] != ''
@@ -696,14 +701,28 @@ class DataStore:
 
         return self.push_df(value_df, comment_df, user_df, timestamp_df)
 
-    @classmethod
-    def new_tracking_ids(cls, size):
+
+    def new_entry_id(self):
+        """ Return a 64-bit signed int that fits pandas.Int64Index """
+        uid = np.int64(int.from_bytes(uuid1().bytes,
+                                      byteorder='big',
+                                      signed=True) >> 64)
+
+        current_entry_ids = self.dfs['value'].index.get_level_values(0)
+        while uid in current_entry_ids:
+            uid = np.int64(int.from_bytes(uuid1().bytes,
+                                          byteorder='big',
+                                          signed=True) >> 64) 
+        return uid
+
+    def new_tracking_ids(self, size):
+        t_levels = DataStore.TRACKING_INDEX_LEVELS
         new_ids = pd.DataFrame({
             t_levels[0] : [self.new_entry_id() for _ in range(size)],
             t_levels[1] : [0] * size,
             t_levels[2] : [0] * size
         })
-        for col in DataStore.TRACKING_INDEX_LEVELS:
+        for col in t_levels:
             new_ids[col] = new_ids[col].astype(np.int64)
         return new_ids
 
@@ -722,30 +741,47 @@ class DataStore:
                 except KeyError:
                     raise IndexNotFound(index_variables)
                 main_df = self.dfs['value']
-                if self.dfs['value'].shape[0]:
-                    # TODO: hanlde empty main dfs everything
+                if self.dfs['value'].shape[0] != 0:
+                    # TODO: hanlde empty main dfs everywhere
                     # TODO: fix empty index in init
                     main_df = main_df.set_index(index_variables)
-                    to_update = other_value_df.index.intersection(main_df.index)
-                    update_tracking_ids = main_df.loc[to_update][t_levels]
-                    update_tracking_ids['__verion_idx__'] = \
-                        update_tracking_ids['__verion_idx__'] + 1
+                    # to_update = other_value_df.index.intersection(main_df.index)
+                    # update_tracking_ids = main_df.loc[to_update][t_levels]
+                    # update_tracking_ids['__verion_idx__'] = \
+                    #     update_tracking_ids['__verion_idx__'] + 1
+                    # new = other_value_df.index.difference(main_df.index)
+
+                    other_value_df = other_value_df.join(main_df[t_levels])
+                    other_value_df['__verion_idx__'] = \
+                        other_value_df['__verion_idx__'] + 1
                 else:
-                    to_update = []
-                new = value_df.index.difference(main_df.index)
-                new_ids = DataStore.new_tracking_ids(len(new))
-                for k, df in other_dfs.items():
-                    df = df.set_index(index_variables)
-                    df = pd.concat((df.loc[to_update], update_tracking_ids),
-                                   axis=1)
-                    df = pd.concat((df,
-                                    pd.concat((df.loc[new], new_ids),
-                                              axis=1)))
-                    other_dfs[k] = df
+                    other_value_df[t_levels] = pd.NA
+                    # to_update = []
+                    # new = other_value_df.index
+
+                m_new = pd.isna(other_value_df.__entry_id__)
+                other_value_df[m_new, '__entry_id__'] = \
+                    self.new_tracking_ids(m_new.sum())
+                other_value_df[m_new, '__version_idx__'] = 0
+                other_value_df[m_new, '__conflict_idx__'] = 0
+                for col in t_levels:
+                    other_value_df[col] = other_value_df[col].astype(np.int64)
+
+                    # df = df.set_index(index_variables)
+                    # if len(to_update) != 0:
+                    #     df = pd.concat((df.loc[to_update], update_tracking_ids),
+                    #                    axis=1)
+                    # try:
+                    #     df = pd.concat((df, pd.concat((df.loc[new], new_ids),
+                    #                                   axis=1)))
+                    # except:
+                    #     from IPython import embed; embed()
+                    
+
             else: # pushed df has no entry tracking index and
                   # there is no index variable
                   # all pushed entries are considered new
-                new_ids = DataStore.new_tracking_ids(value_df.shape[0])
+                new_ids = self.new_tracking_ids(value_df.shape[0])
                 for k, df in other_dfs.items():
                     other_dfs[k] = pd.concat((df, new_ids), axis=1)
 
@@ -769,10 +805,12 @@ class DataStore:
                 other_dfs[k] = df
 
         for k, df in other_dfs.items():
+            if k != 'value':
+                df[t_levels] = other_value_df[t_levels]
             other_dfs[k] = df.set_index(t_levels)
 
-        tracking_index = self.merge_df(dfs)
-        data_fn = self.save_entry(dfs)
+        tracking_index = self.import_df(other_dfs)
+        data_fn = self.save_entry(other_dfs)
         self.dfs['value'].loc[tracking_index, '__fn__'] = data_fn
         return tracking_index
 
