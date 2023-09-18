@@ -564,63 +564,72 @@ class DataStore:
             if df.index.names != DataStore.TRACKING_INDEX_LEVELS:
                 raise Exception('Can only merge df with tracking index')
 
-        main_value_df = self.dfs['value'].copy()
-        main_value_df['__origin_idx__'] = np.arange(main_value_df.shape[0],
-                                                    dtype=int)
-        main_value_df['__timestamp__'] = self.dfs['timestamp'].max()
-        main_index = main_value_df.index.to_numpy()
+        other_value_df = other_dfs['value']
+        main_value_df = self.dfs['value']
 
         # Sort out conflicting entries (same entry id and version index)
         # There can already be some conflicting entries in main
         # So gather them all, sort by timestamp and reassign conflict indexes
-        conflicting = (other_dfs['value'].index
-                       .intersection(main_value_df.index)
-                       .to_frame())
-        from IPython import embed; embed()
-        done = set()
-        other_value_df = other_dfs['value'].copy()
-        other_value_df['__origin_idx__'] = np.arange(other_value_df.shape[0],
-                                                     dtype=int)
-        other_value_df['__timestamp__'] = other_dfs['timestamp'].max()
-        other_index = other_value_df.index.to_numpy()
-        for eid, vidx, cidx in conflicting:
-            if (eid, vidx) not in done:
-                done.add((eid, vidx))
-                o = (other_value_df.loc[(eid, vidx)].__timestamp__
-                     .reset_index())
-                o['__origin__'] = 'other'
-                o['__entry_id__'] = eid
-                o['__version_idx__'] = vid
-                
-                m = (main_value_df.loc[(eid, vidx)].__timestamp__
-                     .reset_index())
-                m['__origin__'] = 'main'
-                m['__entry_id__'] = eid
-                m['__version_idx__'] = vid
-                
-                om = pd.concat((o, m)).sort_values(by=['__timestamp__'])
-                om['__conflict_idx__'] = np.arange(om.shape[0], dtype=np.int64)
-                om = om.set_index(DataStore.TRACKING_INDEX_LEVELS)
+        conflicting = (other_value_df.index
+                       .intersection(main_value_df.index))
+        # from IPython import embed; embed()
+        if len(conflicting) != 0:
+            main_value_df = main_value_df.copy()
+            main_value_df['__origin_idx__'] = np.arange(main_value_df.shape[0],
+                                                        dtype=int)
+            main_value_df['__timestamp__'] = self.dfs['timestamp'].max()
+            main_index = main_value_df.index.to_numpy()
 
-                om_other = om[om.__origin__ == 'other']
-                other_index[(om_other.__origin_indices__,)] = \
-                    om_other.index
+            done = set()
+            other_value_df = other_dfs['value'].copy()
+            other_value_df['__origin_idx__'] = np.arange(other_value_df.shape[0],
+                                                         dtype=int)
+            other_value_df['__timestamp__'] = other_dfs['timestamp'].max()
+            other_index = other_value_df.index.to_numpy()
+            for eid, vidx, cidx in conflicting:
+                if (eid, vidx) not in done:
+                    done.add((eid, vidx))
+                    o = (other_value_df.loc[(eid, vidx)].__timestamp__
+                         .reset_index())
+                    o['__origin__'] = 'other'
+                    o['__entry_id__'] = eid
+                    o['__version_idx__'] = vid
+                    
+                    m = (main_value_df.loc[(eid, vidx)].__timestamp__
+                         .reset_index())
+                    m['__origin__'] = 'main'
+                    m['__entry_id__'] = eid
+                    m['__version_idx__'] = vid
+                    
+                    om = pd.concat((o, m)).sort_values(by=['__timestamp__'])
+                    om['__conflict_idx__'] = np.arange(om.shape[0],
+                                                       dtype=np.int64)
+                    om = om.set_index(DataStore.TRACKING_INDEX_LEVELS)
+    
+                    om_other = om[om.__origin__ == 'other']
+                    other_index[(om_other.__origin_indices__,)] = \
+                        om_other.index
+    
+                    om_main = om[om.__origin__ == 'main']
+                    main_index[(om_main.__origin_indices__,)] = \
+                        om_main.index
+    
+            other_value_df.index = pd.MultiIndex.from_tuples(other_index)
+            main_value_df.index = pd.MultiIndex.from_tuples(main_index)
 
-                om_main = om[om.__origin__ == 'main']
-                main_index[(om_main.__origin_indices__,)] = \
-                    om_main.index
-
-        other_value_df.index = pd.MultiIndex.from_tuples(other_index)
-        main_value_df.index = pd.MultiIndex.from_tuples(main_index)
-
-        # TODO: duplicate head values for all columns in main not in other
         other_columns = set(other_value_df.columns)
-        if set(self.main_value_df.columns) != other_columns:
-            updating = other_value_df.index[other_value_df.__version_idx__ != 0]
-            before_update = updating.__version_idx__ - 1
-            head_df = self.head_df('value', index=before_update)
-            selected_cols = [c for c in self.main_value_df.columns
-                             if c not in other_columns]
+        if set(main_value_df.columns) != other_columns:
+            # Duplicate head values for all columns in main not in other
+            # from IPython import embed; embed()
+            m_update = (other_value_df.index
+                        .get_level_values('__version_idx__') != 0)
+            before_update = other_value_df.index[m_update].to_frame()
+            before_update.__version_idx__ = before_update.__version_idx__ - 1
+            head_df = self.head_df('value',
+                                   index=pd.MultiIndex.from_frame(before_update))
+            selected_cols = [c for c in main_value_df.columns
+                             if c not in other_columns
+                             and not c.startswith('__')]
             other_value_df = pd.concat((other_value_df, head_df[selected_cols]),
                                        axis=0)
         # First try to merge value and see if merged data is valid
@@ -640,15 +649,16 @@ class DataStore:
             if df_label == 'value':
                 self.dfs[df_label] = merged_value_df
             else:
+                # TODO Duplicate head values for all columns in main not in other
                 main_df = self.dfs[df_label]
-                main_df.index = main_value_df.index # propagate fixed conflicts
-
                 other_df = other_dfs[df_label]
-                other_df.index = other_value_df.index # propagate fixed conflicts
-                # TODO: duplicate head values for all columns in main not in other
+                if len(conflicting) != 0:
+                    # Apply fixed conflicts
+                    main_df.index = main_value_df.index 
+                    other_df.index = other_value_df.index 
                 self.dfs[df_label] = pd.concat((main_df, other_df))
-
-        # TODO: notify merge
+                # TODO: notify merge
+                # TODO: notify index change if any conflict
 
         # max_ver_idx = max version_idx from other & main
         # new entry: other_df.ver_idx == max_ver_idx and ver_idx == 0 
@@ -978,10 +988,10 @@ class DataStore:
 
         return is_valid
 
-    def full_df(self, view='value'):
+    def full_df(self, view='value', index=None):
         return pd.DataFrame() # stub
 
-    def head_df(self, view='value'):
+    def head_df(self, view='value', index=None):
         return pd.DataFrame() # stub
 
 class TestDataStore(TestCase):
