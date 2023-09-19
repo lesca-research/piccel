@@ -57,7 +57,6 @@ FLAGS_SYMBOLS = {
 VTYPES = {
     'string' : {
         'dtype_pd' : 'string',
-        'check_dtype_pd' : lambda dt: dt == 'string',
         'unformat' : lambda s : s,
         'format' : lambda v : v,
         'validate_dtype_pd' : lambda v : isinstance(v, str),
@@ -156,6 +155,7 @@ class LockedVariables(Exception): pass
 class InvalidIndex(Exception): pass
 class VariableChangeError(Exception): pass
 class IndexNotFound(Exception): pass
+class InvalidImport(Exception): pass
 
 class Var:
     def __init__(self, var_label, var_type, index_position=None, is_unique=False,
@@ -641,8 +641,8 @@ class DataStore:
         m_invalid = validity.loc[other_value_df.index] != ''
         other_invalid_index = other_value_df[m_invalid]
         if len(other_invalid_index) > 0:
-            if self.check_validity:
-                raise InvalidMerge(other_invalid_index)
+            if check_validity:
+                raise InvalidImport(other_invalid_index)
             else:
                 # TODO notify invalid entries
                 self.validity = validity
@@ -685,17 +685,18 @@ class DataStore:
         """
         validity = df_like(value_df, fill_value='', dtype='string')
         index_vars = [v.var_label for v in self.variables if v.is_index()]
-        m_dups = values_df[variable].duplicated(keep=False)
+        m_dups = value_df[index_vars].duplicated(keep=False)
         validity.loc[m_dups, index_vars] += ', non-unique-index'
         for variable in self.variables:
-            if variable.unique:
-                m_dups = values_df[variable].duplicated(keep=False)
-                validity.loc[m_dups, variable] += ', non-unique'
+            if variable.is_unique:
+                m_dups = value_df[variable.var_label].duplicated(keep=False)
+                validity.loc[m_dups, variable.var_label] += ', non-unique'
         # TODO check uniqueness of index variables
         # TODO check dtypes
         # TODO check uniques
         # TODO check nullables
-        validity = validity.str.lstrip(',')
+            validity[variable.var_label] = (validity[variable.var_label]
+                                            .str.lstrip(','))
         return validity
 
     def push_records(self, records):
