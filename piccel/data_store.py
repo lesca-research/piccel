@@ -618,6 +618,7 @@ class DataStore:
             main_value_df.index = pd.MultiIndex.from_tuples(main_index)
 
         other_columns = set(other_value_df.columns)
+        fill_missing_columns = False
         if set(main_value_df.columns) != other_columns:
             # Duplicate head values for all columns in main not in other
             # from IPython import embed; embed()
@@ -625,13 +626,14 @@ class DataStore:
                         .get_level_values('__version_idx__') != 0)
             before_update = other_value_df.index[m_update].to_frame()
             before_update.__version_idx__ = before_update.__version_idx__ - 1
-            head_df = self.head_df('value',
-                                   index=pd.MultiIndex.from_frame(before_update))
+            head_df = (self.head_df('value')
+                       .loc[pd.MultiIndex.from_frame(before_update)])
             selected_cols = [c for c in main_value_df.columns
                              if c not in other_columns
                              and not c.startswith('__')]
             other_value_df = pd.concat((other_value_df, head_df[selected_cols]),
                                        axis=0)
+            fill_missing_columns = True
         # First try to merge value and see if merged data is valid
         # if ok, merge eveything
         merged_value_df = pd.concat((main_value_df, other_value_df))
@@ -655,7 +657,12 @@ class DataStore:
                 if len(conflicting) != 0:
                     # Apply fixed conflicts
                     main_df.index = main_value_df.index 
-                    other_df.index = other_value_df.index 
+                    other_df.index = other_value_df.index
+                if fill_missing_columns:
+                    head_df = (self.head_df(df_label)
+                               .loc[pd.MultiIndex.from_frame(before_update)])
+                    other_df = pd.concat((other_df, head_df[selected_cols]),
+                                         axis=0)
                 self.dfs[df_label] = pd.concat((main_df, other_df))
                 # TODO: notify merge
                 # TODO: notify index change if any conflict
@@ -671,12 +678,25 @@ class DataStore:
         return other_value_df.index
 
 
-    def validity(self, df):
+    def validity(self, value_df):
+        """ 
+        ASSUME df has tracking index and columns consistent with current
+        variable definitions
+        """
+        validity = df_like(value_df, fill_value='', dtype='string')
+        index_vars = [v.var_label for v in self.variables if v.is_index()]
+        m_dups = values_df[variable].duplicated(keep=False)
+        validity.loc[m_dups, index_vars] += ', non-unique-index'
+        for variable in self.variables:
+            if variable.unique:
+                m_dups = values_df[variable].duplicated(keep=False)
+                validity.loc[m_dups, variable] += ', non-unique'
         # TODO check uniqueness of index variables
         # TODO check dtypes
         # TODO check uniques
         # TODO check nullables
-        pass
+        validity = validity.str.lstrip(',')
+        return validity
 
     def push_records(self, records):
         all_records = {}
@@ -988,11 +1008,15 @@ class DataStore:
 
         return is_valid
 
-    def full_df(self, view='value', index=None):
-        return pd.DataFrame() # stub
+    def full_df(self, data_label='value'):
+        return self.dfs[data_label]
 
-    def head_df(self, view='value', index=None):
-        return pd.DataFrame() # stub
+    def head_df(self, data_label='value'):
+        if self.head_dfs[data_label] is None:
+            self.head_dfs[data_label] = (self.dfs[data_label]
+                                         .groupby(level=0, group_keys=False)
+                                         .tail(1).sort_index())
+        return self.head_dfs[data_label]
 
 class TestDataStore(TestCase):
 
@@ -1378,7 +1402,7 @@ class TestDataStore(TestCase):
     def test_flag_indexed_head_df(self):
         ds = DataStore(self.filesystem, 'test_ds')
         ds.set_user('me')
-        ds.push_variable('vid', 'string', index=0)
+        ds.push_variable('vid', 'string', index_position=0)
         ds.push_variable('age', 'int')
 
         ds.push_flag_def(0, 'to_check', 'triangle_orange')
