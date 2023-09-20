@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
+import os.path as op
 from itertools import product, chain
 from datetime import datetime, date, timezone
 from copy import deepcopy
 from collections import defaultdict
+from functools import partial
 from pathlib import PurePath
 import tempfile
 import logging
+import csv
+import json
 
 # UUID1: MAC addr + current timestamp with nanosec precision
 # UUID4: 122 bytes random number
@@ -122,6 +126,11 @@ VTYPES = {
                               'true', 'text', 'np.pi'],
     }
 }
+def unformat(s, var_type):
+    if s == '':
+        return VTYPES[var_type].na_value
+    else:
+        return VTYPES[var_type]['unformat'](s)
 
 VTYPES['variable_type'] = deepcopy(VTYPES['string'])
 VTYPES['variable_type']['validate_value'] = lambda v: v in VTYPES
@@ -225,7 +234,9 @@ class PersistentVariables:
                                               parent_store.on_variable_changes})
 
     def __iter__(self):
-        return (Var(idx, **row) for idx, row in self.store.head_df().iterrows())
+        # from IPython import embed; embed()
+        hdf = self.store.head_df().drop(columns=DataStore.TRACKING_INDEX_LEVELS)
+        return (Var(idx, **row) for idx, row in hdf.iterrows())
 
     def refresh(self):
         self.store.refresh()
@@ -380,10 +391,11 @@ class DataStore:
     # 'pushed_entry', 'deleted_entry', 'variables_changed', 'flags_changed'
     # 'pushed_annotation'
 
+    CSV_SEPARATOR = ','
+
     TRACKING_INDEX_LEVELS = ['__entry_id__',
                              '__version_idx__',
                              '__conflict_idx__']
-    PRIVATE_COLS = TRACKING_INDEX_LEVELS + ['__fn__']
 
     DATA_LABELS = ('value', 'timestamp', 'user', 'comment')
 
@@ -448,17 +460,16 @@ class DataStore:
         self.notifier = Notifier(notifications)
 
         self.dfs = {}
-        self.head_dfs = {}
+        self.head_dfs = {}        
         for label in DataStore.DATA_LABELS:
-            df = pd.DataFrame(columns=DataStore.PRIVATE_COLS)
+            df = pd.DataFrame(columns=DataStore.TRACKING_INDEX_LEVELS)
             for col in DataStore.TRACKING_INDEX_LEVELS:
                 df[col] = df[col].astype(np.int64)
-            if label == 'value':
-                df['__fn__'] = df['__fn__'].astype('string')
             df = df.set_index(DataStore.TRACKING_INDEX_LEVELS)
             self.dfs[label] = df
             self.head_dfs[label] = None
-            
+        self.data_files = pd.Series([], index=df.index)
+
         if variables is not None:
             self.variables = FixedVariables(variables)
             self.on_variable_changes([(None, variable.asdict())
@@ -525,19 +536,11 @@ class DataStore:
         modified_data_files = [fn for fn in modified_files if _is_data_file(fn)]
         deleted_data_files = [fn for fn in deleted_files if _is_data_file(fn)]
 
-        def _load_entry(data_fn):
-            content = json.loads(self.filesystem.load(data_fn))
-            entry_dfs = {k:self.df_from_str(df_content)
-                         for k, df_content in content.items()}
-            entry_dfs['value']['__fn__'] = data_fn
-            # TODO: align entry_dfs with current variables
-            # TODO: put NA for variables in main_df but not in loaded entry
-            self.import_df(entry_dfs) # will notify added_entries
-
         to_delete = set()
         for del_fn in chain(deleted_data_files, modified_data_files):
-            m_delete = self.dfs['value']['__fn__'] == del_fn
-            to_delete.update(to_self.dfs['value'].index[m_delete])
+            m_delete = self.data_files == del_fn
+            to_delete.update(self.dfs['value'].index[m_delete])
+            self.data_files = self.data_files[~m_delete]
         for df_label, df in self.dfs.items():
             self.dfs[df_label] = df.drop(index=to_delete)
         self.notifier.notify('deleted_entries', to_delete)
@@ -545,27 +548,88 @@ class DataStore:
         entry_dfs = defaultdict(list)
         for data_fn in chain(modified_data_files, new_data_files):
             content = json.loads(self.filesystem.load(data_fn))
-            for k in self.dfs.keys():
-                entry_df = self.df_from_str(content[k])
-                if k == 'value':
-                    entry_dfs[k]['__fn__'] = data_fn
-                entry_dfs[k].append(entry_df)
-
-        entry_dfs = {k:pd.concat(dfs) for k,dfs in entry_dfs.items()}
+            entry_dfs = {k:self.df_from_str(df_content, k)
+                         for k, df_content in content.items()}
+            # TODO: align entry_dfs with current variables
+            # TODO: put NA for variables in main_df but not in loaded entry
+            self.import_df(entry_dfs, from_file=data_fn) # will notify added_entries            
         self.filesystem.accept_all_changes('data')
 
-    def import_df(self, other_dfs, check_validity=True):
+    def df_from_str(self, df_str, data_label):
+        if df_str == '':
+            return pd.DataFrame()
+        if data_label == 'value':
+            converters = {v.var_label:partial(unformat, var_type=v.var_type)
+                          for v in self.variables}
+        elif data_label == 'timestamp':
+            ufmt = partial(unformat, var_type='datetime')
+            converters = {v.var_label : ufmt for v in self.variables}
+        else:
+            converters = None
+        df = pd.read_csv(io.StringIO(df_str), sep=DataSheet.CSV_SEPARATOR,
+                         engine='python', index_col=False,
+                         converters=converters)
+
+        def hex_to_int(h):
+            try:
+                return np.int64(int(h, 16))
+            except OverflowError:
+                # TODO: check if that can still happen...
+                logger.error('+++++++++++++++++++++++++++++++++++++++++')
+                logger.error('Cannot convert uuid to signed int64. ' \
+                             'Generate a new one. This must be saved later!')
+                logger.error('+++++++++++++++++++++++++++++++++++++++++')
+                return np.int64(int.from_bytes(uuid1().bytes,
+                                               byteorder='big',
+                                               signed=True) >> 64)
+        df['__entry_id__'] = (df['__entry_id__']
+                              .apply(hex_to_int)
+                              .astype(np.int64))
+        df['__version_idx__'] = (df['__version_idx__'].apply(int)
+                                 .astype(np.int64))
+        df['__conflict_idx__'] = np.int64(0)
+        return df.set_index(DataStore.TRACKING_INDEX)
+
+    def df_to_str(self, df, data_label):
+        if df is None or df.shape[0] == 0:
+            return ''
+
+        for variable in self.variables:
+            self.logger.debug('df_to_str: format column %s',
+                              variable.var_label)
+            fmt = None
+            if data_label == 'value':
+                fmt = VTYPES[variable.var_type]['format']
+            elif data_label == 'timestamp':
+                fmt = VTYPES['datetime']['format']
+
+            if fmt is not None:
+                f = lambda v: (fmt(v) if not pd.isna(v) else '')
+                df[[variable.var_label]] = df[[variable.var_label]].applymap(f)
+
+        df = df.reset_index().drop(columns=['__conflict_idx__'])
+        df['__entry_id__'] = df['__entry_id__'].apply(lambda x: hex(x))
+        df['__version_idx__'] = df['__version_idx__'].apply(str)
+        content = df.to_csv(sep=DataStore.CSV_SEPARATOR, index=False,
+                            quoting=csv.QUOTE_NONNUMERIC)
+        return content
+
+    def import_df(self, other_dfs, check_validity=True, from_file=None):
         """
         other_dfs: dict(label : panda.DataFrame)
         where labels are 'value', 'comment', 'user', 'timestamp'
         """
-
+        t_levels = DataStore.TRACKING_INDEX_LEVELS
         for df in other_dfs.values():
-            if df.index.names != DataStore.TRACKING_INDEX_LEVELS:
+            if df.index.names != t_levels:
                 raise Exception('Can only merge df with tracking index')
 
         other_value_df = other_dfs['value']
         main_value_df = self.dfs['value']
+        self.logger.debug('Import value df:')
+        self.logger.debug(other_value_df)
+        self.logger.debug('Current main value df:')
+        self.logger.debug(main_value_df)
 
         # Sort out conflicting entries (same entry id and version index)
         # There can already be some conflicting entries in main
@@ -574,6 +638,8 @@ class DataStore:
                        .intersection(main_value_df.index))
         # from IPython import embed; embed()
         if len(conflicting) != 0:
+            self.logger.debug('Fixing %d conflicting entries...',
+                              len(conflicting))
             main_value_df = main_value_df.copy()
             main_value_df['__origin_idx__'] = np.arange(main_value_df.shape[0],
                                                         dtype=int)
@@ -604,7 +670,7 @@ class DataStore:
                     om = pd.concat((o, m)).sort_values(by=['__timestamp__'])
                     om['__conflict_idx__'] = np.arange(om.shape[0],
                                                        dtype=np.int64)
-                    om = om.set_index(DataStore.TRACKING_INDEX_LEVELS)
+                    om = om.set_index(t_levels)
     
                     om_other = om[om.__origin__ == 'other']
                     other_index[(om_other.__origin_indices__,)] = \
@@ -616,17 +682,20 @@ class DataStore:
     
             other_value_df.index = pd.MultiIndex.from_tuples(other_index)
             main_value_df.index = pd.MultiIndex.from_tuples(main_index)
-
+        else:
+            self.logger.debug('No conflict')
         other_columns = set(other_value_df.columns)
         fill_missing_columns = False
         if set(main_value_df.columns) != other_columns:
+            self.logger.debug('Missing columns in df to import')
             # Duplicate head values for all columns in main not in other
-            # from IPython import embed; embed()
             m_update = (other_value_df.index
                         .get_level_values('__version_idx__') != 0)
             before_update = other_value_df.index[m_update].to_frame()
             before_update.__version_idx__ = before_update.__version_idx__ - 1
-            head_df = (self.head_df('value')
+            # from IPython import embed; embed()
+            head_df = (self.head_df('value').reset_index()
+                       .set_index(t_levels)
                        .loc[pd.MultiIndex.from_frame(before_update)])
             selected_cols = [c for c in main_value_df.columns
                              if c not in other_columns
@@ -634,19 +703,31 @@ class DataStore:
             other_value_df = pd.concat((other_value_df, head_df[selected_cols]),
                                        axis=0)
             fill_missing_columns = True
+        else:
+            self.logger.debug('No missing column in df to import')
         # First try to merge value and see if merged data is valid
-        # if ok, merge eveything
+        # if ok, merge everything
         merged_value_df = pd.concat((main_value_df, other_value_df))
+        self.logger.debug('Merge:')
+        self.logger.debug(merged_value_df)
         validity = self.validity(merged_value_df)
         m_invalid = validity.loc[other_value_df.index] != ''
-        other_invalid_index = other_value_df[m_invalid]
-        if len(other_invalid_index) > 0:
+        other_invalid_index = other_value_df[m_invalid].index
+        if m_invalid.sum().sum() > 0:
             if check_validity:
+                self.logger.debug('Invalid entries:')
+                # from IPython import embed; embed()
+                # TODO fix reporting of validity
+                self.logger.debug(validity[m_invalid])
                 raise InvalidImport(other_invalid_index)
             else:
                 # TODO notify invalid entries
                 self.validity = validity
 
+        self.data_files.index = main_value_df.index
+        new = pd.Series([pd.NA]*len(other_value_df.index),
+                        index=other_value_df.index)
+        self.data_files = pd.concat((self.data_files, new), axis=1)
         for df_label in self.dfs:
             if df_label == 'value':
                 self.dfs[df_label] = merged_value_df
@@ -659,13 +740,17 @@ class DataStore:
                     main_df.index = main_value_df.index 
                     other_df.index = other_value_df.index
                 if fill_missing_columns:
-                    head_df = (self.head_df(df_label)
+                    head_df = (self.head_df(df_label).reset_index()
+                               .set_index(t_levels)
                                .loc[pd.MultiIndex.from_frame(before_update)])
                     other_df = pd.concat((other_df, head_df[selected_cols]),
                                          axis=0)
                 self.dfs[df_label] = pd.concat((main_df, other_df))
-                # TODO: notify merge
-                # TODO: notify index change if any conflict
+
+        if from_file is not None:
+            self.data_files.loc[other_value_df.index] = data_file
+        # TODO: notify merge
+        # TODO: notify index change if any conflict
 
         # max_ver_idx = max version_idx from other & main
         # new entry: other_df.ver_idx == max_ver_idx and ver_idx == 0 
@@ -684,17 +769,29 @@ class DataStore:
         variable definitions
         """
         validity = df_like(value_df, fill_value='', dtype='string')
+
+        # Checks on full df
+        # TODO check dtypes
+        # TODO check nullables
+
+        # Checks on head df
+        hdf = value_df.groupby(level=0, group_keys=False).tail(1)
+
         index_vars = [v.var_label for v in self.variables if v.is_index()]
-        m_dups = value_df[index_vars].duplicated(keep=False)
-        validity.loc[m_dups, index_vars] += ', non-unique-index'
+        m_dups = hdf[index_vars].duplicated(keep=False)
+        if m_dups.sum() != 0:
+            from IPython import embed; embed()
+            validity.loc[hdf.index[m_dups], index_vars] += \
+                ', non-unique-index'
         for variable in self.variables:
             if variable.is_unique:
-                m_dups = value_df[variable.var_label].duplicated(keep=False)
-                validity.loc[m_dups, variable.var_label] += ', non-unique'
+                m_dups = hdf[variable.var_label].duplicated(keep=False)
+                if m_dups.sum() != 0:
+                    validity.loc[hdf.index[m_dups], variable.var_label] += \
+                        ', non-unique'
         # TODO check uniqueness of index variables
-        # TODO check dtypes
         # TODO check uniques
-        # TODO check nullables
+        
             validity[variable.var_label] = (validity[variable.var_label]
                                             .str.lstrip(','))
         return validity
@@ -760,35 +857,53 @@ class DataStore:
 
     def push_df(self, value_df, comment_df, user_df, timestamp_df):
         t_levels = DataStore.TRACKING_INDEX_LEVELS
+        self.logger.debug('Pushing df:')
+        self.logger.debug(value_df)
+        self.logger.debug('Current main value df:')
+        self.logger.debug(self.dfs['value'])
         if not set(t_levels).issubset(value_df.columns):
             index_variables = [v.var_label for v in self.variables
                                if v.is_index()]
             if len(index_variables) > 0:
+                self.logger.debug('Join pushed df on index variables %s',
+                                  index_variables)
                 try:
                     value_df = value_df.set_index(index_variables)
                 except KeyError:
                     raise IndexNotFound(index_variables)
-                main_df = self.dfs['value'].set_index(index_variables)
+                main_df = (self.dfs['value'].reset_index()
+                           .set_index(index_variables))
                 # Resolve entries that are updates of existing ones
                 if main_df.shape[0] != 0:
                     value_df = value_df.join(main_df[t_levels])
-                    value_df['__version_idx__'] = value_df['__version_idx__'] + 1
+                    value_df['__version_idx__'] = value_df['__version_idx__']+1
                 else:
                     value_df['__entry_id__'] = pd.NA
                     value_df['__version_idx__'] = pd.NA
                     value_df['__conflict_idx__'] = pd.NA
-                    
+                self.logger.debug('After resolving updates:')
+                self.logger.debug(value_df) 
                 m_new = pd.isna(value_df.__entry_id__)
-                value_df.loc[m_new, '__entry_id__'] = \
-                    [self.new_entry_id() for _ in range(m_new.sum())]
-                value_df.loc[m_new, '__version_idx__'] = 0
-                value_df.loc[m_new, '__conflict_idx__'] = 0
+                if m_new.sum() != 0:
+                    self.logger.debug('Add UIDs for %d new entries',
+                                      m_new.sum())
+                    value_df.loc[m_new, '__entry_id__'] = \
+                        [self.new_entry_id() for _ in range(m_new.sum())]
+                    value_df.loc[m_new, '__version_idx__'] = 0
+                    value_df.loc[m_new, '__conflict_idx__'] = 0
+                self.logger.debug('Before dtype fix:')
+                self.logger.debug(value_df) 
                 for col in t_levels:
                     value_df[col] = value_df[col].astype(np.int64)
+                self.logger.debug('After resolving new entries:')
+                self.logger.debug(value_df) 
+
+                value_df = value_df.reset_index()
 
             else: # pushed df has no entry tracking index and
                   # there is no index variable
                   # all pushed entries are considered new
+                self.logger.debug('Import pushed df as new entries')
                 value_df['__entry_id__'] = \
                     [self.new_entry_id() for _ in range(value_df.shape[0])]
                 value_df['__version_idx__'] = 0
@@ -796,6 +911,7 @@ class DataStore:
 
         else: # pushed df already has entry tracking index
               # TODO: utest push from previous version
+            self.logger.debug('Import pushed df using its tracking index')
             m_update = (self.dfs['value'].index.isin(value_df[t_levels]))
             value_df.loc[m_update, '__verion_idx__'] = \
                 value_df.loc[m_update, '__verion_idx__'] + 1
@@ -803,7 +919,7 @@ class DataStore:
         comment_df[t_levels] = value_df[t_levels]
         user_df[t_levels] = value_df[t_levels]
         timestamp_df[t_levels] = value_df[t_levels]
-        
+
         other_dfs = {
             'value' : value_df.set_index(t_levels),
             'comment' : comment_df.set_index(t_levels),
@@ -811,9 +927,21 @@ class DataStore:
             'timestamp' : timestamp_df.set_index(t_levels),
         }
         tracking_index = self.import_df(other_dfs)
-        data_fn = self.save_entry(other_dfs)
-        self.dfs['value'].loc[tracking_index, '__fn__'] = data_fn
+        self.save_entry(other_dfs)
+        # self.dfs['value'].loc[tracking_index, '__fn__'] = data_fn
         return tracking_index
+
+    def save_entry(self, dfs):
+        entry_rfn = '%d.csv' % uuid1().int
+        while self.filesystem.exists(op.join('data', entry_rfn)):
+            entry_rfn = '%d.csv' % uuid1().int
+        entry_fn = op.join('data', entry_rfn)
+        self.logger.debug('Save entry %s to %s',
+                          dfs['value'].index.to_list(), entry_fn)
+        content = json.dumps({k:self.df_to_str(df, k)
+                              for k,df in dfs.items()})
+        self.filesystem.save(entry_fn, content)
+        return entry_fn
 
     def delete_all_entries(self):
         self.notifier.notify('pre_clear_data')
@@ -968,7 +1096,7 @@ class DataStore:
         return []
 
     def validate_dtypes(self):
-        logger.debug('Validate dtypes of %s', self.label)
+        self.logger.debug('Validate dtypes of %s', self.label)
 
         is_valid = True
 
@@ -978,15 +1106,9 @@ class DataStore:
             dtype = self.df.index.dtypes[index_level]
             validity = validate_int(dtype)
             if not validity:
-                logger.error('Index level %s has invalid dtype: %s',
-                             index_level, dtype)
+                self.logger.error('Index level %s has invalid dtype: %s',
+                                  index_level, dtype)
             is_valid &= validity
-
-        dtype = self.df['__fn__'].dtype
-        validity = VTYPES['string']['validate_dtype_pd'](dtype)
-        if not validity:
-            logger.error('Column __fn__ has invalid dtype: %s', dtype)
-        is_valid &= validity
 
         # Validate columns in full & head df
         for df in (self.head_df(), self.df):
@@ -995,8 +1117,9 @@ class DataStore:
                 dtype = df[variable.var_label].dtype
                 validity = type_def['validate_dtype_pd'](dtype)
                 if not validity:
-                    logger.error('Column of %s (%s) has invalid dtype: %s',
-                                 variable, variable.vtype, dtype)
+                    self.logger.error('Column of %s (%s) has invalid '
+                                      'dtype: %s', variable,
+                                      variable.vtype, dtype)
                 is_valid &= validity
 
         is_valid &= self.variables.validate_dtypes()
@@ -1013,10 +1136,20 @@ class DataStore:
         return self.dfs[data_label]
 
     def head_df(self, data_label='value'):
+
         if self.head_dfs[data_label] is None:
-            self.head_dfs[data_label] = (self.dfs[data_label]
-                                         .groupby(level=0, group_keys=False)
-                                         .tail(1).sort_index())
+            # Recompute cached head views
+            hdf = (self.dfs[data_label]
+                  .groupby(level=0, group_keys=False)
+                  .tail(1).reset_index())
+            
+            index_variables = [v.var_label for v in self.variables
+                               if v.is_index()]
+
+            if len(index_variables) != 0:
+                hdf = hdf.set_index(index_variables)
+            self.head_dfs[data_label] = hdf
+
         return self.head_dfs[data_label]
 
 class TestDataStore(TestCase):
@@ -1140,7 +1273,7 @@ class TestDataStore(TestCase):
         ds2.refresh()
         full_df2 = ds2.full_df()
 
-        fn1 = full_df1.loc[tidx1, '__fn__']
+        fn1 = ds1.data_file(tidx1)
         self.assertTrue(self.filesystem.exists(fn1))
         assert_frame_equal(full_df1, full_df2)
 
@@ -1165,22 +1298,22 @@ class TestDataStore(TestCase):
         ds2.refresh()
 
         full_df1 = ds1.full_df()
-        fn1 = full_df1.loc[tidx1, '__fn__']
-        fn2 = full_df1.loc[tidx2, '__fn__']
+        fn1 = full_df1.data_file(tidx1)
+        fn2 = full_df1.data_file(tidx2)
 
         ds1.pack_data_files()
         self.assertFalse(self.filesystem.exists(fn1))
         self.assertFalse(self.filesystem.exists(fn2))
 
-        full_df1 = ds1.full_df()
+
         main_fn = op.join('test_ds', 'data', 'data_main.csv')
-        self.assertEqual(full_df1.loc[tidx1, '__fn__'], main_fn)
-        self.assertEqual(full_df1.loc[tidx2, '__fn__'], main_fn)
+        self.assertEqual(ds1.data_file(tidx1), main_fn)
+        self.assertEqual(ds1.data_file(tidx2), main_fn)
 
         ds2.refresh()
         full_df2 = ds2.full_df()
-        self.assertEqual(full_df2.loc[tidx1, '__fn__'], main_fn)
-        self.assertEqual(full_df2.loc[tidx2, '__fn__'], main_fn)
+        self.assertEqual(ds2.data_file(tidx1), main_fn)
+        self.assertEqual(ds2.data_file(tidx2), main_fn)
 
         ds1.delete_single_entry(tidx1) # data_main.csv will be modified
         self.assertFalse(tixd1 in ds1.full_df().index)
@@ -1194,8 +1327,8 @@ class TestDataStore(TestCase):
         self.assertFalse(tixd1 in full_df2.index)
         self.assertTrue(tixd3 in full_df2.index)
 
-        self.assertEqual(full_df2.loc[tidx2, '__fn__'], main_fn)
-        self.assertEqual(full_df2.loc[tidx3, '__fn__'], main_fn)
+        self.assertEqual(ds2.data_file(tidx2), main_fn)
+        self.assertEqual(ds2.data_file(tidx3), main_fn)
 
     def test_data_entry_nullable(self):
         self._test_push_data(nullables=VTYPES.keys())
