@@ -234,7 +234,6 @@ class PersistentVariables:
                                               parent_store.on_variable_changes})
 
     def __iter__(self):
-        # from IPython import embed; embed()
         hdf = self.store.head_df().drop(columns=DataStore.TRACKING_INDEX_LEVELS)
         return (Var(idx, **row) for idx, row in hdf.iterrows())
 
@@ -382,6 +381,8 @@ class TestHash(TestCase):
         
 class DataStoreLogger(logging.LoggerAdapter):
     def process(self, msg, kwargs):
+        if isinstance(msg, pd.DataFrame):
+            msg = '\n' + str(msg)
         return '[%s] %s' % (self.extra['store_label'], msg), kwargs
 
 class DataStore:
@@ -502,6 +503,7 @@ class DataStore:
                                      notifications={'pushed_entry':
                                                     self.on_pushed_note})
 
+        self.validate_entry = if_none(validate_entry, lambda df: None)
         if 0:
             if logic is not None:
                 self.logic = logic # expect DataStoreLogic
@@ -552,7 +554,7 @@ class DataStore:
                          for k, df_content in content.items()}
             # TODO: align entry_dfs with current variables
             # TODO: put NA for variables in main_df but not in loaded entry
-            self.import_df(entry_dfs, from_file=data_fn) # will notify added_entries            
+            self.import_df(entry_dfs, from_file=data_fn) # will notify added_entries
         self.filesystem.accept_all_changes('data')
 
     def df_from_str(self, df_str, data_label):
@@ -636,7 +638,6 @@ class DataStore:
         # So gather them all, sort by timestamp and reassign conflict indexes
         conflicting = (other_value_df.index
                        .intersection(main_value_df.index))
-        # from IPython import embed; embed()
         if len(conflicting) != 0:
             self.logger.debug('Fixing %d conflicting entries...',
                               len(conflicting))
@@ -655,32 +656,35 @@ class DataStore:
             for eid, vidx, cidx in conflicting:
                 if (eid, vidx) not in done:
                     done.add((eid, vidx))
-                    o = (other_value_df.loc[(eid, vidx)].__timestamp__
+                    o = (other_value_df.loc[(eid, vidx)][['__timestamp__',
+                                                          '__origin_idx__']]
                          .reset_index())
                     o['__origin__'] = 'other'
                     o['__entry_id__'] = eid
-                    o['__version_idx__'] = vid
+                    o['__version_idx__'] = vidx
                     
-                    m = (main_value_df.loc[(eid, vidx)].__timestamp__
+                    m = (main_value_df.loc[(eid, vidx)][['__timestamp__',
+                                                         '__origin_idx__']]
                          .reset_index())
                     m['__origin__'] = 'main'
                     m['__entry_id__'] = eid
-                    m['__version_idx__'] = vid
+                    m['__version_idx__'] = vidx
                     
                     om = pd.concat((o, m)).sort_values(by=['__timestamp__'])
                     om['__conflict_idx__'] = np.arange(om.shape[0],
                                                        dtype=np.int64)
                     om = om.set_index(t_levels)
-    
                     om_other = om[om.__origin__ == 'other']
-                    other_index[(om_other.__origin_indices__,)] = \
-                        om_other.index
+                    other_index[(om_other.__origin_idx__,)] = om_other.index
     
                     om_main = om[om.__origin__ == 'main']
-                    main_index[(om_main.__origin_indices__,)] = \
-                        om_main.index
-    
+                    main_index[(om_main.__origin_idx__,)] = om_main.index
+
+            other_value_df = other_value_df.drop(columns=['__timestamp__',
+                                                         '__origin_idx__'])
             other_value_df.index = pd.MultiIndex.from_tuples(other_index)
+            main_value_df = main_value_df.drop(columns=['__timestamp__',
+                                                        '__origin_idx__'])
             main_value_df.index = pd.MultiIndex.from_tuples(main_index)
         else:
             self.logger.debug('No conflict')
@@ -693,7 +697,6 @@ class DataStore:
                         .get_level_values('__version_idx__') != 0)
             before_update = other_value_df.index[m_update].to_frame()
             before_update.__version_idx__ = before_update.__version_idx__ - 1
-            # from IPython import embed; embed()
             head_df = (self.head_df('value').reset_index()
                        .set_index(t_levels)
                        .loc[pd.MultiIndex.from_frame(before_update)])
@@ -710,13 +713,15 @@ class DataStore:
         merged_value_df = pd.concat((main_value_df, other_value_df))
         self.logger.debug('Merge:')
         self.logger.debug(merged_value_df)
+        self.validate_entry(merged_value_df) # External validation
         validity = self.validity(merged_value_df)
+        self.logger.debug('Validity:')
+        self.logger.debug(validity)
         m_invalid = validity.loc[other_value_df.index] != ''
         other_invalid_index = other_value_df[m_invalid].index
         if m_invalid.sum().sum() > 0:
             if check_validity:
                 self.logger.debug('Invalid entries:')
-                # from IPython import embed; embed()
                 # TODO fix reporting of validity
                 self.logger.debug(validity[m_invalid])
                 raise InvalidImport(other_invalid_index)
@@ -725,7 +730,7 @@ class DataStore:
                 self.validity = validity
 
         self.data_files.index = main_value_df.index
-        new = pd.Series([pd.NA]*len(other_value_df.index),
+        new = pd.Series([pd.NA] * len(other_value_df.index),
                         index=other_value_df.index)
         self.data_files = pd.concat((self.data_files, new), axis=1)
         for df_label in self.dfs:
@@ -737,7 +742,7 @@ class DataStore:
                 other_df = other_dfs[df_label]
                 if len(conflicting) != 0:
                     # Apply fixed conflicts
-                    main_df.index = main_value_df.index 
+                    main_df.index = main_value_df.index
                     other_df.index = other_value_df.index
                 if fill_missing_columns:
                     head_df = (self.head_df(df_label).reset_index()
@@ -749,6 +754,8 @@ class DataStore:
 
         if from_file is not None:
             self.data_files.loc[other_value_df.index] = data_file
+
+        self.invalidate_cached_views()
         # TODO: notify merge
         # TODO: notify index change if any conflict
 
@@ -780,9 +787,9 @@ class DataStore:
         index_vars = [v.var_label for v in self.variables if v.is_index()]
         m_dups = hdf[index_vars].duplicated(keep=False)
         if m_dups.sum() != 0:
-            from IPython import embed; embed()
             validity.loc[hdf.index[m_dups], index_vars] += \
                 ', non-unique-index'
+
         for variable in self.variables:
             if variable.is_unique:
                 m_dups = hdf[variable.var_label].duplicated(keep=False)
@@ -871,11 +878,10 @@ class DataStore:
                     value_df = value_df.set_index(index_variables)
                 except KeyError:
                     raise IndexNotFound(index_variables)
-                main_df = (self.dfs['value'].reset_index()
-                           .set_index(index_variables))
+                main_hdf = self.head_df()
                 # Resolve entries that are updates of existing ones
-                if main_df.shape[0] != 0:
-                    value_df = value_df.join(main_df[t_levels])
+                if main_hdf.shape[0] != 0:
+                    value_df = value_df.join(main_hdf[t_levels])
                     value_df['__version_idx__'] = value_df['__version_idx__']+1
                 else:
                     value_df['__entry_id__'] = pd.NA
@@ -884,6 +890,7 @@ class DataStore:
                 self.logger.debug('After resolving updates:')
                 self.logger.debug(value_df) 
                 m_new = pd.isna(value_df.__entry_id__)
+                
                 if m_new.sum() != 0:
                     self.logger.debug('Add UIDs for %d new entries',
                                       m_new.sum())
@@ -1447,18 +1454,18 @@ class TestDataStore(TestCase):
         ds.push_record({'v1' : 'test'})
         ds.push_variable('v1', 'string', is_unique=True)
         
-        self.assertRaises(InvalidValueError, ds.push_record, {'v1' : 'test'})
+        self.assertRaises(InvalidImport, ds.push_record, {'v1' : 'test'})
 
         ds.push_variable('v1', 'string', is_unique=False)
         ds.push_record({'v1' : 'test'})
         self.assertRaises(VariableChangeError, ds.push_variable, 'v1', 'string',
-                          unique=True)
+                          is_unique=True)
 
     def test_variable_nullable_change(self):
         ds = DataStore(self.filesystem, 'test_ds')
         ds.set_user('me')
         ds.push_variable('v1', 'string', nullable=False)
-        self.assertRaises(InvalidValueError, ds.push_record, {'v1' : None})
+        self.assertRaises(InvalidImport, ds.push_record, {'v1' : None})
 
         ds.push_variable('v1', 'string', nullable=True)
         ds.push_record({'v1' : None})
