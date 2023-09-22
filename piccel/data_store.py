@@ -81,6 +81,17 @@ VTYPES = {
                           '12345':np.int64(12345)},
         'bad_format_cases' : ['1.1', '', 'text', '1+2'],
     },
+    'singleton' : { # used to force data_store to have one single entry
+        'dtype_pd' : 'string',
+        'unformat' : lambda s : s,
+        'format' : lambda v : v,
+        'validate_dtype_pd' : lambda v : isinstance(v, str),
+        'validate_value' : lambda v: v == '1',
+        'null_value' : '1',
+        'na_value' : '1',
+        'corner_cases' : {'1' : '1'},
+        'bad_format_cases' : ['0', '', 'False'],
+    },
     'boolean' : {
         'dtype_pd' : 'boolean',
         'unformat' : unformat_boolean,
@@ -229,6 +240,7 @@ class PersistentVariables:
                                label=parent_store.label + '_vars', 
                                variables=PersistentVariables.META_VARS,
                                use_annotations=False,
+                               use_properties=False,
                                validate_entry=self.validate_entry,
                                notifications={'pushed_entry' :
                                               parent_store.on_variable_changes})
@@ -244,7 +256,7 @@ class PersistentVariables:
         current_vars_df = self.store.head_df()
         # Check only modified variables
         new_entry = new_entry.set_index('var_label')
-        modified_vars = new_entry.index.intersection(current_vars_df)
+        modified_vars = new_entry.index.intersection(current_vars_df.index)
         new_entry = new_entry.loc[modified_vars]
         previous = current_vars_df.loc[modified_vars]
 
@@ -266,7 +278,7 @@ class PersistentVariables:
                 # else no change in new entry, nothing to do
         else:
             if self.parent_store.data_is_empty(): # no data yet, allow any change
-                return true_df_like(new_entry)
+                return df_like(new_entry, fill_value=True, dtype='boolean')
             else:
                 full_df = self.parent_store.full_df()
                 for var_label, mod_var in new_entry.iterrows():
@@ -308,6 +320,7 @@ class PersistentLogic:
                                label=parent_store.label + '_code', 
                                variables=PersistentLogic.STORE_VARS,
                                use_annotations=False,
+                               use_properties=False,
                                notifications={'pushed_entry' :
                                               self.on_pushed_entry})
 
@@ -421,11 +434,16 @@ class DataStore:
         Var('archived', 'boolean'),
     ]
 
+    PROPERTY_VARS = [
+        Var('singleton', 'singleton', index_position=0),
+        Var('variables_locked', 'boolean', nullable=False)
+    ]
+
     DATA_FILE_EXT = '.csv'
 
     def __init__(self, filesystem, label=None, variables=None,
                  use_annotations=True, logic=None, validate_entry=None,
-                 notifications=None):
+                 notifications=None, use_properties=True):
         """
         For variables and logic, use persistent versions with history if they
         are None.
@@ -478,6 +496,16 @@ class DataStore:
         else:
             self.variables = PersistentVariables(self)
 
+        self.props_ds = None
+        if use_properties:
+            self.props_ds = DataStore(self.filesystem,
+                                      label=self.label + '_props',
+                                      variables=DataStore.PROPERTY_VARS,
+                                      use_annotations=False,
+                                      use_properties=False) 
+            if self.props_ds.data_is_empty():
+                self.props_ds.push_record({'variables_locked' : False})
+
         self.flag_ds = None
         self.note_ds = None
         if use_annotations:
@@ -486,6 +514,7 @@ class DataStore:
                                           label=self.label + '_flag_defs',
                                           variables=DataStore.FLAG_DEF_VARS,
                                           use_annotations=False,
+                                          use_properties=False,
                                           notifications={'pushed_entry':
                                                          self.on_pushed_flag_def})
 
@@ -493,6 +522,7 @@ class DataStore:
                                      label=self.label + '_flags',
                                      variables=DataStore.FLAG_ENTRY_VARS,
                                      use_annotations=False,
+                                     use_properties=False,
                                      notifications={'pushed_entry':
                                                     self.on_pushed_flag_def})
 
@@ -500,6 +530,7 @@ class DataStore:
                                      label=self.label + '_notes',
                                      variables=DataStore.NOTES_VARIABLES,
                                      use_annotations=False,
+                                     use_properties=False,
                                      notifications={'pushed_entry':
                                                     self.on_pushed_note})
 
@@ -517,8 +548,11 @@ class DataStore:
 
         self._refresh_data()
 
+    def variables_are_locked(self):
+        return self.props_ds.head_df()['variables_locked'].iat[0]
+
     def data_is_empty(self):
-        return self.df.empty
+        return self.dfs['value'].empty
 
     def _refresh_data(self):
         modified_files, new_files, deleted_files = \
@@ -597,8 +631,7 @@ class DataStore:
             return ''
 
         for variable in self.variables:
-            self.logger.debug('df_to_str: format column %s',
-                              variable.var_label)
+            #self.logger.debug('df_to_str: format col %s', variable.var_label)
             fmt = None
             if data_label == 'value':
                 fmt = VTYPES[variable.var_type]['format']
@@ -692,7 +725,18 @@ class DataStore:
         fill_missing_columns = False
         if set(main_value_df.columns) != other_columns:
             self.logger.debug('Missing columns in df to import')
-            # Duplicate head values for all columns in main not in other
+            cols_to_fill = [c for c in main_value_df.columns
+                            if c not in other_columns
+                            and not c.startswith('__')]
+            filled_variables = [v for v in self.variables
+                                if v.var_label not in other_columns]
+
+            # Fill missing columns with NA values
+            for var in filled_variables:
+                other_value_df[var.var_label] = VTYPES[var.var_type]['na_value']
+
+            # For entries that are updates, duplicate head values
+            # to fill missing columns
             m_update = (other_value_df.index
                         .get_level_values('__version_idx__') != 0)
             before_update = other_value_df.index[m_update].to_frame()
@@ -700,11 +744,9 @@ class DataStore:
             head_df = (self.head_df('value').reset_index()
                        .set_index(t_levels)
                        .loc[pd.MultiIndex.from_frame(before_update)])
-            selected_cols = [c for c in main_value_df.columns
-                             if c not in other_columns
-                             and not c.startswith('__')]
-            other_value_df = pd.concat((other_value_df, head_df[selected_cols]),
-                                       axis=0)
+            filled_cols = [v.var_label for v in filled_variables]
+            other_value_df.loc[m_update, filled_cols] = head_df[filled_cols]
+
             fill_missing_columns = True
         else:
             self.logger.debug('No missing column in df to import')
@@ -733,6 +775,7 @@ class DataStore:
         new = pd.Series([pd.NA] * len(other_value_df.index),
                         index=other_value_df.index)
         self.data_files = pd.concat((self.data_files, new), axis=1)
+
         for df_label in self.dfs:
             if df_label == 'value':
                 self.dfs[df_label] = merged_value_df
@@ -748,7 +791,7 @@ class DataStore:
                     head_df = (self.head_df(df_label).reset_index()
                                .set_index(t_levels)
                                .loc[pd.MultiIndex.from_frame(before_update)])
-                    other_df = pd.concat((other_df, head_df[selected_cols]),
+                    other_df = pd.concat((other_df, head_df[filled_cols]),
                                          axis=0)
                 self.dfs[df_label] = pd.concat((main_df, other_df))
 
@@ -869,11 +912,20 @@ class DataStore:
         self.logger.debug('Current main value df:')
         self.logger.debug(self.dfs['value'])
         if not set(t_levels).issubset(value_df.columns):
-            index_variables = [v.var_label for v in self.variables
-                               if v.is_index()]
+            index_variables = [v for v in self.variables if v.is_index()]
             if len(index_variables) > 0:
+                singleton_vars = [v.var_label for v in index_variables
+                                  if v.var_type == 'singleton']
+                index_variables = [v.var_label for v in index_variables]
                 self.logger.debug('Join pushed df on index variables %s',
                                   index_variables)
+
+                if (len(singleton_vars) != 0 and
+                    not set(singleton_vars).issubset(value_df.columns)):
+                    value_df[singleton_vars] = VTYPES['singleton']['na_value']
+                    comment_df[singleton_vars] = VTYPES['string']['na_value']
+                    user_df[singleton_vars] = VTYPES['string']['na_value']
+                    timestamp_df[singleton_vars] = VTYPES['datetime']['na_value']
                 try:
                     value_df = value_df.set_index(index_variables)
                 except KeyError:
@@ -1143,6 +1195,8 @@ class DataStore:
         return self.dfs[data_label]
 
     def head_df(self, data_label='value'):
+        if self.data_is_empty():
+            return pd.DataFrame([])
 
         if self.head_dfs[data_label] is None:
             # Recompute cached head views
