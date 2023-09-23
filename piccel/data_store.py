@@ -189,6 +189,14 @@ class Var:
 
         self.index_position = index_position
 
+        if index_position is not None:
+            if not is_unique:
+                logger.warning('Index variable %s must be unique', var_label)
+            is_unique = True
+            if nullable:
+                logger.warning('Index variable %s cannot be NA', var_label)
+            nullable = False
+
         self.is_unique = is_unique
         self.is_used = is_used
         self.nullable = nullable
@@ -243,7 +251,7 @@ class PersistentVariables:
                                use_properties=False,
                                validate_entry=self.validate_entry,
                                notifications={'pushed_entry' :
-                                              parent_store.on_variable_changes})
+                                              parent_store.on_variable_entry})
 
     def __iter__(self):
         hdf = self.store.head_df().drop(columns=DataStore.TRACKING_INDEX_LEVELS)
@@ -481,18 +489,15 @@ class DataStore:
         self.dfs = {}
         self.head_dfs = {}        
         for label in DataStore.DATA_LABELS:
-            df = pd.DataFrame(columns=DataStore.TRACKING_INDEX_LEVELS)
-            for col in DataStore.TRACKING_INDEX_LEVELS:
-                df[col] = df[col].astype(np.int64)
-            df = df.set_index(DataStore.TRACKING_INDEX_LEVELS)
-            self.dfs[label] = df
+            self.dfs[label] = (self.empty_df()
+                               .set_index(DataStore.TRACKING_INDEX_LEVELS))
             self.head_dfs[label] = None
-        self.data_files = pd.Series([], index=df.index)
+        self.data_files = pd.Series([], index=self.dfs['value'].index)
 
         if variables is not None:
             self.variables = FixedVariables(variables)
-            self.on_variable_changes([(None, variable.asdict())
-                                      for variable in self.variables])
+            self.process_variable_changes([(None, variable.asdict())
+                                           for variable in self.variables])
         else:
             self.variables = PersistentVariables(self)
 
@@ -745,8 +750,8 @@ class DataStore:
                        .set_index(t_levels)
                        .loc[pd.MultiIndex.from_frame(before_update)])
             filled_cols = [v.var_label for v in filled_variables]
-            other_value_df.loc[m_update, filled_cols] = head_df[filled_cols]
-
+            if m_update.sum() != 0:
+                other_value_df.loc[m_update, filled_cols] = head_df[filled_cols]
             fill_missing_columns = True
         else:
             self.logger.debug('No missing column in df to import')
@@ -788,10 +793,15 @@ class DataStore:
                     main_df.index = main_value_df.index
                     other_df.index = other_value_df.index
                 if fill_missing_columns:
+                    # Fill missing columns with NA values
+                    for var in filled_variables:
+                        other_df[var.var_label] = VTYPES[var.var_type]['na_value']
+
                     head_df = (self.head_df(df_label).reset_index()
                                .set_index(t_levels)
                                .loc[pd.MultiIndex.from_frame(before_update)])
-                    other_df = pd.concat((other_df, head_df[filled_cols]),
+                    if m_update.sum() != 0:
+                        other_df.loc[m_update, filled_cols] = pd.concat((other_df, head_df[filled_cols]),
                                          axis=0)
                 self.dfs[df_label] = pd.concat((main_df, other_df))
 
@@ -799,6 +809,7 @@ class DataStore:
             self.data_files.loc[other_value_df.index] = data_file
 
         self.invalidate_cached_views()
+        self.notifier.notify('pushed_entry', other_value_df)
         # TODO: notify merge
         # TODO: notify index change if any conflict
 
@@ -1016,25 +1027,51 @@ class DataStore:
             self.note_ds.refresh()
         self._refresh_data()
 
-    def on_variable_changes(self, changes):
-        # ASSUME validation has been done before push
+    def iter_previous(self, tracking_index):
+        m_update = (tracking_index.get_level_values('__version_idx__') != 0)
+        df = self.dfs['value']
+        for eid, vidx, cidx in tracking_index:
+            if vidx == 0:
+                yield None
+            else:
+                max_cidx = (df.index[df.index.get_locs((eid, vidx-1))]
+                            .get_level_values(2).max())
+                yield self.dfs.loc[(eid, vidx-1, max_cidx)]
 
-        if len(changes) != 0:
-            self.invalidate_cached_views() # do it before notifications because
-                                           # notifiees can request updated views
-        for var_old, var_new in changes:
+    def on_variable_entry(self, entry_df):
+        iter_changes = zip(self.variables.store.iter_previous(entry_df.index),
+                           (r for _,r in entry_df.iterrows()))
+        self.process_variable_changes(iter_changes)
+
+    def process_variable_changes(self, changes):
+        # ASSUME validation has been done before push
+            
+        for ichange, (var_old, var_new) in enumerate(changes):
+
+            if ichange == 0:
+                # do it before notifications because
+                # notifiees can request updated views:
+                self.invalidate_cached_views() 
+                
             if var_old is not None:
                 label_old = var_old['var_label']
                 if var_new is not None: # modified variable
                     label_new = var_new['var_label']
 
                     if label_old != label_new:
+                        self.logger.debug('Process change of variable label: '
+                                          '%s to %s', label_old, label_new) 
                         for dlabel, df in self.dfs.items():
                             self.dfs[dlabel] = df.rename({label_old : label_new})
                         self.notifier.notify('column_renamed', label_old,
                                              label_new)
 
                     if var_old['var_type'] != var_new['var_type']:
+                        self.logger.debug('Process change of variable type '
+                                          'for %s from %s to %s', label_new,
+                                          var_old['var_type'],
+                                          var_new['var_type']) 
+
                         dtype_new = VTYPES[var_new['var_new']]['dtype_pd']
                         for dlabel, df in self.dfs.items():
                             self.dfs[dlabel][label_new] = (df[label_new]
@@ -1042,6 +1079,8 @@ class DataStore:
                         self.notifier.notify('column_values_changed', label_new)
 
                     if var_old['nullable'] and not var_new['nullable']:
+                        self.logger.debug('Process variable %s '
+                                          'that becomes nullable ', label_new)
                         nans = pd.isna(self.dfs['value'][label_new])
                         if nans.any():
                             na_fill = VTYPES[var_new['var_new']]['null_value']
@@ -1056,6 +1095,11 @@ class DataStore:
                                                  index_changed, label_new)
 
                     if var_old['index_position'] != var_new['index_position']:
+                        self.logger.debug('Process change of index position for ',
+                                          'variable %s, from %s to %s',
+                                          label_new, var_old['index_position'],
+                                          var_new['index_position'])
+
                         if pd.isna(var_new['index_position']):
                             self.notifier.notify('head_index_removed',
                                                  label_new)
@@ -1064,23 +1108,36 @@ class DataStore:
 
                     if var_old['is_used'] != var_new['is_used']:
                         if not var_new['is_used']:
+                            self.logger.debug('Process variable %s '
+                                              'that becomes unused ', label_new)
                             self.notifier.notify('head_column_removed',
                                                  label_new)
                         else:
+                            self.logger.debug('Process variable %s '
+                                              'that becomes used ', label_new)
+
                             self.notifier.notify('head_column_added',
                                                  label_new)
 
                     if var_old['column_position'] != var_new['column_position']:
+                        self.logger.debug('Process change of column position '
+                                          'for variable %s, from %s to %s',
+                                          label_new, var_old['column_position'],
+                                          var_new['column_position'])
+                        
                         self.notifier.notify('head_column_position_changed',
                                              label_new,
                                              var_old['column_position'],
                                              var_new['column_position'])
                 else: # deleted variable
+                    logger.debug('Process deletion of variable %s', label_old)
                     for dlabel, df in self.dfs.items():
                         self.dfs[dlabel] = df.drop(column=[var_old['var_label']])
                     self.notifier.notify('column_removed', var_old['var_label'])
             else: # new variable
                 vlabel = var_new['var_label']
+                self.logger.debug('Process addition of variable %s (type:%s)',
+                                  vlabel, var_new['var_type'])
                 tdef = VTYPES[var_new['var_type']]
                 for d_label, tdef in (('value', VTYPES[var_new['var_type']]),
                                       ('timestamp', VTYPES['datetime']),
@@ -1141,15 +1198,10 @@ class DataStore:
     def push_variable(self, var_label, var_type, nullable=True,
                       index_position=None, is_unique=False, is_used=True,
                       column_position=None):
-        return self.variables.store.push_record({
-            'var_label' : var_label,
-            'var_type' : var_type,
-            'nullable' : nullable,
-            'index_position' : index_position,
-            'is_unique' : is_unique,
-            'is_used' : is_used,
-            'column_position' : column_position,
-        })
+        variable = Var(var_label, var_type, nullable=nullable,
+                       index_position=index_position, is_unique=is_unique,
+                       is_used=is_used, column_position=column_position)
+        return self.variables.store.push_record(variable.asdict())
 
     def invalid_entries(self):
         return []
@@ -1194,21 +1246,33 @@ class DataStore:
     def full_df(self, data_label='value'):
         return self.dfs[data_label]
 
+    def empty_df(self):
+        df = pd.DataFrame(columns=DataStore.TRACKING_INDEX_LEVELS)
+        for col in DataStore.TRACKING_INDEX_LEVELS:
+            df[col] = df[col].astype(np.int64)
+        return df
+        
     def head_df(self, data_label='value'):
-        if self.data_is_empty():
-            return pd.DataFrame([])
-
         if self.head_dfs[data_label] is None:
             # Recompute cached head views
-            hdf = (self.dfs[data_label]
-                  .groupby(level=0, group_keys=False)
-                  .tail(1).reset_index())
+            if self.data_is_empty():
+                hdf = self.empty_df()
+                for variable in self.variables:
+                    tdef = VTYPES[variable.var_type]
+                    hdf[variable.var_label] = tdef['na_value']
+                    hdf[variable.var_label] = (hdf[variable.var_label]
+                                               .astype(tdef['dtype_pd']))
+            else:
+                hdf = (self.dfs[data_label]
+                       .groupby(level=0, group_keys=False)
+                       .tail(1).reset_index())
             
             index_variables = [v.var_label for v in self.variables
                                if v.is_index()]
 
             if len(index_variables) != 0:
-                hdf = hdf.set_index(index_variables)
+                hdf = hdf.set_index(index_variables).sort_index()
+                
             self.head_dfs[data_label] = hdf
 
         return self.head_dfs[data_label]
@@ -1432,19 +1496,21 @@ class TestDataStore(TestCase):
 
         ds.push_record({'v1' : 'other',
                         'my_index' : 34})
-
-        assert_frame_equal(ds.head_df(),
-                           (pd.DataFrame({'v1' : ['test', 'other'],
-                                          'my_index' : [10, 34]})
-                            .set_index('my_index')))
+        t_levels = DataStore.TRACKING_INDEX_LEVELS
+        expected_df = pd.DataFrame({'v1' : ['test', 'other'],
+                                    'my_index' : [10, 34]})
+        expected_df.my_index = expected_df.my_index.astype('Int64')
+        assert_frame_equal(ds.head_df().drop(columns=t_levels),
+                           expected_df.set_index('my_index'))
 
         ds.push_record({'v1' : 'updated',
                         'my_index' : 10})
 
-        assert_frame_equal(ds.head_df(),
-                           (pd.DataFrame({'v1' : ['test', 'updated'],
-                                         'entry_id' : [10, 34]})
-                            .set_index('my_index')))
+        expected_df = pd.DataFrame({'v1' : ['test', 'udpated'],
+                                    'my_index' : [10, 34]})
+        expected_df.my_index = expected_df.my_index.astype('Int64')
+        assert_frame_equal(ds.head_df().drop(columns=t_levels),
+                           expected_df.set_index('my_index'))
 
     def test_multi_index(self):
         ds = DataStore(self.filesystem, 'test_ds')
