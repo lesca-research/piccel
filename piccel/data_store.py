@@ -71,7 +71,8 @@ VTYPES = {
         'bad_format_cases' : [],
     },
     'int' : {
-        'dtype_pd' : 'Int64',
+        'dtype_pd' : 'Int64', # TODO for non-NA values,
+                              # int64 may be more efficient
         'unformat' : lambda s : np.int64(s),
         'format' : lambda i : '%d' % i,
         'validate_dtype_pd' : pd.api.types.is_int64_dtype,
@@ -189,10 +190,7 @@ class Var:
 
         self.index_position = index_position
 
-        if index_position is not None:
-            if not is_unique:
-                logger.warning('Index variable %s must be unique', var_label)
-            is_unique = True
+        if index_position is not None and not pd.isna(index_position):
             if nullable:
                 logger.warning('Index variable %s cannot be NA', var_label)
             nullable = False
@@ -204,7 +202,8 @@ class Var:
         self.column_position = column_position
 
     def is_index(self):
-        return self.index_position is not None
+        return (self.index_position is not None and
+                not pd.isna(self.index_position))
 
     def asdict(self):
         return {
@@ -223,6 +222,11 @@ class FixedVariables:
 
     def __iter__(self):
         return iter(self.variables.values())
+
+    def indexes(self):
+        return list(sorted((v for v in self.variables.values()
+                            if v.is_index()),
+                           key=lambda e: e.index_position))
 
     def validate_dtypes(self):
         return False # stub
@@ -257,6 +261,9 @@ class PersistentVariables:
         hdf = self.store.head_df().drop(columns=DataStore.TRACKING_INDEX_LEVELS)
         return (Var(idx, **row) for idx, row in hdf.iterrows())
 
+    def indexes(self):
+        return list(sorted((v for v in self if v.is_index()),
+                           key=lambda e: e.index_position))
     def refresh(self):
         self.store.refresh()
     
@@ -337,6 +344,7 @@ class PersistentLogic:
             if row['code_entry'] == '':
                 pass
 
+    
 class TestVariable(TestCase):
 
     def test_fixed_variables(self):
@@ -923,7 +931,7 @@ class DataStore:
         self.logger.debug('Current main value df:')
         self.logger.debug(self.dfs['value'])
         if not set(t_levels).issubset(value_df.columns):
-            index_variables = [v for v in self.variables if v.is_index()]
+            index_variables = self.variables.indexes()
             if len(index_variables) > 0:
                 singleton_vars = [v.var_label for v in index_variables
                                   if v.var_type == 'singleton']
@@ -996,6 +1004,19 @@ class DataStore:
             'user' : user_df.set_index(t_levels),
             'timestamp' : timestamp_df.set_index(t_levels),
         }
+        df = other_dfs['value']
+        for v in self.variables:
+            dtype = VTYPES[v.var_type]['dtype_pd']
+            df[v.var_label] = df[v.var_label].astype(dtype)
+        other_dfs['value'] = df
+
+        for d_label, tdef in (('timestamp', VTYPES['datetime']),
+                              ('user', VTYPES['string']),
+                              ('comment', VTYPES['string'])):
+            for v in self.variables:
+                self.dfs[d_label][v.var_label] = \
+                    self.dfs[d_label][v.var_label].astype(tdef['dtype_pd'])
+
         tracking_index = self.import_df(other_dfs)
         self.save_entry(other_dfs)
         # self.dfs['value'].loc[tracking_index, '__fn__'] = data_fn
@@ -1267,12 +1288,12 @@ class DataStore:
                        .groupby(level=0, group_keys=False)
                        .tail(1).reset_index())
             
-            index_variables = [v.var_label for v in self.variables
-                               if v.is_index()]
+            index_variables = self.variables.indexes()
 
             if len(index_variables) != 0:
-                hdf = hdf.set_index(index_variables).sort_index()
-                
+                hdf = (hdf.set_index([v.var_label for v in index_variables])
+                       .sort_index())
+
             self.head_dfs[data_label] = hdf
 
         return self.head_dfs[data_label]
@@ -1479,12 +1500,16 @@ class TestDataStore(TestCase):
         ds.push_record({'v1' : 'test'})
         tidx = ds.push_record({'v1' : 'other test'})
 
-        assert_frame_equal(ds.head_df().reset_index(drop=True),
-                           pd.DataFrame({'v1' : ['test', 'other test']}))
+        t_levels = DataStore.TRACKING_INDEX_LEVELS
+
+        expected = pd.DataFrame({'v1' : ['test', 'other test']})
+        assert_frame_equal(ds.head_df().drop(columns=t_levels),
+                           expected)
 
         ds.push_record({'v1' : 'other test update'}, tracking_index=tidx)
-        assert_frame_equal(ds.head_df().reset_index(drop=True),
-                           pd.DataFrame({'v1' : ['test', 'other test update']}))
+        expected = pd.DataFrame({'v1' : ['test', 'other test update']})
+        assert_frame_equal(ds.head_df().drop(columns=t_level),
+                           expected)
 
     def test_data_push_indexed_entry(self):
         ds = DataStore(self.filesystem, 'test_ds')
@@ -1504,9 +1529,9 @@ class TestDataStore(TestCase):
                            expected_df.set_index('my_index'))
 
         ds.push_record({'v1' : 'updated',
-                        'my_index' : 10})
+                        'my_index' : 34})
 
-        expected_df = pd.DataFrame({'v1' : ['test', 'udpated'],
+        expected_df = pd.DataFrame({'v1' : ['test', 'updated'],
                                     'my_index' : [10, 34]})
         expected_df.my_index = expected_df.my_index.astype('Int64')
         assert_frame_equal(ds.head_df().drop(columns=t_levels),
@@ -1523,11 +1548,15 @@ class TestDataStore(TestCase):
         ds.push_record({'pid' : 'CE01',
                         'interview' : 'preliminary',
                         'age' : 54})
-        assert_frame_equal(ds.head_df(),
-                           (pd.DataFrame({'pid' : ['CE01'],
-                                          'interview' : ['preliminary'],
-                                          'age' : [54]})
-                            .set_index(['pid', 'interview'])))
+        t_levels = DataStore.TRACKING_INDEX_LEVELS
+        expected = (pd.DataFrame({'pid' : ['CE01'],
+                                  'interview' : ['preliminary'],
+                                  'age' : [54]}))
+        expected[['pid', 'interview']] = \
+            expected[['pid', 'interview']].astype('string')
+        expected['age'] = expected['age'].astype('Int64')
+        assert_frame_equal(ds.head_df().drop(columns=t_levels),
+                           expected.set_index(['pid', 'interview']))
 
     def test_fordidden_variable_type_change(self):
         ds = DataStore(self.filesystem, 'test_ds')
