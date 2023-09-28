@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os.path as op
+import io
 from itertools import product, chain
 from datetime import datetime, date, timezone
 from copy import deepcopy
@@ -63,7 +64,7 @@ VTYPES = {
         'dtype_pd' : 'string',
         'unformat' : lambda s : s,
         'format' : lambda v : v,
-        'validate_dtype_pd' : lambda v : isinstance(v, str),
+        'validate_dtype_pd' : pd.api.types.is_string_dtype,
         'null_value' : '',
         'na_value' : pd.NA,
         'corner_cases' : {'':'', 'a´*€$éà ':'a´*€$éà ', '12':'12',
@@ -86,7 +87,7 @@ VTYPES = {
         'dtype_pd' : 'string',
         'unformat' : lambda s : s,
         'format' : lambda v : v,
-        'validate_dtype_pd' : lambda v : isinstance(v, str),
+        'validate_dtype_pd' : pd.api.types.is_string_dtype,
         'validate_value' : lambda v: v == '1',
         'null_value' : '1',
         'na_value' : '1',
@@ -97,7 +98,7 @@ VTYPES = {
         'dtype_pd' : 'boolean',
         'unformat' : unformat_boolean,
         'format' : lambda b : str(b),
-        'validate_dtype_pd' : lambda v : isinstance(v, bool),
+        'validate_dtype_pd' : pd.api.types.is_bool_dtype,
         'null_value' : False,
         'na_value' : pd.NA,
         'corner_cases' : {'False':False, 'True':True, '':False},
@@ -132,15 +133,14 @@ VTYPES = {
         'null_value' : datetime.now(),
         'na_value' : pd.NaT,
         'corner_cases' : {'2011-11-04 00:05:23.283+00:00':
-                          datetime(2011, 11, 4, 0, 5, 23, 283000,
-                                   tzinfo=timezone.utc)},
+                          datetime(2011, 11, 4, 0, 5, 23, 283000)},
         'bad_format_cases' : ['01-02-2020', '2011-11-04 00h05',
                               'true', 'text', 'np.pi'],
     }
 }
 def unformat(s, var_type):
     if s == '':
-        return VTYPES[var_type].na_value
+        return VTYPES[var_type]['na_value']
     else:
         return VTYPES[var_type]['unformat'](s)
 
@@ -152,7 +152,6 @@ VTYPES['symbol']['validate_value'] = lambda v: v in FLAGS_SYMBOLS
 
 VTYPES['flag_index'] = deepcopy(VTYPES['int'])
 VTYPES['flag_index']['validate_value'] = lambda v: (v >= 0) and (v < 64)
-
 
 VTYPES['ds_code_entry'] = deepcopy(VTYPES['string'])
 # TODO: add validation & conversion to compiled code object
@@ -188,9 +187,11 @@ class Var:
             raise BadVariableType(var_type)
         self.var_type = var_type
 
+        if pd.isna(index_position):
+            index_position = None
         self.index_position = index_position
 
-        if index_position is not None and not pd.isna(index_position):
+        if index_position is not None:
             if nullable:
                 logger.warning('Index variable %s cannot be NA', var_label)
             nullable = False
@@ -199,11 +200,12 @@ class Var:
         self.is_used = is_used
         self.nullable = nullable
 
+        if pd.isna(column_position):
+            column_position = None
         self.column_position = column_position
 
     def is_index(self):
-        return (self.index_position is not None and
-                not pd.isna(self.index_position))
+        return self.index_position is not None
 
     def asdict(self):
         return {
@@ -237,13 +239,13 @@ class FixedVariables:
 class PersistentVariables:
     
     META_VARS = [
-        Var('var_label', 'string', index_position=0),
-        Var('var_type', 'variable_type'),
-        Var('nullable', 'boolean'),
-        Var('index_position', 'int', is_unique=True),
-        Var('is_unique', 'boolean'),
-        Var('is_used', 'boolean'),
-        Var('column_position', 'int'), # TODO use float for easier moves
+        Var('var_label', 'string', index_position=0, nullable=False),
+        Var('var_type', 'variable_type', nullable=False),
+        Var('nullable', 'boolean', nullable=False),
+        Var('index_position', 'number', is_unique=True, nullable=True),
+        Var('is_unique', 'boolean', nullable=False),
+        Var('is_used', 'boolean', nullable=False),
+        Var('column_position', 'number'),
     ]
 
     def __init__(self, parent_store):
@@ -256,6 +258,7 @@ class PersistentVariables:
                                validate_entry=self.validate_entry,
                                notifications={'pushed_entry' :
                                               parent_store.on_variable_entry})
+        self.logger = DataStoreLogger(logger, {'store_label' : 'PersVar'})
 
     def __iter__(self):
         hdf = self.store.head_df().drop(columns=DataStore.TRACKING_INDEX_LEVELS)
@@ -299,19 +302,32 @@ class PersistentVariables:
                 for var_label, mod_var in new_entry.iterrows():
                     current_var = current_vars_df.loc[var_label]
                     # check type change
-                    if ( (current_var['var_type'], mod_var['var_type']) not in
+                    if ( current_var['var_type'] != mod_var['var_type'] and
+                         (current_var['var_type'], mod_var['var_type']) not in
                          ALLOWED_VARIABLE_TYPE_CHANGE ):
+                        self.logger.error('Variable %s cannot change type '
+                                          '%s to %s', var_label,
+                                          current_var['var_type'],
+                                          mod_var['var_type'])
                         raise VariableChangeError(var_label)
                     # check uniqueness / index
-                    if ( (not current_var['is_unique'] and
-                          mod_var['is_unique']) or
-                         (pd.isna(current_var['index_position']) and
-                          not pd.isna(mod_var['index_position'])) ):
+                    if (not current_var['is_unique'] and
+                          mod_var['is_unique']):
+                        # TODO actually check that values are not unique
+                        self.logger.error('Variable %s cannot become unique',
+                                          var_label)
+                        raise VariableChangeError(var_label)
+                    if (pd.isna(current_var['index_position']) and
+                          not pd.isna(mod_var['index_position'])):
+                        self.logger.error('Variable %s cannot become an index',
+                                          var_label)
                         raise VariableChangeError(var_label)
                     # check nullable
                     if ((current_var['nullable'] and
                         not  mod_var['nullable']) and
                         pd.isna(full_df[var_label]).any()):
+                        self.logger.error('Variable %s cannot become nullable',
+                                          var_label)
                         raise VariableChangeError(var_label)
 
 def df_like(df, fill_value=pd.NA, dtype=None):
@@ -322,7 +338,7 @@ def df_like(df, fill_value=pd.NA, dtype=None):
 
 class PersistentLogic:
     STORE_VARS = [
-        Var('code_entry', 'ds_code_entry', index_position=0),
+        Var('code_entry', 'ds_code_entry', index_position=0, nullable=False),
         Var('code', 'string')
     ]
 
@@ -436,22 +452,22 @@ class DataStore:
     ]
 
     FLAG_ENTRY_VARS = [
-        Var('index_hash', 'int', index_position=0),
-        Var('index_repr', 'string'),
-        Var('variable', 'string'),
+        Var('index_hash', 'int', index_position=0, nullable=False),
+        Var('index_repr', 'string', nullable=False),
+        Var('variable', 'string', index_position=1, nullable=False),
         Var('flag', 'int'),
     ]
 
     NOTES_VARIABLES = [
-        Var('index_hash', 'int', index_position=0),
-        Var('index_repr', 'string'),
-        Var('variable', 'string'),
+        Var('index_hash', 'int', index_position=0, nullable=False),
+        Var('index_repr', 'string', nullable=False),
+        Var('variable', 'string', index_position=1, nullable=False),
         Var('note', 'string'),
-        Var('archived', 'boolean'),
+        Var('archived', 'boolean', nullable=False),
     ]
 
     PROPERTY_VARS = [
-        Var('singleton', 'singleton', index_position=0),
+        Var('singleton', 'singleton', index_position=0, nullable=False),
         Var('variables_locked', 'boolean', nullable=False)
     ]
 
@@ -568,6 +584,7 @@ class DataStore:
         return self.dfs['value'].empty
 
     def _refresh_data(self):
+        self.logger.debug('Refresh data from %s', self.filesystem.root_folder)
         modified_files, new_files, deleted_files = \
             self.filesystem.external_changes()
         if len(new_files) != 0:
@@ -615,7 +632,7 @@ class DataStore:
             converters = {v.var_label : ufmt for v in self.variables}
         else:
             converters = None
-        df = pd.read_csv(io.StringIO(df_str), sep=DataSheet.CSV_SEPARATOR,
+        df = pd.read_csv(io.StringIO(df_str), sep=DataStore.CSV_SEPARATOR,
                          engine='python', index_col=False,
                          converters=converters)
 
@@ -637,7 +654,7 @@ class DataStore:
         df['__version_idx__'] = (df['__version_idx__'].apply(int)
                                  .astype(np.int64))
         df['__conflict_idx__'] = np.int64(0)
-        return df.set_index(DataStore.TRACKING_INDEX)
+        return df.set_index(DataStore.TRACKING_INDEX_LEVELS)
 
     def df_to_str(self, df, data_label):
         if df is None or df.shape[0] == 0:
@@ -854,7 +871,8 @@ class DataStore:
 
         for variable in self.variables:
             if variable.is_unique:
-                m_dups = hdf[variable.var_label].duplicated(keep=False)
+                values = hdf[variable.var_label]
+                m_dups = (~pd.isna(values)) & values.duplicated(keep=False)
                 if m_dups.sum() != 0:
                     validity.loc[hdf.index[m_dups], variable.var_label] += \
                         ', non-unique'
@@ -882,7 +900,11 @@ class DataStore:
 
     def push_record(self, record, comment=None, tracking_index=None,
                     timestamp=None):
-        value_df = pd.DataFrame.from_records([record])
+        if isinstance(record, dict):
+            records = [record]
+        elif isinstance(record, list):
+            records = record
+        value_df = pd.DataFrame.from_records(records)
         if comment is None:
             comment_df = df_like(value_df, fill_value=pd.NA, dtype='string')
         else:
@@ -1027,8 +1049,11 @@ class DataStore:
         while self.filesystem.exists(op.join('data', entry_rfn)):
             entry_rfn = '%d.csv' % uuid1().int
         entry_fn = op.join('data', entry_rfn)
-        self.logger.debug('Save entry %s to %s',
-                          dfs['value'].index.to_list(), entry_fn)
+        if dfs['value'].shape[0] > 10:
+            entry_str = '%d entries' % len(dfs['value'].index)
+        else:
+            entry_str = 'entry %s' % dfs['value'].index.to_list()
+        self.logger.debug('Save %s to %s', entry_str, entry_fn)
         content = json.dumps({k:self.df_to_str(df, k)
                               for k,df in dfs.items()})
         self.filesystem.save(entry_fn, content)
@@ -1041,7 +1066,7 @@ class DataStore:
 
     def refresh(self):
         self.variables.refresh()
-        self.logic.refresh()
+        # self.logic.refresh() # TODO
         if self.flag_ds is not None:
             self.flag_ds.refresh()
         if self.note_ds is not None:
@@ -1057,7 +1082,7 @@ class DataStore:
             else:
                 max_cidx = (df.index[df.index.get_locs((eid, vidx-1))]
                             .get_level_values(2).max())
-                yield self.dfs.loc[(eid, vidx-1, max_cidx)]
+                yield df.loc[(eid, vidx-1, max_cidx)]
 
     def on_variable_entry(self, entry_df):
         iter_changes = zip(self.variables.store.iter_previous(entry_df.index),
@@ -1093,10 +1118,9 @@ class DataStore:
                                           var_old['var_type'],
                                           var_new['var_type']) 
 
-                        dtype_new = VTYPES[var_new['var_new']]['dtype_pd']
-                        for dlabel, df in self.dfs.items():
-                            self.dfs[dlabel][label_new] = (df[label_new]
-                                                           .astype(dtype_new))
+                        dtype_new = VTYPES[var_new['var_type']]['dtype_pd']
+                        self.dfs['value'][label_new] = \
+                            (self.dfs['value'][label_new].astype(dtype_new))
                         self.notifier.notify('column_values_changed', label_new)
 
                     if var_old['nullable'] and not var_new['nullable']:
@@ -1115,8 +1139,15 @@ class DataStore:
                             self.notifier.notify('values_changed',
                                                  index_changed, label_new)
 
-                    if var_old['index_position'] != var_new['index_position']:
-                        self.logger.debug('Process change of index position for ',
+                    if (not (pd.isna(var_old['index_position']) and
+                             pd.isna(var_new['index_position'])) and
+                         ( (pd.isna(var_old['index_position']) and
+                            not pd.isna(var_new['index_position'])) or
+                           (pd.isna(var_new['index_position']) and
+                            not pd.isna(var_old['index_position'])) or
+                           var_old['index_position'] != var_new['index_position'])
+                        ):
+                        self.logger.debug('Process change of index position for '
                                           'variable %s, from %s to %s',
                                           label_new, var_old['index_position'],
                                           var_new['index_position'])
@@ -1126,7 +1157,6 @@ class DataStore:
                                                  label_new)
                         else:
                             self.notifier.notify('head_index_added', label_new)
-
                     if var_old['is_used'] != var_new['is_used']:
                         if not var_new['is_used']:
                             self.logger.debug('Process variable %s '
@@ -1140,7 +1170,14 @@ class DataStore:
                             self.notifier.notify('head_column_added',
                                                  label_new)
 
-                    if var_old['column_position'] != var_new['column_position']:
+                    if (not (pd.isna(var_old['column_position']) and
+                             pd.isna(var_new['column_position'])) and
+                         ( (pd.isna(var_old['column_position']) and
+                            not pd.isna(var_new['column_position'])) or
+                           (pd.isna(var_new['column_position']) and
+                            not pd.isna(var_old['column_position'])) or
+                           var_old['column_position']!=var_new['column_position'])
+                        ):
                         self.logger.debug('Process change of column position '
                                           'for variable %s, from %s to %s',
                                           label_new, var_old['column_position'],
@@ -1234,33 +1271,35 @@ class DataStore:
 
         # Validate index in full df
         validate_int = VTYPES['int']['validate_dtype_pd']
-        for index_level in DataStore.TRACKING_INDEX_LEVELS:
-            dtype = self.df.index.dtypes[index_level]
-            validity = validate_int(dtype)
-            if not validity:
-                self.logger.error('Index level %s has invalid dtype: %s',
-                                  index_level, dtype)
-            is_valid &= validity
+        for dlabel, df in self.dfs.items():
+            for index_level in DataStore.TRACKING_INDEX_LEVELS:
+                dtype = df.index.dtypes[index_level]
+                validity = validate_int(dtype)
+                if not validity:
+                    self.logger.error('Index level %s in %s has invalid '
+                                      'dtype: %s', index_level, dtype)
+                is_valid &= validity
 
         # Validate columns in full & head df
-        for df in (self.head_df(), self.df):
+        for df in (self.head_df(), self.dfs['value']):
             for variable in self.variables:
-                type_def = VTYPES[variable.vtype]
+                type_def = VTYPES[variable.var_type]
                 dtype = df[variable.var_label].dtype
                 validity = type_def['validate_dtype_pd'](dtype)
                 if not validity:
                     self.logger.error('Column of %s (%s) has invalid '
-                                      'dtype: %s', variable,
-                                      variable.vtype, dtype)
+                                      'dtype: %s', variable.var_label,
+                                      variable.var_type, dtype)
                 is_valid &= validity
-
-        is_valid &= self.variables.validate_dtypes()
 
         if self.flag_ds is not None:
             is_valid &= self.flag_ds.validate_dtypes()
 
         if self.annotation_ds is not None:
             is_valid &= self.annotation_ds.validate_dtypes()
+
+        if self.props_ds is not None:
+            is_valid &= self.props_ds.validate_dtypes()
 
         return is_valid
 
@@ -1274,11 +1313,12 @@ class DataStore:
         return df
         
     def head_df(self, data_label='value'):
+        variables = list(self.variables)
         if self.head_dfs[data_label] is None:
             # Recompute cached head views
             if self.data_is_empty():
                 hdf = self.empty_df()
-                for variable in self.variables:
+                for variable in variables:
                     tdef = VTYPES[variable.var_type]
                     hdf[variable.var_label] = tdef['na_value']
                     hdf[variable.var_label] = (hdf[variable.var_label]
@@ -1287,16 +1327,27 @@ class DataStore:
                 hdf = (self.dfs[data_label]
                        .groupby(level=0, group_keys=False)
                        .tail(1).reset_index())
-            
-            index_variables = self.variables.indexes()
 
+            index_variables = self.variables.indexes()
             if len(index_variables) != 0:
                 hdf = (hdf.set_index([v.var_label for v in index_variables])
                        .sort_index())
 
             self.head_dfs[data_label] = hdf
 
-        return self.head_dfs[data_label]
+        hdf = self.head_dfs[data_label]
+        order = ([v.var_label
+                  for v in chain(sorted((v for v in variables
+                                         if (v.index_position is None and
+                                             v.column_position is not None)),
+                                        key=lambda v: v.column_position),
+                                 sorted((v for v in variables
+                                         if (v.index_position is None and
+                                             v.column_position is None)),
+                                         key=lambda v: v.var_label))] +
+                 DataStore.TRACKING_INDEX_LEVELS)
+        hdf = hdf[order]
+        return hdf
 
 class TestDataStore(TestCase):
 
@@ -1318,6 +1369,8 @@ class TestDataStore(TestCase):
         self.assertFalse(DataStore.is_valid_flag_label('1flag'))
         self.assertFalse(DataStore.is_valid_flag_label('A flag'))
         self.assertTrue(DataStore.is_valid_flag_label('flag_1'))
+
+    # TODO test format / unformat for all VTYPES
 
     # TEST BASIC DATA INPUT FOR DTYPE CONSISTENCY, UNIQUENESS, UNUSED
     def _check_store(self, ds, nullables, uniques, indexes, unused):
@@ -1362,21 +1415,22 @@ class TestDataStore(TestCase):
                              is_used=t not in unused)
 
         combinations = [[(tl, v)
-                         for v in (td["corner_values"] +
+                         for v in (list(td['corner_cases'].values()) +
                                    ([None] if tl in nullables
                                     else []))]
                         for tl, td in VTYPES.items()]
-        entries = list(product(*combinations))
-        # import pdb; pdb.set_trace()
-        ds.push_records([dict(e) for e in entries])
+        ds.push_record([dict(e) for e in product(*combinations)])
 
         self._check_store(ds, nullables, uniques, indexes, unused)
+
+        def _fv(d):
+            return next(iter(d.values()))
 
         for tlabel in uniques:
             tdef = VTYPES[tlabel]
             self.assertRaises(DuplicateValueError,
                               ds.push_record,
-                              {tlabel:tdef['corner_values'][0]})
+                              {tlabel:_fv(tdef['corner_cases'])})
 
         # Check store reloading
         ds2 = DataStore(self.filesystem)
@@ -1558,7 +1612,7 @@ class TestDataStore(TestCase):
         assert_frame_equal(ds.head_df().drop(columns=t_levels),
                            expected.set_index(['pid', 'interview']))
 
-    def test_fordidden_variable_type_change(self):
+    def test_forbidden_variable_type_change(self):
         ds = DataStore(self.filesystem, 'test_ds')
         ds.set_user('me')
         ds.push_variable('v1', 'string')
@@ -1577,24 +1631,32 @@ class TestDataStore(TestCase):
         ds.push_record({'pid' : 'CE01', 'age' : 55})
         ds.push_record({'pid' : 'CE02', 'age' : 33})
 
-        assert_frame_equal(ds.head_df(),
-                           (pd.DataFrame({'pid' : ['CE01', 'CE02'],
+        t_levels = DataStore.TRACKING_INDEX_LEVELS
+        expected = pd.DataFrame({'pid' : ['CE01', 'CE02'],
                                           'age' : [55, 33]})
-                            .set_index(['pid'])))
+        expected['pid'] = expected['pid'].astype('string')
+        expected['age'] = expected['age'].astype('Int64')
+        assert_frame_equal(ds.head_df().drop(columns=t_levels),
+                           expected.set_index(['pid']))
 
         ds.push_variable('pid', 'string', index_position=None)
-
-        assert_frame_equal(ds.head_df(),
-                           (pd.DataFrame({'pid' : ['CE01', 'CE02'],
-                                          'age' : [55, 33]})))
+        expected = pd.DataFrame({'pid' : ['CE01', 'CE02'],
+                                 'age' : [55, 33]})
+        expected['pid'] = expected['pid'].astype('string')
+        expected['age'] = expected['age'].astype('Int64')
+        assert_frame_equal(ds.head_df().drop(columns=t_levels),
+                           expected[['age', 'pid']])
 
         ds.push_record({'pid' : 'CE02', 'age' : 42})
-        assert_frame_equal(ds.head_df(),
-                           (pd.DataFrame({'pid' : ['CE01', 'CE02', 'CE02'],
-                                          'age' : [55, 33, 42]})))
+        expected = pd.DataFrame({'pid' : ['CE01', 'CE02', 'CE02'],
+                                 'age' : [55, 33, 42]})
+        expected['pid'] = expected['pid'].astype('string')
+        expected['age'] = expected['age'].astype('Int64')
+        assert_frame_equal(ds.head_df().drop(columns=t_levels),
+                           expected[['age', 'pid']])
 
         self.assertRaises(VariableChangeError,
-                          ds.push_variable('pid', 'string', index_position=0))
+                          ds.push_variable, 'pid', 'string', index_position=0)
 
     def test_variable_unique_change(self):
         ds = DataStore(self.filesystem, 'test_ds')
@@ -1656,38 +1718,34 @@ class TestDataStore(TestCase):
         ds.push_variable('v1', 'string')
         ds.push_variable('v2', 'int')
         ds.push_variable('v3', 'string')
-        self.assertListEqual(ds.head_df().columns,
+        t_levels = DataStore.TRACKING_INDEX_LEVELS
+        self.assertListEqual(list(ds.head_df().drop(columns=t_levels).columns),
                              ['v1', 'v2', 'v3'])
 
-        ds2 = DataStore.from_files(self.filesystem)
+        logger.debug('Reload as ds2')
+        ds2 = DataStore(ds.filesystem)
+        self.assertListEqual(list(ds2.head_df().drop(columns=t_levels).columns),
+                             ['v1', 'v2', 'v3'])
 
         ds.push_variable('v1', 'string', column_position=3)
         ds.push_variable('v2', 'int', column_position=1)
         ds.push_variable('v3', 'string', column_position=2)
         ds.push_variable('v4', 'string')
 
-        self.assertListEqual(ds.head_df().columns,
-                         ['v2', 'v3', 'v1', 'v4'])
-        
-        ds.push_variable('v1', 'string', column_position=1)
-        self.assertListEqual(ds.head_df().columns,
-                         ['v2', 'v1', 'v3'])
+        self.assertListEqual(list(ds.head_df().drop(columns=t_levels).columns),
+                             ['v2', 'v3', 'v1', 'v4'])
 
-        ds.push_variables({'var_label': ['v4'],
-                           'position' : [10]})
-        self.assertListEqual(ds.head_df().columns,
-                         ['v2', 'v1', 'v3', 'v4'])
+        logger.debug('Refresh ds2')
         ds2.refresh()
-        self.assertListEqual(ds2.head_df().columns,
-                         ['v2', 'v1', 'v3', 'v4'])
+        self.assertListEqual(list(ds2.head_df().drop(columns=t_levels).columns),
+                             ['v2', 'v3', 'v1', 'v4'])
         
-        ds.push_variables({'var_label': ['va'],
-                           'position' : [1.5]})
-        self.assertListEqual(ds.head_df().columns,
-                         ['v2', 'va', 'v1', 'v3', 'v4'])
+        ds.push_variable('v4', 'string', column_position=2.5)
+        self.assertListEqual(list(ds.head_df().drop(columns=t_levels).columns),
+                                  ['v2', 'v3', 'v4', 'v1'])
         ds2.refresh()
-        self.assertListEqual(ds2.head_df().columns,
-                         ['v2', 'va', 'v1', 'v3', 'v4'])
+        self.assertListEqual(list(ds2.head_df().drop(columns=t_levels).columns),
+                             ['v2', 'v3', 'v4', 'v1'])
 
     def test_flag_indexed_head_df(self):
         ds = DataStore(self.filesystem, 'test_ds')
