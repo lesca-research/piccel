@@ -21,10 +21,9 @@ class LocalFileSystem:
 
     def enable_track_changes(self, state=True):
         self.track_changes = state
-        self.current_stats = self.file_stats()
+        self.current_stats = {}
 
     def file_stats(self, subfolder=''):
-        """ reset file stats (remove change tracking) """
         stats = {}
         if self.track_changes:
             root = op.join(self.root_folder, subfolder)
@@ -203,7 +202,7 @@ class LocalFileSystem:
 
 
 class TestLocalFileSystem(TestCase):
-
+    
     def setUp(self):
         self.setUpPyfakefs()
         self.tmp_dir = tempfile.mkdtemp()
@@ -234,7 +233,12 @@ class TestLocalFileSystem(TestCase):
         self.touch_file('yy.cc')
         self.touch_file('xx.cc')
         filesystem = LocalFileSystem(self.tmp_dir, track_changes=True)
-
+        mods, adds, dels = filesystem.external_changes()
+        self.assertEqual(adds, ['yy.cc', 'xx.cc'])
+        self.assertEqual(len(mods), 0)
+        self.assertEqual(len(dels), 0)
+        filesystem.accept_all_changes()
+        
         self.touch_file('new.cc')
         mods, adds, dels = filesystem.external_changes()
         self.assertEqual(adds, ['new.cc'])
@@ -251,14 +255,15 @@ class TestLocalFileSystem(TestCase):
         self.touch_file('yy.cc')
         self.touch_file('xx.cc')
         filesystem = LocalFileSystem(self.tmp_dir, track_changes=True)
+        filesystem.accept_changes(additions=['yy.cc'])
         self.touch_file('yy.cc', 'hey')
 
         mods, adds, dels = filesystem.external_changes()
         self.assertEqual(mods, ['yy.cc'])
-        self.assertEqual(len(adds), 0)
+        self.assertEqual(adds, ['xx.cc'])
         self.assertEqual(len(dels), 0)
 
-        filesystem.accept_changes(modifications=['yy.cc'])
+        filesystem.accept_changes(modifications=['yy.cc', 'xx.cc'])
         mods, adds, dels = filesystem.external_changes()
         self.assertEqual(len(mods), 0)
         self.assertEqual(len(adds), 0)
@@ -268,6 +273,7 @@ class TestLocalFileSystem(TestCase):
         self.touch_file('yy.cc')
         self.touch_file('xx.cc')
         filesystem = LocalFileSystem(self.tmp_dir, track_changes=True)
+        filesystem.accept_all_changes()
         os.remove(op.join(self.tmp_dir, 'yy.cc'))
 
         mods, adds, dels = filesystem.external_changes()
@@ -285,6 +291,7 @@ class TestLocalFileSystem(TestCase):
         self.touch_file('yy.cc')
         self.touch_file('xx.cc')
         filesystem = LocalFileSystem(self.tmp_dir, track_changes=True)
+        filesystem.accept_all_changes()
         filesystem.remove('xx.cc')
 
         mods, adds, dels = filesystem.external_changes()
