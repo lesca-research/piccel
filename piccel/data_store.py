@@ -758,7 +758,7 @@ class DataStore:
                     
                     om = pd.concat((o, m)).sort_values(by=['__timestamp__'])
                     om['__conflict_idx__'] = np.arange(om.shape[0],
-                                                       dtype=np.int64)
+                                                       dtype=np.int64) + 1
                     om = om.set_index(t_levels)
                     om_other = om[om.__origin__ == 'other']
                     other_index[(om_other.__origin_idx__,)] = om_other.index
@@ -887,18 +887,24 @@ class DataStore:
         # TODO check dtypes
 
         # TODO report conflicts?
-        
-        # Checks on head df
+
         hdf = value_df.groupby(level=0, group_keys=False).tail(1)
+
+        # Check uniquess for index variables
         index_vars = [v.var_label for v in self.variables if v.is_index()]
         m_dups = hdf[index_vars].duplicated(keep=False)
         if m_dups.sum() != 0:
             validity.loc[hdf.index[m_dups], index_vars] += \
                 ', non-unique-index'
 
+        # Check conflicting updates
+        m_conflict = value_df.index.get_level_values('__conflict_idx__') != 0
+        validity.loc[m_conflict, :] += ', conflicting'
+
         for variable in self.variables:
             head_values = hdf[variable.var_label]
             if variable.is_unique:
+                # Check duplicates only on head
                 m_dups = ( (~pd.isna(head_values)) &
                            head_values.duplicated(keep=False) )
                 if m_dups.sum() != 0:
@@ -906,12 +912,11 @@ class DataStore:
                         ', non-unique'
 
             if not variable.nullable:
+                # Check na on full
                 m_na = pd.isna(value_df[variable.var_label])
                 if m_na.sum() != 0:
                     validity.loc[value_df.index[m_na], variable.var_label] += \
                         ', non-null'
-
-        # TODO check uniqueness of index variables
         
             validity[variable.var_label] = (validity[variable.var_label]
                                             .str.lstrip(', '))
@@ -932,8 +937,8 @@ class DataStore:
                     all_records[k].append(None)
         return self.push_record(all_records)
 
-    def push_record(self, record, comment=None, tracking_index=None,
-                    timestamp=None):
+    def push_record(self, record, comment=None, timestamp=None,
+                    tracking_index=None):
         if isinstance(record, dict):
             records = [record]
         elif isinstance(record, list):
@@ -964,9 +969,8 @@ class DataStore:
             comment_df = comment_df.set_index(t_levels)
             user_df = user_df.set_index(t_levels)
             timestamp_df = timestamp_df.set_index(t_levels)
-
         elif tracking_index is not None:
-            self.logger.debug('Use given tracking index: %s', tracking_index)
+            self.logger.debug('Update from tracking index: %s', tracking_index)
             value_df.index = tracking_index
             comment_df.index = tracking_index
             user_df.index = tracking_index
@@ -1071,7 +1075,8 @@ class DataStore:
             version_idx = (value_df.index.get_level_values('__version_idx__')
                            .to_numpy())
             version_idx[m_update] += 1
-            value_df.index.set_levels(version_idx, level='__version_idx__')
+            value_df.index = (value_df.index
+                              .set_levels(version_idx, level='__version_idx__'))
 
         comment_df.index = value_df.index
         user_df.index = value_df.index
@@ -2091,8 +2096,10 @@ class TestDataStore(TestCase):
         ds1.refresh()
         ds2.refresh()
 
-        self.assertIn('conflict', ds1.dfs['validity'].loc[idx2, 'v1'])
-        self.assertIn('conflict', ds2.dfs['validity'].loc[idx3, 'v1'])
+        idx2_cft = (idx2[0][0], idx2[0][1], 1)
+        self.assertEqual('conflicting', ds1.dfs['validity'].loc[idx2_cft, 'v1'])
+        idx3_cft = (idx3[0][0], idx3[0][1], 2)
+        self.assertEqual('conflicting', ds2.dfs['validity'].loc[idx3_cft, 'v1'])
 
     def test_conflict_unique(self):
         ds1 = DataStore(self.filesystem, 'test_ds')

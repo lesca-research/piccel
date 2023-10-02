@@ -6,6 +6,13 @@ from pyfakefs.fake_filesystem_unittest import TestCase
 
 from ..logging import logger, debug2, debug3
 
+def rm_content(path):
+    for root, dirs, files in os.walk(path):
+        for bfn in files:
+            os.unlink(op.join(root, bfn))
+        for d in dirs:
+            shutil.rmtree(op.join(root, d))
+
 class LocalFileSystem:
     """
     Save / Load strings to/from files using encryption.
@@ -34,11 +41,17 @@ class LocalFileSystem:
                     stats[fn] = self.file_size(fn)
         return stats
 
-    def external_changes(self):
+    def external_changes(self, path=None):
         modifications = []
         additions = []
+        deletions = []
+        if path is not None:
+            walk_root = op.join(self.root_folder, path)
+        else:
+            walk_root = self.root_folder
         if self.track_changes:
-            for wroot, dirs, files in os.walk(self.root_folder):
+            logger.debug('Check tracked changes in %s', walk_root)
+            for wroot, dirs, files in os.walk(walk_root):
                 for bfn in files:
                     rdir = op.relpath(wroot, self.root_folder)
                     fn = op.normpath(op.join(rdir, bfn))
@@ -46,7 +59,7 @@ class LocalFileSystem:
                         additions.append(fn)
                     elif self.current_stats[fn] != self.file_size(fn):
                         modifications.append(fn)
-        deletions = [f for f in self.current_stats if not self.exists(f)]
+            deletions = [f for f in self.current_stats if not self.exists(f)]
         return modifications, additions, deletions
 
     def accept_changes(self, modifications=None, additions=None, deletions=None):
@@ -94,9 +107,9 @@ class LocalFileSystem:
     def makedirs(self, folder):
         full_folder = op.join(self.root_folder, folder)
         if op.exists(full_folder):
-            logger.debug2('Folder %s already exists', full_folder)
+            logger.debug('Folder %s already exists', full_folder)
             return
-        logger.debug2('Create folder %s', full_folder)
+        logger.debug('Create folder %s', full_folder)
         os.makedirs(full_folder)
         # assert(op.exists(full_folder))
 
@@ -172,6 +185,12 @@ class LocalFileSystem:
         os.remove(op.join(self.root_folder, fn))
         if self.track_changes:
             self.current_stats.pop(fn)
+
+    def remove_all(self, path):
+        logger.debug2('Remove all files and subdirs in %s', path)
+        rm_content(op.join(self.root_folder, path))
+        if self.track_changes:
+            self.current_stats = {}
 
     def save(self, fn, content_str='', overwrite=False, crypt=True):
         fn = op.normpath(fn)
