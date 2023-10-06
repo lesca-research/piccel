@@ -253,14 +253,18 @@ class PersistentVariables:
 
     def __init__(self, parent_store):
         self.parent_store = parent_store
+        authorize_deletion = parent_store.insure_unlocked_variables
         self.store = DataStore(parent_store.filesystem,
                                label=parent_store.label + '_vars', 
                                variables=PersistentVariables.META_VARS,
                                use_annotations=False,
                                use_properties=False,
                                validate_entry=self.validate_entry,
+                               authorize_deletion=authorize_deletion,
                                notifications={'pushed_entry' :
-                                              parent_store.on_variable_entry},
+                                              parent_store.on_variable_entry,
+                                              'deleted_entry':
+                                              parent_store.on_variable_deletion,},
                                log_label=parent_store.log_label + '_vars')
         self.logger = DataStoreLogger(logger,
                                       {'store_label' : self.store.label+'_PV'})
@@ -274,7 +278,14 @@ class PersistentVariables:
                            key=lambda e: e.index_position))
     def refresh(self):
         self.store.refresh()
-    
+
+    def delete_variable(self, var_label):
+        values = self.store.dfs['value']
+        m_delete = values.var_label == var_label
+        if m_delete.sum() == 0:
+            raise Exception('No variable matching %s', var_label)
+        self.store.delete_entry(values.index[m_delete])
+        
     def validate_entry(self, store, new_entry):
         current_vars_df = store.head_df()
         # Check only modified variables
@@ -435,7 +446,9 @@ class TestHash(TestCase):
 class DataStoreLogger(logging.LoggerAdapter):
     def process(self, msg, kwargs):
         if isinstance(msg, pd.DataFrame):
-            msg = '\n' + str(msg)
+            msg = '\n' + str(msg) + '\n' + str(msg.dtypes)
+        elif isinstance(msg, pd.Series):
+            msg = '\n' + str(msg) + '\n' + str(msg.dtype)
         return '[%s] %s' % (self.extra['store_label'], msg), kwargs
 
 class DataStore:
@@ -483,7 +496,8 @@ class DataStore:
 
     def __init__(self, filesystem, label=None, variables=None,
                  use_annotations=True, logic=None, validate_entry=None,
-                 notifications=None, use_properties=True, log_label=None):
+                 authorize_deletion=None, notifications=None,
+                 use_properties=True, log_label=None):
         """
         For variables and logic, use persistent versions with history if they
         are None.
@@ -517,6 +531,7 @@ class DataStore:
         self.log_label = if_none(log_label, self.label)
         self.logger = DataStoreLogger(logger, {'store_label' : self.log_label})
 
+        self.authorize_deletion = if_none(authorize_deletion, lambda: True)
         self.notifier = Notifier(notifications)
 
         self.logger.debug('Init dataframes')
@@ -597,6 +612,10 @@ class DataStore:
 
         self._refresh_data()
 
+    def insure_unlocked_variables(self):
+        if self.variables_are_locked():
+            raise LockedVariables()
+
     def variables_are_locked(self):
         return self.props_ds.head_df()['variables_locked'].iat[0]
 
@@ -622,24 +641,41 @@ class DataStore:
         modified_data_files = [fn for fn in modified_files if _is_data_file(fn)]
         deleted_data_files = [fn for fn in deleted_files if _is_data_file(fn)]
 
+        self.logger.debug('data_files before processing file deletions:')
+        self.logger.debug(self.data_files)
+
         to_delete = set()
         for del_fn in chain(deleted_data_files, modified_data_files):
             m_delete = self.data_files == del_fn
             to_delete.update(self.dfs['value'].index[m_delete])
             self.data_files = self.data_files[~m_delete]
-        for df_label, df in self.dfs.items():
-            self.dfs[df_label] = df.drop(index=to_delete)
-        self.notifier.notify('deleted_entries', to_delete)
+
+        self.logger.debug('data_files after processing file deletions:')
+        self.logger.debug(self.data_files)
+
+        if len(to_delete) != 0:
+            deleted = self.dfs['value'].loc[list(to_delete)].copy()
+            self.logger.debug('Values before entry deletion:')
+            self.logger.debug(self.dfs['value'])
+            for df_label, df in self.dfs.items():
+                self.dfs[df_label] = df.drop(index=to_delete)
+            self.logger.debug('Values after entry deletion:')
+            self.logger.debug(self.dfs['value'])
+            self.notifier.notify('deleted_entry', deleted)
 
         entry_dfs = defaultdict(list)
         for data_fn in chain(modified_data_files, new_data_files):
             content = json.loads(self.filesystem.load(data_fn))
             entry_dfs = {k:self.df_from_str(df_content, k)
                          for k, df_content in content.items()}
-            # TODO: align entry_dfs with current variables
-            self.import_df(entry_dfs, from_file=data_fn,
-                           raise_error=False) # will notify added_entries
+            # this will notify added_entries:
+            tindex = self.import_df(entry_dfs, raise_error=False) 
+            self.data_files = pd.concat((self.data_files,
+                                         pd.Series((data_fn
+                                                    for _ in range(len(tindex))),
+                                                   index=tindex)))
         self.filesystem.accept_all_changes('data')
+        self.invalidate_cached_views()
 
     def df_from_str(self, df_str, data_label):
         if df_str == '':
@@ -680,8 +716,9 @@ class DataStore:
         if df is None or df.shape[0] == 0:
             return ''
 
+        df = df.copy()
         for variable in self.variables:
-            #self.logger.debug('df_to_str: format col %s', variable.var_label)
+            # self.logger.debug('df_to_str: format col %s', variable.var_label)
             fmt = None
             if data_label == 'value':
                 fmt = VTYPES[variable.var_type]['format']
@@ -692,10 +729,7 @@ class DataStore:
                 f = lambda v: (fmt(v) if not pd.isna(v) else '')
                 df[[variable.var_label]] = df[[variable.var_label]].applymap(f)
 
-        try:
-            df = df.reset_index().drop(columns=['__conflict_idx__'])
-        except:
-            from IPython import embed; embed() 
+        df = df.reset_index().drop(columns=['__conflict_idx__'])
         df['__entry_id__'] = df['__entry_id__'].apply(lambda x: hex(x))
         df['__version_idx__'] = df['__version_idx__'].apply(str)
         content = df.to_csv(sep=DataStore.CSV_SEPARATOR, index=False,
@@ -825,10 +859,16 @@ class DataStore:
                 self.logger.debug(validity[m_invalid])
                 raise InvalidImport(other_invalid_index)
 
-        self.data_files.index = main_value_df.index
-        new = pd.Series([pd.NA] * len(other_value_df.index),
-                        index=other_value_df.index)
-        self.data_files = pd.concat((self.data_files, new), axis=1)
+        
+        # self.logger.debug('Data files before import:')
+        # self.logger.debug(self.data_files)
+        # self.data_files.index = main_value_df.index
+        # new = pd.Series([if_none(from_file, pd.NA)] * len(other_value_df.index),
+        #                 index=other_value_df.index)
+        # self.data_files = pd.concat((self.data_files, new))
+        # self.logger.debug('Data files after aligning with import:')
+        # self.logger.debug(self.data_files)
+
         # TODO notify invalid entries
         for df_label in self.dfs:
             if df_label == 'value':
@@ -857,9 +897,6 @@ class DataStore:
                                       axis=0)
                 self.dfs[df_label] = pd.concat((main_df, other_df))
 
-        if from_file is not None:
-            self.data_files.loc[other_value_df.index] = from_file
-
         self.invalidate_cached_views()
         self.notifier.notify('pushed_entry', self, other_value_df)
         # TODO: notify merge
@@ -874,7 +911,6 @@ class DataStore:
         # updated head entry: other.ver_idx == max_version_idx
         #                     and ver_idx greater than 0
         return other_value_df.index
-
 
     def validate(self, value_df):
         """ 
@@ -1101,38 +1137,71 @@ class DataStore:
                 other_dfs[d_label][v.var_label] = \
                     other_dfs[d_label][v.var_label].astype(tdef['dtype_pd'])
 
-        tracking_index = self.import_df(other_dfs)
-        self.save_entry(other_dfs)
-        return tracking_index
+        tindex = self.import_df(other_dfs)
+        data_fn = self.save_entry(other_dfs)
+        self.data_files = pd.concat((self.data_files,
+                                     pd.Series((data_fn
+                                                for _ in range(len(tindex))),
+                                               index=tindex)))
+        return tindex
 
     def save_all_data(self):
         """ WARNING: this can cause conflicts if done concurrently """
         # TODO: admin role + lock?
         self.filesystem.remove_all('data')
+        self.logger.debug('Data files before saving all entries:')
+        self.logger.debug(self.data_files)
         self.data_files[:] = self.save_entry(self.dfs)
+        self.logger.debug('Data files after saving all entries:')
+        self.logger.debug(self.data_files)
 
+    def delete_entry(self, index):
+        # TODO utest variable detetion and concurrent push of unsynchronised user
+        self.authorize_deletion()
+        deleted = self.dfs['value'].loc[index].copy()
+        self.logger.debug('Values before entry deletion:')
+        self.logger.debug(self.dfs['value'])
+        for data_label, df in self.dfs.items():
+            self.dfs[data_label] = df.drop(index=index)
+        self.logger.debug('Values after entry deletion:')
+        self.logger.debug(self.dfs['value'])
+
+        fns_to_delete = self.data_files.loc[index]
+        index_to_keep = self.data_files.index.difference(index)
+        fns_to_keep = self.data_files.loc[index_to_keep]
+
+        self.logger.debug('Data files before deletion:')
+        self.logger.debug(self.data_files)
+        if len(set(fns_to_keep).intersection(fns_to_delete)) == 0:
+            for fn in fns_to_delete:
+                self.filesystem.remove(fn)
+            self.data_files = self.data_files.loc[index_to_keep]
+        else:
+            self.save_all_data()
+        self.logger.debug('Data files after deletion:')
+        self.logger.debug(self.data_files)
+
+        self.invalidate_cached_views()
+        self.notifier.notify('deleted_entry', deleted)
+            
     def save_entry(self, dfs):
         entry_rfn = '%d.csv' % uuid1().int
         while self.filesystem.exists(op.join('data', entry_rfn)):
             entry_rfn = '%d.csv' % uuid1().int
         entry_fn = op.join('data', entry_rfn)
-        if dfs['value'].shape[0] > 10:
-            entry_str = '%d entries' % len(dfs['value'].index)
-        else:
-            entry_str = 'entry %s' % dfs['value'].index.to_list()
-        self.logger.debug('Save %s to %s', entry_str, entry_fn)
+        self.logger.debug('Save %d entries to %s', len(dfs['value'].index),
+                          entry_fn)
+        self.logger.debug('Values to save:')
+        self.logger.debug(dfs['value'])
         content = json.dumps({k:self.df_to_str(df, k)
                               for k,df in dfs.items()
                               if k != 'validity'})
         self.filesystem.save(entry_fn, content)
         return entry_fn
 
-    def delete_all_entries(self):
-        self.notifier.notify('pre_clear_data')
-        self.df = self.df.drop(self.df.index)
-        self.notifier.notify('cleared_data')
-
     def refresh(self):
+        if self.props_ds is not None:
+            self.props_ds.refresh()
         self.variables.refresh()
         # self.logic.refresh() # TODO
         if self.flag_ds is not None:
@@ -1156,6 +1225,19 @@ class DataStore:
         iter_changes = zip(var_store.iter_previous(entry_df.index),
                            (r for _,r in entry_df.iterrows()))
         self.process_variable_changes(iter_changes)
+
+    def on_variable_deletion(self, deleted_entry):
+        # TODO forge changes frem  deleted_entry 
+        iter_changes = zip((r for _,r in deleted_entry.iterrows()),
+                           (None for _ in deleted_entry))
+        self.process_variable_changes(iter_changes)
+        
+    def delete_variable(self, variable_label):
+        """ Also delete data file """
+        self.variables.delete_variable(variable_label)        
+
+    def lock_variables(self, state=True):
+        self.props_ds.push_record({'variables_locked' : state})
 
     def process_variable_changes(self, changes):
         # ASSUME validation has been done before push
@@ -1256,9 +1338,12 @@ class DataStore:
                                              var_old['column_position'],
                                              var_new['column_position'])
                 else: # deleted variable
-                    logger.debug('Process deletion of variable %s', label_old)
+                    self.logger.debug('Process deletion of variable %s',
+                                      label_old)
                     for dlabel, df in self.dfs.items():
-                        self.dfs[dlabel] = df.drop(column=[var_old['var_label']])
+                        self.dfs[dlabel] = df.drop(columns=[var_old['var_label']])
+                    self.logger.debug('Values after variable deletion:')
+                    self.logger.debug(self.dfs['value'])
                     self.notifier.notify('column_removed', var_old['var_label'])
                     self.save_all_data()
             else: # new variable
@@ -1401,8 +1486,20 @@ class DataStore:
                 df = self.validity
             else:
                 raise Exception('Uknown data_label %s', data_label)
+            # TODO sort out dtypes
+            # Maybe has to do with deletion...
+            self.logger.debug('Compute head %s df from', data_label)
+            self.logger.debug(df)
+
             hdf = (df.groupby(level=0, group_keys=False)
                    .tail(1).reset_index())
+
+            self.logger.debug('head %s df after groupby', data_label)
+            self.logger.debug(hdf)
+
+            for v in self.variables:
+                dtype = VTYPES[v.var_type]['dtype_pd']
+                hdf[v.var_label] = hdf[v.var_label].astype(dtype)
 
             index_variables = self.variables.indexes()
             if len(index_variables) != 0:
@@ -1422,16 +1519,26 @@ class DataStore:
                                              v.column_position is None)),
                                          key=lambda v: v.var_label))] +
                  DataStore.TRACKING_INDEX_LEVELS)
-        return hdf[order]
+        hdf = hdf[order]
+
+        self.logger.debug('head %s df', data_label)
+        self.logger.debug(hdf)
+        return hdf
 
 class TestDataStore(TestCase):
 
+    """
+    test_comment
+    test_user
+    test_timestamp
+    test_head_df_no_index_sorted_by_time
+    """
     def setUp(self):
         self.setUpPyfakefs()
         logger.setLevel(logging.DEBUG)
         self.tmp_dir = tempfile.mkdtemp()
-        self.filesystem = LocalFileSystem(self.tmp_dir)        
-        
+        self.filesystem = LocalFileSystem(self.tmp_dir)
+
     def test_valid_variable_label(self):
         self.assertFalse(DataStore.is_valid_variable_label('__test__'))
         self.assertTrue(DataStore.is_valid_variable_label('__test_'))
@@ -1517,29 +1624,26 @@ class TestDataStore(TestCase):
 
     def test_datafile_single_entry_deletion(self):
         ds1 = DataStore(self.filesystem, 'test_ds')
-        ds2 = DataStore(ds.filesystem)
+        ds2 = DataStore(ds1.filesystem)
 
         ds1.set_user('me')
         ds1.push_variable('v1', 'string')
         tidx1 = ds1.push_record({'v1' : 'test'})
         tidx2 = ds1.push_record({'v1' : 'other test'})
 
-        full_df1 = ds1.full_df()
+        fn1 = ds1.data_files.loc[tidx1].iat[0]
+        self.assertTrue(ds1.filesystem.exists(fn1))
+
         ds2.refresh()
-        full_df2 = ds2.full_df()
+        fn1 = ds2.data_files.loc[tidx1].iat[0]
+        self.assertTrue(ds2.filesystem.exists(fn1))
 
-        fn1 = ds1.data_file(tidx1)
-        self.assertTrue(self.filesystem.exists(fn1))
-        assert_frame_equal(full_df1, full_df2)
-
-        ds1.delete_single_entry(tidx1)
-        full_df1 = ds1.full_df()
-        ds2.refresh()
-        full_df2 = ds2.full_df()
-
-        self.assertFalse(tixd1 in full_df1.index)
+        ds1.delete_entry(tidx1)
+        self.assertFalse(all(i in ds1.data_files.index for i in tidx1))
         self.assertFalse(self.filesystem.exists(fn1))
-        assert_frame_equal(full_df1, full_df2)
+
+        ds2.refresh()
+        self.assertFalse(all(i in ds2.data_files.index for i in tidx1))
 
     def test_datafile_multi_entry_deletion(self):
         ds1 = DataStore(self.filesystem, 'test_ds')
@@ -1548,18 +1652,13 @@ class TestDataStore(TestCase):
         ds1.push_variable('v1', 'string')
         tidx = ds1.push_record({'v1' : ['test', 'other test']})
 
-        full_df1 = ds1.full_df()
         ds2.refresh()
-        full_df2 = ds2.full_df()
-        assert_frame_equal(full_df1, full_df2)
-
-        ds1.delete_single_entry(tidx[0])
-        full_df1 = ds1.full_df()
+        ds1.delete_entry(tidx)
         ds2.refresh()
-        full_df2 = ds2.full_df()
 
-        self.assertTrue(tidx[0] not in full_df1.index)
-        assert_frame_equal(full_df1, full_df2)
+        for ds in (ds1, ds2):
+            self.assertTrue(tidx[0] not in ds.data_files.index)
+            self.assertTrue(tidx[0] not in ds.dfs['value'].index)
 
     def test_main_datafile_modification(self):
 
@@ -1772,7 +1871,7 @@ class TestDataStore(TestCase):
                           nullable=False)
 
     def test_variable_lock(self):
-        ds = DataStore(self.filesystem, 'test_ds')
+        ds = DataStore(self.filesystem, 'test_ds', log_label='DS1')
         ds.set_user('me')
         ds.push_variable('v1', 'string')
         ds.push_variable('v2', 'int')
@@ -1784,19 +1883,26 @@ class TestDataStore(TestCase):
         ds.push_record({'v1' : 'test2',
                         'v2' : 23,
                         'v3' : 'other2'})
-        ds.remove_variable('v1')
+        ds.delete_variable('v1')
         expected_head_df = pd.DataFrame({'v2' : [10, 23],
                                          'v3' : ['other', 'other2']})
-        assert_frame_equal(ds.head_df(), expected_head_df)
+        expected_head_df['v2'] = expected_head_df['v2'].astype('Int64')
+        expected_head_df['v3'] = expected_head_df['v3'].astype('string')
+        hdf = ds.head_df().drop(columns=DataStore.TRACKING_INDEX_LEVELS)
+        assert_frame_equal(hdf, expected_head_df)
 
-        ds2 = DataStore(ds.filesystem)
-        assert_frame_equal(ds2.head_df(), expected_head_df)
+        ds2 = DataStore(ds.filesystem, log_label='DS2')
+        hdf = ds2.head_df().drop(columns=DataStore.TRACKING_INDEX_LEVELS)
+        assert_frame_equal(hdf, expected_head_df)
 
         ds.lock_variables()
-        self.assertRaises(LockedVariables, ds.remove_variable, 'v2')
+        logger.debug('utest try deleting variable v2')
+        self.assertRaises(LockedVariables, ds.delete_variable, 'v2')
 
-        ds2.refresh()
-        self.assertRaises(LockedVariables, ds2.remove_variable, 'v2')
+        logger.debug('utest refresh ds2')
+        ds2.refresh() # TODO fix refresh not applying variable locked
+        logger.debug('utest try deleting variable v2')
+        self.assertRaises(LockedVariables, ds2.delete_variable, 'v2')
 
     def test_variable_order(self):
         ds = DataStore(self.filesystem, 'test_ds')
