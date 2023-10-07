@@ -163,8 +163,8 @@ ALLOWED_VARIABLE_TYPE_CHANGE = {
 }
 
 class InvalidDataStoreLabel(Exception): pass
+class UnknownVariable(Exception): pass
 class DuplicateValueError(Exception): pass
-class InvalidValueError(Exception): pass
 class BadVariableType(Exception): pass
 class InvalidFlagFormat(Exception): pass
 class DuplicateFlag(Exception): pass
@@ -225,6 +225,12 @@ class FixedVariables:
     def __init__(self, variables):
         self.variables = {v.var_label:v for v in variables}
 
+    def set_user(self, user):
+        pass
+
+    def __getitem__(self, var_label):
+        return self.variables[var_label]
+
     def __iter__(self):
         return iter(self.variables.values())
 
@@ -269,9 +275,17 @@ class PersistentVariables:
         self.logger = DataStoreLogger(logger,
                                       {'store_label' : self.store.label+'_PV'})
 
+    def set_user(self, user):
+        self.store.set_user(user)
+
     def __iter__(self):
         hdf = self.store.head_df().drop(columns=DataStore.TRACKING_INDEX_LEVELS)
         return (Var(idx, **row) for idx, row in hdf.iterrows())
+
+    def __getitem__(self, var_label):
+        for v in self:
+            if v.var_label == var_label:
+                return v
 
     def indexes(self):
         return list(sorted((v for v in self if v.is_index()),
@@ -647,7 +661,10 @@ class DataStore:
         to_delete = set()
         for del_fn in chain(deleted_data_files, modified_data_files):
             m_delete = self.data_files == del_fn
-            to_delete.update(self.dfs['value'].index[m_delete])
+            try:
+                to_delete.update(self.dfs['value'].index[m_delete])
+            except:
+                from IPython import embed; embed() 
             self.data_files = self.data_files[~m_delete]
 
         self.logger.debug('data_files after processing file deletions:')
@@ -727,7 +744,11 @@ class DataStore:
 
             if fmt is not None:
                 f = lambda v: (fmt(v) if not pd.isna(v) else '')
-                df[[variable.var_label]] = df[[variable.var_label]].applymap(f)
+                try:
+                    df[[variable.var_label]] = \
+                        df[[variable.var_label]].applymap(f)
+                except:
+                    from IPython import embed; embed() 
 
         df = df.reset_index().drop(columns=['__conflict_idx__'])
         df['__entry_id__'] = df['__entry_id__'].apply(lambda x: hex(x))
@@ -832,9 +853,10 @@ class DataStore:
                         .get_level_values('__version_idx__') != 0)
             before_update = other_value_df.index[m_update].to_frame()
             before_update.__version_idx__ = before_update.__version_idx__ - 1
+            index_previous = pd.MultiIndex.from_frame(before_update)
             head_df = (self.head_df('value').reset_index()
                        .set_index(t_levels)
-                       .loc[pd.MultiIndex.from_frame(before_update)])
+                       .loc[index_previous])
             filled_cols = [v.var_label for v in filled_variables]
             if m_update.sum() != 0:
                 other_value_df.loc[m_update, filled_cols] = head_df[filled_cols]
@@ -869,16 +891,22 @@ class DataStore:
         # self.logger.debug('Data files after aligning with import:')
         # self.logger.debug(self.data_files)
 
+
+        for column in merged_value_df.columns:
+            v = self.variables[column]
+            dtype = VTYPES[v.var_type]['dtype_pd']
+            merged_value_df[v.var_label] = \
+                merged_value_df[v.var_label].astype(dtype)
+        
         # TODO notify invalid entries
-        for df_label in self.dfs:
-            if df_label == 'value':
-                self.dfs[df_label] = merged_value_df
-            elif df_label == 'validity':
-                self.dfs[df_label] = validity
+        for data_label in self.dfs:
+            if data_label == 'value':
+                self.dfs[data_label] = merged_value_df
+            elif data_label == 'validity':
+                self.dfs[data_label] = validity
             else:
-                # TODO Duplicate head values for all columns in main not in other
-                main_df = self.dfs[df_label]
-                other_df = other_dfs[df_label]
+                main_df = self.dfs[data_label]
+                other_df = other_dfs[data_label]
                 if len(conflicting) != 0:
                     # Apply fixed conflicts
                     main_df.index = main_value_df.index
@@ -888,14 +916,23 @@ class DataStore:
                     for var in filled_variables:
                         other_df[var.var_label] = VTYPES[var.var_type]['na_value']
 
-                    head_df = (self.head_df(df_label).reset_index()
+                    head_df = (self.head_df(data_label).reset_index()
                                .set_index(t_levels)
-                               .loc[pd.MultiIndex.from_frame(before_update)])
+                               .loc[index_previous])
                     if m_update.sum() != 0:
+                        head_df.index = other_df.index
                         other_df.loc[m_update, filled_cols] = \
-                            pd.concat((other_df, head_df[filled_cols]),
-                                      axis=0)
-                self.dfs[df_label] = pd.concat((main_df, other_df))
+                            head_df[filled_cols]
+
+                if data_label == 'timestamp':
+                    tdef = VTYPES['datetime']
+                elif data_label == 'user' or  data_label == 'comment':
+                    tdef = VTYPES['string']
+                for column in other_df.columns:
+                    v = self.variables[column]
+                    other_df[column] = other_df[column].astype(tdef['dtype_pd'])
+
+                self.dfs[data_label] = pd.concat((main_df, other_df))
 
         self.invalidate_cached_views()
         self.notifier.notify('pushed_entry', self, other_value_df)
@@ -976,6 +1013,8 @@ class DataStore:
     def push_record(self, record, comment=None, timestamp=None,
                     tracking_index=None):
         if isinstance(record, dict):
+            for v in record.values():
+                assert(not isinstance(v, (list, tuple, set)))
             records = [record]
         elif isinstance(record, list):
             records = record
@@ -1011,6 +1050,21 @@ class DataStore:
             comment_df.index = tracking_index
             user_df.index = tracking_index
             timestamp_df.index = tracking_index
+
+        var_labels = set(v.var_label for v in self.variables
+                         if not v.is_index)
+        value_columns = set(value_df.columns)
+        for data_label, df in (('value', value_df),
+                               ('comment', comment_df),
+                               ('user', user_df),
+                               ('timestamp', timestamp_df)):
+            unknown = var_labels.difference(df.columns)
+            if len(unknown) != 0:
+                raise UnknownVariable(unknown)
+
+            if (value_columns != set(df.columns) or
+                value_df.shape != df.shape):
+                raise ValueError('%s is not aligned with values', data_label)
 
         return self.push_df(value_df, comment_df, user_df, timestamp_df)
 
@@ -1124,19 +1178,6 @@ class DataStore:
             'user' : user_df,
             'timestamp' : timestamp_df,
         }
-        df = other_dfs['value']
-        for v in self.variables:
-            dtype = VTYPES[v.var_type]['dtype_pd']
-            df[v.var_label] = df[v.var_label].astype(dtype)
-        other_dfs['value'] = df
-
-        for d_label, tdef in (('timestamp', VTYPES['datetime']),
-                              ('user', VTYPES['string']),
-                              ('comment', VTYPES['string'])):
-            for v in self.variables:
-                other_dfs[d_label][v.var_label] = \
-                    other_dfs[d_label][v.var_label].astype(tdef['dtype_pd'])
-
         tindex = self.import_df(other_dfs)
         data_fn = self.save_entry(other_dfs)
         self.data_files = pd.concat((self.data_files,
@@ -1173,8 +1214,11 @@ class DataStore:
         self.logger.debug('Data files before deletion:')
         self.logger.debug(self.data_files)
         if len(set(fns_to_keep).intersection(fns_to_delete)) == 0:
+            deleted_fns = set()
             for fn in fns_to_delete:
-                self.filesystem.remove(fn)
+                if fn not in deleted_fns:
+                    self.filesystem.remove(fn)
+                    deleted_fns.add(fn)
             self.data_files = self.data_files.loc[index_to_keep]
         else:
             self.save_all_data()
@@ -1406,6 +1450,10 @@ class DataStore:
 
     def set_user(self, user):
         self.user = user
+        # TODO set user of logic_ds
+        for dep in (self.props_ds, self.variables, self.flag_ds, self.note_ds):
+            if dep is not None:
+                dep.set_user(user)
 
     def push_variable(self, var_label, var_type, nullable=True,
                       index_position=None, is_unique=False, is_used=True,
@@ -1497,28 +1545,36 @@ class DataStore:
             self.logger.debug('head %s df after groupby', data_label)
             self.logger.debug(hdf)
 
-            for v in self.variables:
-                dtype = VTYPES[v.var_type]['dtype_pd']
-                hdf[v.var_label] = hdf[v.var_label].astype(dtype)
+            for v in variables:
+                if data_label == 'value':
+                    tdef = VTYPES[v.var_type]
+                elif data_label == 'timestamp':
+                    tdef = VTYPES['datetime']
+                elif data_label == 'user' or  data_label == 'comment':
+                    tdef = VTYPES['string']
+                hdf[v.var_label] = hdf[v.var_label].astype(tdef['dtype_pd'])
 
             index_variables = self.variables.indexes()
-            if len(index_variables) != 0:
-                hdf = (hdf.set_index([v.var_label for v in index_variables])
-                       .sort_index())
-
-            self.head_dfs[data_label] = hdf
+            if data_label == 'value':
+                if len(index_variables) != 0:
+                    hdf = (hdf.set_index([v.var_label for v in index_variables]))
+            else:
+                hdf = hdf.set_index(DataStore.TRACKING_INDEX_LEVELS)
+            self.head_dfs[data_label] = hdf.sort_index()
 
         hdf = self.head_dfs[data_label]
-        order = ([v.var_label
-                  for v in chain(sorted((v for v in variables
-                                         if (v.index_position is None and
-                                             v.column_position is not None)),
-                                        key=lambda v: v.column_position),
-                                 sorted((v for v in variables
-                                         if (v.index_position is None and
-                                             v.column_position is None)),
-                                         key=lambda v: v.var_label))] +
-                 DataStore.TRACKING_INDEX_LEVELS)
+        if data_label == 'value':
+            variables = [v for v in variables if v.index_position is None]
+        order = [v.var_label
+                 for v in chain(sorted((v for v in variables
+                                        if v.column_position is not None),
+                                       key=lambda v: v.column_position),
+                                sorted((v for v in variables
+                                        if v.column_position is None),
+                                       key=lambda v: v.var_label))]
+        if data_label == 'value':
+            order.extend(DataStore.TRACKING_INDEX_LEVELS)
+
         hdf = hdf[order]
 
         self.logger.debug('head %s df', data_label)
@@ -1528,9 +1584,7 @@ class DataStore:
 class TestDataStore(TestCase):
 
     """
-    test_comment
-    test_user
-    test_timestamp
+    test_main_datafile_modification
     test_head_df_no_index_sorted_by_time
     """
     def setUp(self):
@@ -1650,7 +1704,8 @@ class TestDataStore(TestCase):
         ds2 = DataStore(ds1.filesystem)
         ds1.set_user('me')
         ds1.push_variable('v1', 'string')
-        tidx = ds1.push_record({'v1' : ['test', 'other test']})
+        tidx = ds1.push_record([{'v1' : 'test'},
+                                {'v1' : 'other test'}])
 
         ds2.refresh()
         ds1.delete_entry(tidx)
@@ -1671,37 +1726,36 @@ class TestDataStore(TestCase):
         tidx2 = ds1.push_record({'v1' : 'other test'})
         ds2.refresh()
 
-        full_df1 = ds1.full_df()
-        fn1 = full_df1.data_file(tidx1)
-        fn2 = full_df1.data_file(tidx2)
+        fn1 = ds1.data_files.loc[tidx1].iat[0]
+        fn2 = ds1.data_files.loc[tidx2].iat[0]
 
         ds1.save_all_data()
         self.assertFalse(self.filesystem.exists(fn1))
         self.assertFalse(self.filesystem.exists(fn2))
 
-        main_fn = op.join('test_ds', 'data', 'data_main.csv')
-        self.assertEqual(ds1.data_file(tidx1), main_fn)
-        self.assertEqual(ds1.data_file(tidx2), main_fn)
+        unique_data_files = ds1.data_files.loc[tidx1].unique()
+        self.assertTrue(len(unique_data_files) == 1)
+        self.assertFalse(pd.isna(unique_data_files[0]))
 
         ds2.refresh()
-        full_df2 = ds2.full_df()
-        self.assertEqual(ds2.data_file(tidx1), main_fn)
-        self.assertEqual(ds2.data_file(tidx2), main_fn)
+        self.assertTrue(len(unique_data_files) == 1)
+        self.assertFalse(pd.isna(unique_data_files.iat[0]))
 
-        ds1.delete_single_entry(tidx1) # data_main.csv will be modified
-        self.assertFalse(tixd1 in ds1.full_df().index)
-        self.assertTrue(self.filesystem.exists(main_fn))
+        ds1.delete_single_entry(tidx1)
+        unique_data_files = ds1.data_files.loc[tidx1].unique()
+        self.assertTrue(len(unique_data_files) == 1)
+        self.assertFalse(pd.isna(unique_data_files[0]))
 
         tidx3 = ds1.push_record({'v1' : 'another test'})
         ds1.save_all_data()
-
         ds2.refresh()
         full_df2 = ds2.full_df()
         self.assertFalse(tixd1 in full_df2.index)
         self.assertTrue(tixd3 in full_df2.index)
 
-        self.assertEqual(ds2.data_file(tidx2), main_fn)
-        self.assertEqual(ds2.data_file(tidx3), main_fn)
+        unique_data_files = ds2.data_files.loc[tidx1].unique()
+        self.assertTrue(len(unique_data_files) == 1)
+        self.assertFalse(pd.isna(unique_data_files[0]))
 
     def __test_data_entry_nullable(self):
         # TODO test nullable for all dtypes
@@ -1738,8 +1792,7 @@ class TestDataStore(TestCase):
                            expected)
 
         ds.push_record({'v1' : 'other test update'}, tracking_index=tidx)
-        expected = pd.DataFrame({'v1' : ['test', 'other test',
-                                         'other test update']})
+        expected = pd.DataFrame({'v1' : ['test', 'other test update']})
         expected['v1'] = expected['v1'].astype('string')
         assert_frame_equal(ds.head_df().drop(columns=t_levels),
                            expected)
@@ -2075,19 +2128,18 @@ class TestDataStore(TestCase):
         ds = DataStore(self.filesystem, 'test_ds')
         ds.set_user('me')
         tidx0 = ds.push_variable('v1', 'string')
-        vars_full_df = ds.variables.store.full_df()
-        self.assertEqual(vars_full_df.loc[tidx0,
-                                          ('var_label', 'user')], 'me')
+        vars_user_hdf = ds.variables.store.head_df('user')
+        self.assertEqual(vars_user_hdf.loc[tidx0, 'var_label'].iat[0], 'me')
 
         tidx1 = ds.push_record({'v1' : 'test'})
         tidx2 = ds.push_record({'v1' : 'test2'},
                                tracking_index=tidx1)
 
         full_user_df = ds.full_df('user')
-        self.assertEqual(full_user_df.loc[tidx1, 'v1'], 'me')
-        self.assertEqual(full_user_df.loc[tidx2, 'v1'], 'me')
+        self.assertEqual(full_user_df.loc[tidx1, 'v1'].iat[0], 'me')
+        self.assertEqual(full_user_df.loc[tidx2, 'v1'].iat[0], 'me')
 
-        self.assertEqual(ds.head_df('user').loc[0, 'v1'], 'me')
+        self.assertEqual(ds.head_df('user').loc[tidx2, 'v1'].iat[0], 'me')
 
         # change user
         ds.set_user('me2')
@@ -2095,17 +2147,17 @@ class TestDataStore(TestCase):
         # Add some data
         tidx3 = ds.push_record({'v1' : 'test3'}, tracking_index=tidx2)
 
-        self.assertEqual(ds.full_df('user').loc[tidx3, 'v1'], 'me2')
-        self.assertEqual(ds.head_df('user').loc[0, 'v1'], 'me2')
+        self.assertEqual(ds.full_df('user').loc[tidx3, 'v1'].iat[0], 'me2')
+        self.assertEqual(ds.head_df('user').loc[tidx3, 'v1'].iat[0], 'me2')
 
         # Add a new variable
         tidx4 = ds.push_variable('v2', 'int')
-        vars_full_df = ds.variables.full_df('user')
-        self.assertEqual(vars_full_df.loc[tidx4, 'v2'], 'me2')
+        vars_full_df = ds.variables.store.full_df('user')
+        self.assertEqual(vars_full_df.loc[tidx4, 'var_type'].iat[0], 'me2')
 
-        self.assertTrue(pd.isna(ds.full_df('user').loc[tidx3, 'v2']))
-        self.assertTrue(pd.isna(ds.head_df('user').loc[0, 'v2']))
-        
+        self.assertTrue(pd.isna(ds.full_df('user').loc[tidx3, 'v2']).all())
+        self.assertTrue(pd.isna(ds.head_df('user').loc[tidx3, 'v2']).all())
+
     def test_head_df_no_index_sorted_by_time(self):
         raise NotImplementedError()
 
@@ -2118,16 +2170,16 @@ class TestDataStore(TestCase):
         tidx1 = ds.push_record({'v1' : 'test', 'v2' : 'other'},
                                timestamp=ts1)
         ts_df = ds.head_df('timestamp')
-        self.assertEqual(ts_df.loc[0, 'v1'], ts1)
-        self.assertEqual(ts_df.loc[0, 'v2'], ts1)
+        self.assertEqual(ts_df.loc[tidx1, 'v1'].iat[0], ts1)
+        self.assertEqual(ts_df.loc[tidx1, 'v2'].iat[0], ts1)
 
         ts2 = datetime(2020,1,2,10,12)
-        ds.push_record({'v1' : 'test2'},
-                       tracking_index=tidx1,
-                       timestamp=ts2)
+        tidx2 = ds.push_record({'v1' : 'test2'},
+                               tracking_index=tidx1,
+                               timestamp=ts2)
         ts_df = ds.head_df('timestamp')
-        self.assertEqual(ts_df.loc[0, 'v1'], ts2)
-        self.assertEqual(ts_df.loc[0, 'v2'], ts1)
+        self.assertEqual(ts_df.loc[tidx2, 'v1'].iat[0], ts2)
+        self.assertEqual(ts_df.loc[tidx2, 'v2'].iat[0], ts1)
 
     def test_comment(self):
         # Input comments are bound to input values
@@ -2139,14 +2191,15 @@ class TestDataStore(TestCase):
                                comment={'v1': None,
                                         'v2': 'orig comment'})
         comment_df = ds.head_df('comment')
-        self.assertTrue(pd.isna(comment_df.loc[0, 'v1']))
-        self.assertEqual(comment_df.loc[0, 'v2'], 'orig comment')
+        self.assertTrue(pd.isna(comment_df.loc[tidx1, 'v1']).all())
+        self.assertEqual(comment_df.loc[tidx1, 'v2'].iat[0], 'orig comment')
 
-        ds.push_record({'v1' : 'test2'},
-                       comment={'v1':'new comment'},
-                       tracking_index=tidx1)
-        self.assertEqual(comment_df.loc[0, 'v1'], 'new comment')
-        self.assertEqual(comment_df.loc[0, 'v2'], 'orig comment')
+        tidx2 = ds.push_record({'v1' : 'test2'},
+                               comment={'v1':'new comment'},
+                               tracking_index=tidx1)
+        comment_df = ds.head_df('comment')
+        self.assertEqual(comment_df.loc[tidx2, 'v1'].iat[0], 'new comment')
+        self.assertEqual(comment_df.loc[tidx2, 'v2'].iat[0], 'orig comment')
 
     def test_annotation(self):
         # Annotations are comment threads associated with an index
