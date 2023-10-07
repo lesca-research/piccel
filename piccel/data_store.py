@@ -658,24 +658,20 @@ class DataStore:
         self.logger.debug('data_files before processing file deletions:')
         self.logger.debug(self.data_files)
 
-        to_delete = set()
-        for del_fn in chain(deleted_data_files, modified_data_files):
-            m_delete = self.data_files == del_fn
-            try:
-                to_delete.update(self.dfs['value'].index[m_delete])
-            except:
-                from IPython import embed; embed() 
-            self.data_files = self.data_files[~m_delete]
+        m_delete = self.data_files.isin(set(deleted_data_files +
+                                            modified_data_files))
+        index_to_delete = self.data_files.index[m_delete]
+        self.data_files = self.data_files[~m_delete]
 
         self.logger.debug('data_files after processing file deletions:')
         self.logger.debug(self.data_files)
 
-        if len(to_delete) != 0:
-            deleted = self.dfs['value'].loc[list(to_delete)].copy()
+        if len(index_to_delete) != 0:
+            deleted = self.dfs['value'].loc[index_to_delete].copy()
             self.logger.debug('Values before entry deletion:')
             self.logger.debug(self.dfs['value'])
             for df_label, df in self.dfs.items():
-                self.dfs[df_label] = df.drop(index=to_delete)
+                self.dfs[df_label] = df.drop(index=index_to_delete)
             self.logger.debug('Values after entry deletion:')
             self.logger.debug(self.dfs['value'])
             self.notifier.notify('deleted_entry', deleted)
@@ -1585,6 +1581,8 @@ class TestDataStore(TestCase):
 
     """
     test_main_datafile_modification
+    test_flag
+    test_annotation
     test_head_df_no_index_sorted_by_time
     """
     def setUp(self):
@@ -1739,9 +1737,9 @@ class TestDataStore(TestCase):
 
         ds2.refresh()
         self.assertTrue(len(unique_data_files) == 1)
-        self.assertFalse(pd.isna(unique_data_files.iat[0]))
+        self.assertFalse(pd.isna(unique_data_files[0]))
 
-        ds1.delete_single_entry(tidx1)
+        ds1.delete_entry(tidx1)
         unique_data_files = ds1.data_files.loc[tidx1].unique()
         self.assertTrue(len(unique_data_files) == 1)
         self.assertFalse(pd.isna(unique_data_files[0]))
@@ -1750,10 +1748,10 @@ class TestDataStore(TestCase):
         ds1.save_all_data()
         ds2.refresh()
         full_df2 = ds2.full_df()
-        self.assertFalse(tixd1 in full_df2.index)
-        self.assertTrue(tixd3 in full_df2.index)
+        self.assertEqual(len(tidx1.intersection(full_df2.index)), 0)
+        self.assertEqual(len(tidx3.intersection(full_df2.index)), len(tidx3))
 
-        unique_data_files = ds2.data_files.loc[tidx1].unique()
+        unique_data_files = ds2.data_files.loc[tidx3].unique()
         self.assertTrue(len(unique_data_files) == 1)
         self.assertFalse(pd.isna(unique_data_files[0]))
 
