@@ -76,12 +76,23 @@ VTYPES = {
                               # int64 may be more efficient
         'unformat' : lambda s : np.int64(s),
         'format' : lambda i : '%d' % i,
-        'validate_dtype_pd' : pd.api.types.is_int64_dtype,
+        'validate_dtype_pd' : lambda dtype : dtype == np.int64,
         'null_value' : np.int64(0),
         'na_value' : pd.NA,
         'corner_cases' : {'0':np.int64(0), '-1':np.int64(-1),
                           '12345':np.int64(12345)},
         'bad_format_cases' : ['1.1', '', 'text', '1+2'],
+    },
+    'pd_hash' : {
+        'dtype_pd' : 'uint64',
+        'unformat' : lambda s : np.uint64(s),
+        'format' : lambda i : '%d' % i,
+        'validate_dtype_pd' : lambda dtype : dtype == np.uint64,
+        'null_value' : np.uint64(0),
+        'na_value' : pd.NA,
+        'corner_cases' : {'0':np.uint64(0), '1':np.uint64(1),
+                          '12345':np.uint64(12345)},
+        'bad_format_cases' : ['1.1', '', 'text', '1+2', '-1'],
     },
     'singleton' : { # used to force data_store to have one single entry
         'dtype_pd' : 'string',
@@ -167,10 +178,10 @@ class UnknownVariable(Exception): pass
 class DuplicateValueError(Exception): pass
 class BadVariableType(Exception): pass
 class InvalidFlagFormat(Exception): pass
+class InvalidFlagIndex(Exception): pass
 class DuplicateFlag(Exception): pass
 class DuplicateChoice(Exception): pass
 class UnsetFlagError(Exception): pass
-class InvalidFlagIndex(Exception): pass
 class LockedVariables(Exception): pass
 class InvalidIndex(Exception): pass
 class VariableChangeError(Exception): pass
@@ -446,6 +457,10 @@ class TestBitMasking(TestCase):
             mask = bitmask(pos)
             self.assertEqual(bitunmask(mask), pos)
 
+    def test2(self):
+        self.assertEqual(bitunmask(1 << 0), [0])
+        self.assertEqual(bitunmask(1 << 1), [1])
+        self.assertEqual(bitunmask((1 << 1) | (1 << 4) ), [1, 4])
 
 def pandas_hash(o):
     try:
@@ -503,10 +518,10 @@ class DataStore:
     ]
 
     FLAG_ENTRY_VARS = [
-        Var('index_hash', 'int', index_position=0, nullable=False),
+        Var('index_hash', 'pd_hash', index_position=0, nullable=False),
         Var('index_repr', 'string', nullable=False),
         Var('variable', 'string', index_position=1, nullable=False),
-        Var('flag', 'int'),
+        Var('flag', 'int', nullable=False),
     ]
 
     NOTES_VARIABLES = [
@@ -756,11 +771,8 @@ class DataStore:
 
             if fmt is not None:
                 f = lambda v: (fmt(v) if not pd.isna(v) else '')
-                try:
-                    df[[variable.var_label]] = \
-                        df[[variable.var_label]].applymap(f)
-                except:
-                    from IPython import embed; embed() 
+                df[[variable.var_label]] = \
+                    df[[variable.var_label]].applymap(f)
 
         df = df.reset_index().drop(columns=['__conflict_idx__'])
         df['__entry_id__'] = df['__entry_id__'].apply(lambda x: hex(x))
@@ -909,7 +921,10 @@ class DataStore:
             dtype = VTYPES[v.var_type]['dtype_pd']
             merged_value_df[v.var_label] = \
                 merged_value_df[v.var_label].astype(dtype)
-        
+
+        self.logger.debug('Merge values after dtype fix:')
+        self.logger.debug(merged_value_df)
+
         # TODO notify invalid entries
         for data_label in self.dfs:
             if data_label == 'value':
@@ -1033,7 +1048,7 @@ class DataStore:
         else:
             raise TypeError('Type of record %s not handled' % type(record))
         value_df = pd.DataFrame.from_records(records)
-        
+
         if comment is None:
             comment_df = df_like(value_df, fill_value=pd.NA, dtype='string')
         else:
@@ -1107,6 +1122,12 @@ class DataStore:
 
     def push_df(self, value_df, comment_df, user_df, timestamp_df):
         t_levels = DataStore.TRACKING_INDEX_LEVELS
+
+        for column in value_df.columns:
+            var = self.variables[column]
+            value_df[var.var_label] = (value_df[var.var_label]
+                                       .astype(VTYPES[var.var_type]['dtype_pd']))
+
         self.logger.debug('Pushing df:')
         self.logger.debug(value_df)
         self.logger.debug('Current main value df:')
@@ -1472,13 +1493,20 @@ class DataStore:
                 dep.set_user(user)
 
     def check_flag_index(self, index):
+        if isinstance(index, int):
+            index = np.int64(index)
+
         if not VTYPES['flag_index']['validate_value'](index):
             raise ValueError('Invalid flag index %s', index)
-        if not VTYPES['flag_index']['validate_dtype_pd'](index):
+        if not VTYPES['flag_index']['validate_dtype_pd'](index.dtype):
             raise TypeError('Invalid flag index type %s', type(index))
 
+        return index
+
     def push_flag_def(self, flag_index, flag_label, flag_symbol):
-        self.check_flag_index(flag_index)
+        flag_index = self.check_flag_index(flag_index)
+        self.logger.debug('Push flag definition: %d, %s, %s',
+                          flag_index, flag_label, flag_symbol)
         self.flag_defs_ds.push_record({'flag_index' : flag_index,
                                        'flag_label' : flag_label,
                                        'flag_symbol' : flag_symbol})
@@ -1490,34 +1518,31 @@ class DataStore:
         return self.convert_flag_index(index, 'flag_label')
 
     def convert_flag_index(self, index, to):
-        if isinstance(index, int):
-            index = np.int64(index)
-
-        self.check_flag_index(index)
+        index = self.check_flag_index(index)
 
         try:
             flag_def = self.flag_defs_ds.head_df().loc[index]
         except KeyError:
-            InvalidFlagIndex(index)
+            raise InvalidFlagIndex(index)
 
         return flag_def[to]
 
-
-    
     def push_flag(self, index, variables, flag_mask):
         if isinstance(variables, str):
             variables = [variables]
         idx_hashes = pandas_hash(index)
-        idx_reprs = index.map(' | '.join)
+        idx_reprs = index.map(lambda l: ' | '.join(str(e) for e in l))
         records = []
         self.logger.debug('Push flags %s for variables %s and index:',
                           flag_mask, variables)
         self.logger.debug(index)
+        self.logger.debug('Hashed index:')
+        self.logger.debug(idx_hashes)
         for variable in variables:
-            for h,r in zip(idx_hashes, idx_reprs):
-                records.append({'index_hash':h,
-                                'index_repr':r,
-                                'variable': v,
+            for idx_hash, idx_repr in zip(idx_hashes, idx_reprs):
+                records.append({'index_hash': idx_hash,
+                                'index_repr': idx_repr,
+                                'variable': variable,
                                 'flag' : flag_mask})
         self.flag_ds.push_record(records)
 
@@ -1572,18 +1597,62 @@ class DataStore:
         return is_valid
 
     def full_df(self, data_label='value'):
-        if data_label == 'single_flag_symbols':
-            value_df = self.dfs['value']
-            flag_symbol_df = df_like(value_df, null_value=pd.NA,
-                                     dtype='string')
-            flag_df = self.flag_ds.head()
-            idx = (pd.Index(pandas_hash(value_df.index))
-                   .intersection(flag_df.index.get_levels(0)))
+        if 'flag' in data_label:
+            full_df = self.dfs['value']
+            head_df = self.head_df()
+            flag_df = df_like(full_df, fill_value=np.int64(0), dtype=np.int64)
+            flat_flag_df = self.flag_ds.head_df()
             flag_def = self.flag_defs_ds.head_df()
-            for column in flag_symbol_df.columns:
-                flag_symbol_df.loc[idx, column] = \
-                    flag_def.loc[flag_df.loc[idx, column]]
-            return flag_symbol_df
+            for var_label in flat_flag_df.index.get_level_values('variable'):
+                mindex = pd.MultiIndex.from_product((pandas_hash(full_df.index),
+                                                     [var_label]),
+                                                    names=['index_hash',
+                                                           'variable'])
+                self.logger.debug('MIndex from full_df for variable %s:',
+                                  var_label)
+                self.logger.debug(mindex)
+                m_flagged = mindex.isin(flat_flag_df.index)
+                if m_flagged.sum() !=0:
+                    self.logger.debug('Found flags:')
+                    self.logger.debug(flat_flag_df.loc[mindex[m_flagged]])
+                    flag_df.loc[full_df.index[m_flagged], var_label] |= \
+                        (flat_flag_df.loc[mindex[m_flagged], 'flag']
+                         .to_numpy().astype(np.int64))
+
+                mindex = pd.MultiIndex.from_product((pandas_hash(head_df.index),
+                                                     [var_label]))
+                self.logger.debug('MIndex from head_df for variable %s:',
+                                  var_label)
+                self.logger.debug(mindex)
+                m_flagged = mindex.isin(flat_flag_df.index)
+                if m_flagged.sum() !=0:
+                    self.logger.debug('Found flags:')
+                    self.logger.debug(flat_flag_df.loc[mindex[m_flagged]])
+                    flag_df.loc[head_df.index[m_flagged], var_label] |= \
+                        (flat_flag_df.loc[mindex[m_flagged], 'flag']
+                         .to_numpy().astype(np.int64))
+            if data_label == 'single_flag_symbols':
+                flag_symbols = df_like(flag_df, fill_value=pd.NA,
+                                       dtype='string')
+                def f(flag_mask):
+                    bits = bitunmask(flag_mask)
+                    self.logger.debug('Convert flag_mask %d to bits %s',
+                                      flag_mask, bits)
+                    if len(bits) > 1:
+                        return 'many'
+                    elif len(bits) == 1:
+                        return flag_def.loc[bits[0], 'flag_symbol']
+                    else:
+                        return pd.NA
+                for column in flag_symbols.columns:
+                    m_not_null = flag_df[column] != 0
+                    flag_symbols.loc[m_not_null, column] = \
+                        flag_df.loc[m_not_null, column].apply(f)
+                return flag_symbols
+            elif data_label == '':
+                pass
+            else:
+                raise ValueError(data_label)
         else:
             return self.dfs[data_label]
 
@@ -2105,54 +2174,53 @@ class TestDataStore(TestCase):
 
         self.assertEqual(ds.flag_index_as_symbol(1), 'triangle_orange')
         self.assertEqual(ds.flag_index_as_label(1), 'to_check')
-        self.assertEqual(ds.flag_index_as_symbol(2), 'dummy')
-        self.assertEqual(ds.flag_index_as_label(2), 'question_mark')
+        self.assertEqual(ds.flag_index_as_symbol(2), 'question_mark')
+        self.assertEqual(ds.flag_index_as_label(2), 'dummy')
 
-        self.assertRaises(InvalidFlagIndex, ds.flag_index_as_symbols, 0)
-        self.assertRaises(InvalidFlagIndex, ds.flag_index_as_symbols, 4)
-        self.assertRaises(InvalidFlagIndex, ds.push_flag_def,
+        self.assertRaises(InvalidFlagIndex, ds.flag_index_as_symbol, 0)
+        self.assertRaises(InvalidFlagIndex, ds.flag_index_as_symbol, 4)
+        self.assertRaises(ValueError, ds.push_flag_def,
                           flag_index=65, flag_label='f',
                           flag_symbol='triangle_orange')
 
-        tidx1 = ds.push_record({'v1' : 'has flags'}),
+        tidx1 = ds.push_record({'v1' : 'has flags'})
         ds.push_flag(tidx1, 'v1', 1<<1)
         single_flag_symbols_df = ds.full_df('single_flag_symbols')
-        self.assertSequenceEqual(single_flag_symbols_df.loc[tidx1, 'v1'],
-                                 ['dummy'])
+        self.assertEqual(single_flag_symbols_df.loc[tidx1, 'v1'].iat[0],
+                         'triangle_orange')
 
-        ds.push_flag_def(2, 'error', 'cross_red')
-
+        ds.push_flag_def(1, 'error', 'cross_red')
         single_flag_symbols_df = ds.full_df('single_flag_symbols')
-        self.assert_equal(single_flag_symbols_df.loc[tidx1, 'v1'],
-                          ['cross_red'])
+        self.assertEqual(single_flag_symbols_df.loc[tidx1, 'v1'].iat[0],
+                         'cross_red')
 
     def test_many_flags(self):
         ds = DataStore(self.filesystem, 'test_ds')
         ds.set_user('me')
         ds.push_variable('v1', 'string')
 
-        ds.push_flag_def(0, 'to_check', 'triangle_orange')
-        ds.push_flag_def(1, 'dummy', 'question_mark')
-        ds.push_flag_def(2, 'double_checked', 'tick_mark_green')
+        ds.push_flag_def(1, 'to_check', 'triangle_orange')
+        ds.push_flag_def(2, 'dummy', 'question_mark')
+        ds.push_flag_def(4, 'double_checked', 'tick_mark_green')
     
         tidx = ds.push_record([{'v1' : 'has flags'},
                                {'v1' : 'one flag'},
                                {'v1' : 'no flag'}]),
 
-        ds.flag(tidx[0], 'v1', 1|(1<<2))
-        ds.flag(tidx[1], 'v1', (1<<1))
-        ds.flag(tidx[2], 'v1', 0)
+        ds.push_flag(tidx[0], 'v1', 2|(1<<4))
+        ds.push_flag(tidx[1], 'v1', (1<<2))
+        ds.push_flag(tidx[2], 'v1', 0)
 
-        self.assertSequenceEqual(ds.flags_of(tidx[0], 'v1'),
-                                 [0, 2])
+        self.assertEqual(ds.flags_of(tidx[0], 'v1'),
+                         [1, 4])
         self.assertSequenceEqual(ds.flags_of(tidx[1], 'v1'),
                                  [1])
         self.assertSequenceEqual(ds.flags_of(tidx[2], 'v1'),
                                  [])
 
         single_flag_symbols_df = ds.full_df('single_flag_symbols')
-        self.assertSequenceEqual(single_flag_symbols_df.loc[tidx, 'v1'],
-                                 ['many', 'question_mark', pd.NA])
+        self.assertEqual(single_flag_symbols_df.loc[tidx, 'v1'],
+                         ['many', 'question_mark', pd.NA])
 
         tidx2 = ds.push_record(values={'v1' : 'one flag bis'},
                                tracking_index=tidx[1])
