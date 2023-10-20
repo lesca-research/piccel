@@ -553,7 +553,7 @@ class DataStore:
     ]
 
     NOTE_ENTRY_VARS = [
-        Var('index_hash', 'int', index_position=0, nullable=False),
+        Var('index_hash', 'pd_hash', index_position=0, nullable=False),
         Var('index_repr', 'string', nullable=False),
         Var('variable', 'string', index_position=1, nullable=False),
         Var('note', 'string'),
@@ -669,7 +669,7 @@ class DataStore:
             self.logger.debug('Init note datastore')
             self.note_ds = DataStore(self.filesystem,
                                      label=self.label + '_notes',
-                                     variables=DataStore.NOTES_VARIABLES,
+                                     variables=DataStore.NOTE_ENTRY_VARS,
                                      use_annotations=False,
                                      use_properties=False,
                                      notifications={'pushed_entry':
@@ -1589,12 +1589,10 @@ class DataStore:
     def push_flag(self, index, variables, flag_indices):
         if isinstance(variables, str):
             variables = [variables]
-        # TODO utest push flag with conflicting entries 
-        if '__conflict__' in index.names:
-            m_conflict = index.get_level_values('__conflict_idx__') != 0
-            if m_conflict.any():
-                self.logger.warning('Conflicting entries will not be flagged.')
-                index = index[~m_conflict]
+        m_conflict = index.get_level_values('__conflict_idx__') != 0
+        if m_conflict.any():
+            self.logger.warning('Conflicting entries will not be flagged.')
+            index = index[~m_conflict]
         idx_hashes = hash_pandas_index(index)
         if isinstance(index, pd.MultiIndex):
             idx_reprs = index.map(lambda l: ' | '.join(str(e) for e in l))
@@ -1615,16 +1613,20 @@ class DataStore:
                                 'flag' : flag_mask})
         self.flag_ds.push_record(records)
 
-    def push_annotation(self, index, text, timestamp=None):
+    def push_note(self, index, variables, text, timestamp=None):
         if isinstance(variables, str):
             variables = [variables]
+        m_conflict = index.get_level_values('__conflict_idx__') != 0
+        if m_conflict.any():
+            self.logger.warning('Conflicting entries will not be flagged.')
+            index = index[~m_conflict]
         idx_hashes = hash_pandas_index(index)
         if isinstance(index, pd.MultiIndex):
             idx_reprs = index.map(lambda l: ' | '.join(str(e) for e in l))
         else:
             idx_reprs = index.map(str)
         records = []
-        self.logger.debug('Push annotation for variables %s and index:',
+        self.logger.debug('Push note for variables %s and index:',
                           variables)
         self.logger.debug(index)
         self.logger.debug('Hashed index:')
@@ -1636,11 +1638,29 @@ class DataStore:
                                 'variable': variable,
                                 'note' : text,
                                 'archived' : False})
-        self.note_ds.push_record(records)
+        self.note_ds.push_record(records, timestamp=timestamp)
 
-    def archive_annotation(self):
-        # TODO utest 
+    def archive_note(self, index, variable):
         pass
+
+    def notes_of(self, index, var_label):
+        if len(index) != 1:
+            raise ValueError('Can only retrieve notes for one index')
+        flat_note_df = self.note_ds.full_df()
+        flat_note_df = flat_note_df.reset_index().set_index(['index_hash',
+                                                             'variable',
+                                                             '__version_idx__'])
+        note_index = (hash_pandas_index(index).iat[0], var_label)
+        if note_index in flat_note_df.index:
+            df = flat_note_df.loc[note_index]
+            df = df.reset_index().set_index(DataStore.TRACKING_INDEX_LEVELS)
+            result = pd.concat([df] + [self.note_ds.full_df(dlabel)
+                                       .note.rename(dlabel).loc[df.index]
+                                       for dlabel in ('user', 'timestamp')],
+                               axis=1)
+            return result.reset_index(drop=True).drop(columns=['index_repr'])
+        else:
+            return pd.DataFrame([])
 
     def push_variable(self, var_label, var_type, nullable=True,
                       index_position=None, is_unique=False, is_used=True,
@@ -1829,8 +1849,6 @@ class DataStore:
 class TestDataStore(TestCase):
 
     """
-    test_flag
-    test_annotation
     test_head_df_no_index_sorted_by_time
     """
     def setUp(self):
@@ -2324,7 +2342,6 @@ class TestDataStore(TestCase):
                                {'v1' : 'one flag'},
                                {'v1' : 'no flag'}])
 
-        # from IPython import embed; embed() 
         ds.push_flag(tidx[[0, 1]], 'v1', [0, 4])
         ds.push_flag(tidx[[2]], 'v1', [7])
 
@@ -2444,42 +2461,48 @@ class TestDataStore(TestCase):
         self.assertEqual(comment_df.loc[tidx2, 'v1'].iat[0], 'new comment')
         self.assertEqual(comment_df.loc[tidx2, 'v2'].iat[0], 'orig comment')
 
-    def test_annotation(self):
-        # Annotations are comment threads associated with an index
+    def test_note(self):
+        # Notes are comment threads associated with an index
         # and a variable
         ds = DataStore(self.filesystem, 'test_ds')
         ds.set_user('me')
         ds.push_variable('v1', 'string')
         tidx1 = ds.push_record({'v1' : 'test'})
 
-        ds.annotate(tidx1, 'v1', 'this was a test', timestamp=ts1)
-        
         ts1 = datetime(2020,1,2,10,12)
-        a_idx1 = ds.annotate(tidx1, 'v1', 'this was a test', timestamp=ts1)
+        
+        a_idx1 = ds.push_note(tidx1, 'v1', 'this was a test', timestamp=ts1)
         ts2 = datetime(2020,1,2,10,13)
-        a_idx2 = ds.annotate(tidx1, 'v2', 'this really was a test',
-                             timestamp=ts2)
+        a_idx2 = ds.push_note(tidx1, 'v1', 'this really was a test',
+                              timestamp=ts2)
 
         expected_annotations = {
-            'annotation' : ['this was a test',
-                            'this really was a test'],
-            'user' : ['me', 'me'],
-            'timestamp' : [ts1, ts2],
+            'note' : ['this was a test',
+                      'this really was a test'],
             'archived' : [False, False],
-        }
-        assert_frame_equal(ds.annotations(tidx1, 'v1'),
-                           pd.DataFrame(expected_annotations))
-        ds.archive_annotation(a_idx1, 'v1')
-
-        expected_annotations = {
-            'annotation' : ['this really was test',
-                             'this really was a test'],
             'user' : ['me', 'me'],
             'timestamp' : [ts1, ts2],
-            'archived' : [True, False]
         }
-        assert_frame_equal(ds.annotations(tidx1, 'v1'),
-                           pd.DataFrame(expected_annotations))
+        expected_df = pd.DataFrame(expected_annotations)
+        expected_df['note'] = expected_df['note'].astype('string')
+        expected_df['archived'] = expected_df['archived'].astype('boolean')
+        expected_df['user'] = expected_df['user'].astype('string')
+        assert_frame_equal(ds.notes_of(tidx1, 'v1'), expected_df)
+
+        # TODO add notes' t_index to results of notes_of
+        ds.archive_note(a_idx1, 'v1')
+        expected_annotations = {
+            'note' : ['this was a test',
+                      'this really was a test'],
+            'archived' : [True, False],
+            'user' : ['me', 'me'],
+            'timestamp' : [ts1, ts2],
+        }
+        expected_df = pd.DataFrame(expected_annotations)
+        expected_df['note'] = expected_df['note'].astype('string')
+        expected_df['archived'] = expected_df['archived'].astype('boolean')
+        expected_df['user'] = expected_df['user'].astype('string')
+        assert_frame_equal(ds.notes_of(tidx1, 'v1'), expected_df)
 
     def test_conflict_update(self):
         
@@ -2499,9 +2522,41 @@ class TestDataStore(TestCase):
         ds2.refresh()
 
         idx2_cft = (idx2[0][0], idx2[0][1], 1)
-        self.assertEqual('conflicting', ds1.dfs['validity'].loc[idx2_cft, 'v1'])
+        self.assertEqual('conflicting',
+                         ds1.full_df('validity').loc[idx2_cft, 'v1'])
         idx3_cft = (idx3[0][0], idx3[0][1], 2)
-        self.assertEqual('conflicting', ds2.dfs['validity'].loc[idx3_cft, 'v1'])
+        self.assertEqual('conflicting',
+                         ds2.full_df('validity').loc[idx3_cft, 'v1'])
+
+    def test_flag_conflict(self):
+        
+        ds1 = DataStore(self.filesystem, 'test_ds', log_label='DS1')
+        ds1.set_user('me')
+        ds1.push_variable('v1', 'string')
+        idx1 = ds1.push_record({'v1' : 'orig'})
+        ds1.push_flag_def(0, 'to_check', 'triangle_orange')
+        
+        ds2 = DataStore(ds1.filesystem, log_label='DS2')
+
+        idx2 = ds1.push_record({'v1' : 'update from ds1'},
+                               tracking_index=idx1)
+        idx3 = ds2.push_record({'v1' : 'conflicting update from ds2'},
+                               tracking_index=idx1)
+
+        ds1.refresh()
+        ds2.refresh()
+
+        idx2_cft = (idx2[0][0], idx2[0][1], 1)
+        t_levels = DataStore.TRACKING_INDEX_LEVELS
+        idx_test = pd.MultiIndex.from_tuples([idx2_cft, idx1[0]],
+                                             names=t_levels)
+        ds1.push_flag(idx_test, 'v1', [0])
+        self.assertEqual(ds1.flags_of(idx_test[[0]], 'v1'), [])
+        self.assertEqual(ds1.flags_of(idx_test[[1]], 'v1'), [0])
+
+        ds2.refresh()
+        self.assertEqual(ds2.flags_of(idx_test[[0]], 'v1'), [])
+        self.assertEqual(ds2.flags_of(idx_test[[1]], 'v1'), [0])
 
     def test_conflict_unique(self):
         ds1 = DataStore(self.filesystem, 'test_ds')
