@@ -42,6 +42,7 @@ def unformat_boolean(s):
                          'empty (%s given)' % s)
 
 FLAGS_SYMBOLS = {
+    'blank',
     'cross_red',
     'square_blue',
     'triangle_orange',
@@ -73,13 +74,23 @@ VTYPES = {
         'bad_format_cases' : [],
     },
     'int' : {
-        'dtype_pd' : 'Int64', # TODO for non-NA values,
+        'dtype_pd' : 'Int64', # TODO for non-NA values
                               # int64 may be more efficient
         'unformat' : lambda s : np.int64(s),
         'format' : lambda i : '%d' % i,
         'validate_dtype_pd' : lambda dtype : dtype == np.int64,
         'null_value' : np.int64(0),
         'na_value' : pd.NA,
+        'corner_cases' : {'0':np.int64(0), '-1':np.int64(-1),
+                          '12345':np.int64(12345)},
+        'bad_format_cases' : ['1.1', '', 'text', '1+2'],
+    },
+    'int_id' : {
+        'dtype_pd' : 'int64', 
+        'unformat' : lambda s : np.int64(s),
+        'format' : lambda i : '%d' % i,
+        'validate_dtype_pd' : lambda dtype : dtype == np.int64,
+        'null_value' : np.int64(0),
         'corner_cases' : {'0':np.int64(0), '-1':np.int64(-1),
                           '12345':np.int64(12345)},
         'bad_format_cases' : ['1.1', '', 'text', '1+2'],
@@ -179,10 +190,10 @@ class UnknownVariable(Exception): pass
 class DuplicateValueError(Exception): pass
 class BadVariableType(Exception): pass
 class InvalidFlagFormat(Exception): pass
-class InvalidFlagIndex(Exception): pass
+class InvalidFlagLabel(Exception): pass
 class DuplicateFlag(Exception): pass
 class DuplicateChoice(Exception): pass
-class UnsetFlagError(Exception): pass
+class UndefinedFlagLabel(Exception): pass
 class LockedVariables(Exception): pass
 class InvalidIndex(Exception): pass
 class VariableChangeError(Exception): pass
@@ -191,12 +202,12 @@ class InvalidImport(Exception): pass
 
 class Var:
     def __init__(self, var_label, var_type, index_position=None, is_unique=False,
-                 is_used=True, nullable=True, column_position=None):
+                 is_used=True, nullable=True, column_position=None, **extra):
 
         self.var_label = var_label
 
         if var_type not in VTYPES:
-            raise BadVariableType(var_type)
+            raise BadVariableType("%s" % var_type)
         self.var_type = var_type
 
         if pd.isna(index_position):
@@ -216,6 +227,8 @@ class Var:
             column_position = None
         self.column_position = column_position
 
+        self.extra = extra
+
     def is_index(self):
         return self.index_position is not None
 
@@ -224,13 +237,15 @@ class Var:
 
     def asdict(self):
         return {
-            'var_label' : self.var_label,
-            'var_type' : self.var_type,
-            'index_position' : self.index_position,
-            'column_position' : self.column_position,
-            'is_unique' : self.is_unique,
-            'nullable' : self.nullable,
-            'is_used' : self.is_used,
+            **{'var_label' : self.var_label,
+               'var_type' : self.var_type,
+               'index_position' : self.index_position,
+               'column_position' : self.column_position,
+               'is_unique' : self.is_unique,
+               'nullable' : self.nullable,
+               'is_used' : self.is_used,
+               },
+            **self.extra
         }
 
 class FixedVariables:
@@ -269,12 +284,12 @@ class PersistentVariables:
         Var('column_position', 'number'),
     ]
 
-    def __init__(self, parent_store):
+    def __init__(self, parent_store, variables):
         self.parent_store = parent_store
         authorize_deletion = parent_store.insure_unlocked_variables
         self.store = DataStore(parent_store.filesystem,
                                label=parent_store.label + '_vars', 
-                               variables=PersistentVariables.META_VARS,
+                               variables=variables,
                                use_annotations=False,
                                use_properties=False,
                                validate_entry=self.validate_entry,
@@ -298,6 +313,7 @@ class PersistentVariables:
         for v in self:
             if v.var_label == var_label:
                 return v
+        raise UnknownVariable(var_label)
 
     def indexes(self):
         return list(sorted((v for v in self if v.is_index()),
@@ -539,19 +555,6 @@ class DataStore:
     DATA_LABELS = ('value', 'timestamp', 'user', 'comment', 'validity')
     CPT_DATA_LABELS = ('single_flag_symbols',)
 
-    FLAG_DEF_VARS = [
-        Var('flag_index', 'flag_index', index_position=0, nullable=False),
-        Var('flag_label', 'string', is_unique=True, nullable=False),
-        Var('flag_symbol', 'symbol', nullable=False),
-    ]
-
-    FLAG_ENTRY_VARS = [
-        Var('index_hash', 'pd_hash', index_position=0, nullable=False),
-        Var('index_repr', 'string', nullable=False),
-        Var('variable', 'string', index_position=1, nullable=False),
-        Var('flag', 'int', nullable=False),
-    ]
-
     NOTE_ENTRY_VARS = [
         Var('index_hash', 'pd_hash', nullable=False),
         Var('index_repr', 'string', nullable=False),
@@ -568,6 +571,7 @@ class DataStore:
     DATA_FILE_EXT = '.csv'
 
     def __init__(self, filesystem, label=None, variables=None,
+                 meta_variables=PersistentVariables.META_VARS,
                  use_annotations=True, logic=None, validate_entry=None,
                  authorize_deletion=None, notifications=None,
                  use_properties=True, log_label=None):
@@ -632,7 +636,7 @@ class DataStore:
                                       log_label=self.log_label + '_props') 
             if self.props_ds.data_is_empty():
                 self.props_ds.push_record({'variables_locked' : False})
-        
+
         if variables is not None:
             self.logger.debug('Use fixed variables')
             self.variables = FixedVariables(variables)
@@ -640,31 +644,43 @@ class DataStore:
                                            for variable in self.variables])
         else:
             self.logger.debug('Init variables datastore')
-            self.variables = PersistentVariables(self)
+            self.variables = PersistentVariables(self, variables=meta_variables)
 
         self.flag_ds = None
         self.note_ds = None
         if use_annotations:
             self.logger.debug('Init flag definition datastore')
             # TODO adapt notifications
-            self.flag_defs_ds = DataStore(self.filesystem,
-                                          label=self.label + '_flag_defs',
-                                          variables=DataStore.FLAG_DEF_VARS,
-                                          use_annotations=False,
-                                          use_properties=False,
-                                          notifications={'pushed_entry':
-                                                         self.on_pushed_flag_def},
-                                          log_label=self.log_label + '_flag_defs')
+            # self.flag_defs_ds = DataStore(self.filesystem,
+            #                               label=self.label + '_flag_defs',
+            #                               variables=DataStore.FLAG_DEF_VARS,
+            #                               use_annotations=False,
+            #                               use_properties=False,
+            #                               notifications={'pushed_entry':
+            #                                              self.on_pushed_flag_def},
+            #                               log_label=self.log_label + '_flag_defs')
 
             self.logger.debug('Init flag datastore')
+            flag_vars = PersistentVariables.META_VARS[:]
+            flag_vars.append(Var('flag_symbol', 'symbol', nullable=False))
             self.flag_ds = DataStore(self.filesystem,
                                      label=self.label + '_flags',
-                                     variables=DataStore.FLAG_ENTRY_VARS,
                                      use_annotations=False,
-                                     use_properties=False,
+                                     meta_variables=flag_vars,
+                                     use_properties=True,
                                      notifications={'pushed_entry':
                                                     self.on_pushed_flag},
                                      log_label=self.log_label + '_flags')
+
+            self.flag_ds.push_variable('_flagged_index_hash', 'int_id',
+                                       index_position=0,
+                                       nullable=False,
+                                       flag_symbol='blank')
+            self.flag_ds.push_variable('_flagged_variable', 'string',
+                                       index_position=1, nullable=False,
+                                       flag_symbol='blank')
+            self.flag_ds.push_variable('_flagged_index_repr', 'string', 
+                                       nullable=False, flag_symbol='blank')
 
             self.logger.debug('Init note datastore')
             self.note_ds = DataStore(self.filesystem,
@@ -1079,20 +1095,25 @@ class DataStore:
 
     def push_record(self, record, comment=None, timestamp=None,
                     tracking_index=None):
-        if isinstance(record, dict):
-            for v in record.values():
-                assert(not isinstance(v, (list, tuple, set)))
-            records = [record]
-        elif isinstance(record, list):
-            records = record
-        else:
-            raise TypeError('Type of record %s not handled' % type(record))
-        value_df = pd.DataFrame.from_records(records)
+        def _pack(data, label):
+            if isinstance(data, dict):
+                for v in data.values():
+                    assert(not isinstance(v, (list, tuple, set)))
+                return [data]
+            elif isinstance(data, list):
+                return data
+            else:
+                raise TypeError('Type of %s: %s not handled' %
+                                (label, type(data)))
 
+        value_df = pd.DataFrame.from_records(_pack(record, 'record'))
+        self.logger.debug('Push record - conversion to df:')
+        self.logger.debug(value_df)
+        
         if comment is None:
             comment_df = df_like(value_df, fill_value=pd.NA, dtype='string')
         else:
-            comment_df = pd.DataFrame.from_records([comment])
+            comment_df = pd.DataFrame.from_records(_pack(comment, 'comment'))
 
         timestamp_df = df_like(value_df,
                                fill_value=if_none(timestamp,
@@ -1162,10 +1183,21 @@ class DataStore:
     def push_df(self, value_df, comment_df, user_df, timestamp_df):
         t_levels = DataStore.TRACKING_INDEX_LEVELS
 
+        self.logger.debug('Push df with columns:')
+        self.logger.debug(value_df.columns)
+        self.logger.debug('Push df - current variables:')
+        self.logger.debug([v.var_label for v in self.variables])
         for column in value_df.columns:
             var = self.variables[column]
-            value_df[var.var_label] = (value_df[var.var_label]
-                                       .astype(VTYPES[var.var_type]['dtype_pd']))
+            dtype = VTYPES[var.var_type]['dtype_pd']
+            try:
+                value_df[var.var_label] = (value_df[var.var_label]
+                                           .astype(dtype))
+            except ValueError:
+                raise TypeError('Type of %s in df to push is %s, which is'
+                                'incompatible with variable type: %s' %
+                                (var.var_label, value_df.dtypes[column],
+                                 dtype))
 
         self.logger.debug('Pushing df:')
         self.logger.debug(value_df)
@@ -1539,7 +1571,8 @@ class DataStore:
 
     @classmethod
     def is_valid_flag_label(cls, label):
-        return label.isidentifier()
+        return (DataStore.is_valid_variable_label(label) and 
+                not label.startswith('_'))
 
     def set_user(self, user):
         self.user = user
@@ -1559,42 +1592,40 @@ class DataStore:
 
         return index
 
-    def push_flag_def(self, flag_index, flag_label, flag_symbol):
-        flag_index = self.check_flag_index(flag_index)
-        self.logger.debug('Push flag definition: %d, %s, %s',
-                          flag_index, flag_label, flag_symbol)
-        self.flag_defs_ds.push_record({'flag_index' : flag_index,
-                                       'flag_label' : flag_label,
-                                       'flag_symbol' : flag_symbol})
+    def flag_def_head_df(self):
+        flag_vars_head_df = self.flag_ds.variables.store.head_df()
+        return flag_vars_head_df[~flag_vars_head_df.index.str.startswith('_')]
+
+    def push_flag_def(self, flag_label, flag_symbol, flag_position=0):
+        if not DataStore.is_valid_flag_label(flag_label):
+            raise InvalidFlagLabel(flag_label)
+        self.logger.debug('Push flag definition: %s, %s',
+                          flag_label, flag_symbol)
+        self.flag_ds.push_variable(flag_label, 'boolean',
+                                   column_position=flag_position,
+                                   flag_symbol=flag_symbol)
         # TODO: better to do that at the end of push processing, on notification
         self.invalidate_cached_views('single_flag_symbols')
 
-    def flag_index_as_symbol(self, index):
-        return self.convert_flag_index(index, 'flag_symbol')
+    def push_flag(self, index, variables, flag_labels, comment=None,
+                  timestamp=None):
+        def _pack(data):
+            if isinstance(data, str):
+                data = [data]
+            return data
 
-    def flag_index_as_label(self, index):
-        return self.convert_flag_index(index, 'flag_label')
+        variables = _pack(variables)
+        comment = _pack(comment)
+        
+        flag_labels = _pack(flag_labels)
+        flag_def = self.flag_def_head_df()
+        for flag_label in flag_labels:
+            if flag_label not in flag_def.index:
+                raise UndefinedFlagLabel(flag_label)
 
-    def convert_flag_index(self, index, to):
-        index = self.check_flag_index(index)
-
-        try:
-            flag_def = self.flag_defs_ds.head_df().loc[index]
-        except KeyError:
-            raise InvalidFlagIndex(index)
-
-        return flag_def[to]
-
-    def flag_mask_from_indices(self, indices):
-        flag_def = self.flag_defs_ds.head_df()
-        for flag_index in indices:
-            if flag_index not in flag_def.index:
-                raise InvalidFlagIndex(flag_index)
-        return bitmask(indices)
-
-    def push_flag(self, index, variables, flag_indices):
-        if isinstance(variables, str):
-            variables = [variables]
+        if comment is not None and len(flag_labels) != len(comment):
+            raise ValueError('flags_labels and comments must '
+                             'be the same length')
         m_conflict = index.get_level_values('__conflict_idx__') != 0
         if m_conflict.any():
             self.logger.warning('Conflicting entries will not be flagged.')
@@ -1606,18 +1637,19 @@ class DataStore:
             idx_reprs = index.map(str)
         records = []
         self.logger.debug('Push flags %s for variables %s and index:',
-                          flag_indices, variables)
+                          flag_labels, variables)
         self.logger.debug(index)
         self.logger.debug('Hashed index:')
         self.logger.debug(idx_hashes)
-        flag_mask = self.flag_mask_from_indices(flag_indices)
         for variable in variables:
             for idx_hash, idx_repr in zip(idx_hashes, idx_reprs):
-                records.append({'index_hash': idx_hash,
-                                'index_repr': idx_repr,
-                                'variable': variable,
-                                'flag' : flag_mask})
-        self.flag_ds.push_record(records)
+                for flag_label in flag_labels:
+                    records.append({'_flagged_index_hash': idx_hash,
+                                    '_flagged_index_repr': idx_repr,
+                                    '_flagged_variable': variable,
+                                    flag_label : True})
+        self.flag_ds.push_record(records, timestamp=timestamp,
+                                 comment=comment)
 
     def push_note(self, index, variables, text, timestamp=None):
         if isinstance(variables, str):
@@ -1672,10 +1704,11 @@ class DataStore:
 
     def push_variable(self, var_label, var_type, nullable=True,
                       index_position=None, is_unique=False, is_used=True,
-                      column_position=None):
+                      column_position=None, **extra_args):
         variable = Var(var_label, var_type, nullable=nullable,
                        index_position=index_position, is_unique=is_unique,
-                       is_used=is_used, column_position=column_position)
+                       is_used=is_used, column_position=column_position,
+                       **extra_args)
         return self.variables.store.push_record(variable.asdict())
 
     def invalid_entries(self):
@@ -1726,31 +1759,51 @@ class DataStore:
         flat_flag_df = self.flag_ds.head_df()
         flag_index = (hash_pandas_index(index).iat[0], var_label)
         if flag_index in flat_flag_df.index:
-            return bitunmask(flat_flag_df.loc[flag_index, 'flag'])
+            df = flat_flag_df.loc[flag_index]
+            df = df.reset_index().set_index(DataStore.TRACKING_INDEX_LEVELS)
+            result = pd.concat([df] + [self.flag_ds.full_df(dlabel)
+                                       .note.rename(dlabel).loc[df.index]
+                                       for dlabel in ('user', 'comment',
+                                                      'timestamp')],
+                               axis=1)
+            
+            return bitunmask()
         else:
             return []
 
     def full_df(self, data_label='value'):
         t_levels = DataStore.TRACKING_INDEX_LEVELS
+
         if 'flag' in data_label and self.cpt_dfs[data_label] is None:
+
+            flag_def = self.flag_def_head_df() 
+            def reduce_flags(row):
+                from IPython import embed; embed()
+                flag_mask = row[flag_def.index]
+                if flag_mask.sum() > 1:
+                    return 'many'
+                else:
+                    return flag_mask.fillna(False).idxmax()
+            
             full_df = self.dfs['value']
-            self.logger.debug('Compute full df for %s from:')
+            self.logger.debug('Compute full df for %s from:', data_label)
             self.logger.debug(full_df)
             flag_df = df_like(full_df, fill_value=np.int64(0), dtype=np.int64)
-            flat_flag_df = self.flag_ds.head_df()
-            flag_def = self.flag_defs_ds.head_df()
+            sparse_flag_df = self.flag_ds.head_df()
+            reduced_flags = sparse_flag_df.apply(reduce_flags, axis=1)
+            flag_def = self.flag_def_head_df()
             # Look for flagged cells in full_df:
-            tagged_variables = flat_flag_df.index.get_level_values('variable')
+            tagged_variables = flat_flag_df.index.get_level_values('_variable')
             hashed_index = hash_pandas_index(full_df.index)
             for var_label in tagged_variables:
                 mindex = pd.MultiIndex.from_product((hashed_index, [var_label]),
-                                                    names=['index_hash',
-                                                           'variable'])
+                                                    names=['_flagged_index_hash',
+                                                           '_flagged_variable'])
                 self.logger.debug('MIndex from full_df for variable %s:',
                                   var_label)
                 self.logger.debug(mindex)
                 m_flagged = mindex.isin(flat_flag_df.index)
-                if m_flagged.sum() !=0:
+                if m_flagged.sum() != 0:
                     self.logger.debug('Found flags:')
                     self.logger.debug(flat_flag_df.loc[mindex[m_flagged]])
                     flag_df.loc[full_df.index[m_flagged], var_label] |= \
@@ -2269,12 +2322,16 @@ class TestDataStore(TestCase):
         ds.push_variable('vid', 'string', index_position=0)
         ds.push_variable('age', 'int')
 
-        ds.push_flag_def(0, 'to_check', 'triangle_orange')
-        ds.push_flag_def(1, 'double_checked', 'tick_mark_green')
+        ds.push_flag_def('to_check', 'triangle_orange')
+        ds.push_flag_def('double_checked', 'tick_mark_green')
+
+        flags_df = ds.flag_ds.head_df()
+        self.assertListEqual(flags_df.columns.to_list()[:2],
+                             ['double_checked', 'to_check'])
 
         tidx = ds.push_record({'vid' : 'ID1', 'age' : 111})
 
-        ds.push_flag(tidx, 'age', [0])
+        ds.push_flag(tidx, 'age', 'to_check')
 
         symbols_full_df = ds.full_df('single_flag_symbols')
         self.assertEqual(symbols_full_df.loc[tidx, 'age'].iat[0],
@@ -2284,18 +2341,29 @@ class TestDataStore(TestCase):
         self.assertEqual(symbols_head_df.loc[tidx, 'age'].iat[0],
                          'triangle_orange')
 
-        logger.debug('utest get head df for single flag symbols')
+    def test_flag_kept_after_value_update(self):
+        ds = DataStore(self.filesystem, 'test_ds')
+        ds.set_user('me')
+        ds.push_variable('vid', 'string', index_position=0)
+        ds.push_variable('age', 'int')
+
+        ds.push_flag_def('to_check', 'triangle_orange')
+        tidx = ds.push_record({'vid' : 'ID1', 'age' : 111})
+        ds.push_flag(tidx, 'age', 'to_check')
+
         tidx2 = ds.push_record({'vid' : 'ID1', 'age' : 222})
-        self.assertIsNone(ds.cpt_dfs['single_flag_symbols'])
-        self.assertIsNone(ds.head_dfs['single_flag_symbols'])
-        self.assertTrue(tidx2[0] in ds.head_df()
-                        .set_index(DataStore.TRACKING_INDEX_LEVELS).index)
 
-        logger.debug('utest get head df for single flag symbols')
+        symbols_full_df = ds.full_df('single_flag_symbols')
+        self.assertEqual(symbols_full_df.loc[tidx2, 'age'].iat[0],
+                         'triangle_orange')
+
         symbols_head_df = ds.head_df('single_flag_symbols')
-        self.assertTrue(pd.isna(symbols_head_df.loc[tidx2, 'age'].iat[0]))
-        self.assertTrue(tidx[0] not in symbols_head_df.index)
+        self.assertEqual(symbols_head_df.loc[tidx2, 'age'].iat[0],
+                         'triangle_orange')
 
+    def test_push_flag_with_comment(self):
+        raise NotImpletedErrorç()
+        
     def test_flag_definition(self):
         # TODO: do not systematically invalidate cached views?
         # TODO: always associate flag to tracking index
@@ -2339,20 +2407,44 @@ class TestDataStore(TestCase):
         ds.set_user('me')
         ds.push_variable('v1', 'string')
 
-        ds.push_flag_def(0, 'to_check', 'triangle_orange')
-        ds.push_flag_def(1, 'dummy', 'question_mark')
-        ds.push_flag_def(4, 'double_checked', 'tick_mark_green')
-        ds.push_flag_def(7, 'other', 'square_blue')
+        ds.push_flag_def('to_check', 'triangle_orange')
+        ds.push_flag_def('dummy', 'question_mark')
+        ds.push_flag_def('double_checked', 'tick_mark_green')
+        ds.push_flag_def('other', 'square_blue')
 
         tidx = ds.push_record([{'v1' : 'has flags'},
-                               {'v1' : 'has flags'},
+                               {'v1' : 'has flags too'},
                                {'v1' : 'one flag'},
                                {'v1' : 'no flag'}])
 
-        ds.push_flag(tidx[[0, 1]], 'v1', [0, 4])
-        ds.push_flag(tidx[[2]], 'v1', [7])
+        ts1 = datetime(2020, 1, 2, 10, 12)
+        ds.push_flag(tidx[[0, 2]], 'v1', 'to_check',
+                     comments='I flagged to_check', timestamp=ts1)
 
-        self.assertEqual(ds.flags_of(tidx[[0]], 'v1'), [0, 4])
+        ts2 = datetime(2019, 1, 2, 10, 13)
+        ds.push_flag(tidx[[0]], 'v1', 'other',
+                     comments='I flagged other', timestamp=ts2)
+
+        ts3 = datetime(2019, 1, 2, 10, 14)
+        ds.push_flag(tidx[[1]], 'v1', ['dummy', 'to_check'],
+                     comment='I flagged dummy & to_check', timestamp=ts3)
+        expected_flags = {
+            'flag_label' : [0, 1, 4, 7],
+            'flag_symbol' : ['triangle_orange',
+                             'question_mark',
+                             'tick_mark_green',
+                             'square_blue'],
+            'used' : [True, False, False, True],
+            'comment' : ['I flagged here', pd.NA, pd.NA, 'I flagged there'],
+            'user' : ['me', pd.NA, pd.NA, 'me'],
+            'timestamp' : [ts1, pd.NaT, pd.NaT, ts2],
+        }
+        exepcted_flags_df = pd.DataFrame(expected_flags)
+        expected_df['comment'] = expected_df['comment'].astype('string')
+        expected_df['used'] = expected_df['used'].astype('boolean')
+        expected_df['user'] = expected_df['user'].astype('string')
+        assert_frame_equal(ds.flags_of(tidx[[0]], 'v1'), expected_flags_df)
+
         self.assertEqual(ds.flags_of(tidx[[1]], 'v1'), [0, 4])
         self.assertEqual(ds.flags_of(tidx[[2]], 'v1'), [7])
         self.assertEqual(ds.flags_of(tidx[[3]], 'v1'), [])
@@ -2478,9 +2570,6 @@ class TestDataStore(TestCase):
 
         ts1 = datetime(2020,1,2,12,12)
 
-        # TODO: notes of a given thread should have distinct tracking ids
-        #       but same annotated index
-        # -} 
         a_idx1 = ds.push_note(tidx1, 'v1', 'this was a test', timestamp=ts1)
         ts2 = datetime(2020,1,2,10,10)
         a_idx2 = ds.push_note(tidx1, 'v1', 'this really was a test',

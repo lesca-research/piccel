@@ -115,7 +115,7 @@ class refresh_text:
             self.ui_label.show()
 
 class Notifier:
-
+    # TODO add recursion detection
     def __init__(self, notifications=None):
         self.on_events = defaultdict(list)
         if notifications is not None:
