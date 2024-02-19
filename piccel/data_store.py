@@ -397,6 +397,9 @@ def df_like(df, fill_value=pd.NA, dtype=None):
         new_df = new_df.astype(dtype)
     return new_df
 
+def df_with_index_like(df):
+    new_fd = pd.DataFrame().reindex(index=df.index)
+    pass
 class PersistentLogic:
     STORE_VARS = [
         Var('code_entry', 'ds_code_entry', index_position=0, nullable=False),
@@ -672,7 +675,7 @@ class DataStore:
                                                     self.on_pushed_flag},
                                      log_label=self.log_label + '_flags')
 
-            self.flag_ds.push_variable('_flagged_index_hash', 'int_id',
+            self.flag_ds.push_variable('_flagged_index_hash', 'pd_hash',
                                        index_position=0,
                                        nullable=False,
                                        flag_symbol='blank')
@@ -1774,66 +1777,39 @@ class DataStore:
     def full_df(self, data_label='value'):
         t_levels = DataStore.TRACKING_INDEX_LEVELS
 
-        if 'flag' in data_label and self.cpt_dfs[data_label] is None:
+        if data_label in self.DATA_LABELS:
+            return self.dfs[data_label]
 
-            flag_def = self.flag_def_head_df() 
-            def reduce_flags(row):
-                from IPython import embed; embed()
-                flag_mask = row[flag_def.index]
-                if flag_mask.sum() > 1:
-                    return 'many'
-                else:
-                    return flag_mask.fillna(False).idxmax()
-            
+        if self.cpt_dfs[data_label] is None:
             full_df = self.dfs['value']
             self.logger.debug('Compute full df for %s from:', data_label)
             self.logger.debug(full_df)
-            flag_df = df_like(full_df, fill_value=np.int64(0), dtype=np.int64)
-            sparse_flag_df = self.flag_ds.head_df()
-            reduced_flags = sparse_flag_df.apply(reduce_flags, axis=1)
-            flag_def = self.flag_def_head_df()
-            # Look for flagged cells in full_df:
-            tagged_variables = flat_flag_df.index.get_level_values('_variable')
-            hashed_index = hash_pandas_index(full_df.index)
-            for var_label in tagged_variables:
-                mindex = pd.MultiIndex.from_product((hashed_index, [var_label]),
-                                                    names=['_flagged_index_hash',
-                                                           '_flagged_variable'])
-                self.logger.debug('MIndex from full_df for variable %s:',
-                                  var_label)
-                self.logger.debug(mindex)
-                m_flagged = mindex.isin(flat_flag_df.index)
-                if m_flagged.sum() != 0:
-                    self.logger.debug('Found flags:')
-                    self.logger.debug(flat_flag_df.loc[mindex[m_flagged]])
-                    flag_df.loc[full_df.index[m_flagged], var_label] |= \
-                        flat_flag_df.loc[mindex[m_flagged], 'flag'].values
 
             if data_label == 'single_flag_symbols':
-                flag_symbols = df_like(flag_df, fill_value=pd.NA,
-                                       dtype='string')
-                def f(flag_mask):
-                    bits = bitunmask(flag_mask)
-                    self.logger.debug('Convert flag_mask %d to bits %s',
-                                      flag_mask, bits)
-                    if len(bits) > 1:
+                flag_def = self.flag_def_head_df() 
+                def reduce_flags(row):
+                    flag_mask = row[flag_def.index]
+                    if flag_mask.sum() > 1:
                         return 'many'
-                    elif len(bits) == 1:
-                        return flag_def.loc[bits[0], 'flag_symbol']
                     else:
-                        return pd.NA
-                for column in flag_symbols.columns:
-                    m_not_null = flag_df[column] != 0
-                    flag_symbols.loc[m_not_null, column] = \
-                        flag_df.loc[m_not_null, column].apply(f)
-                self.cpt_dfs['single_flag_symbols'] = flag_symbols
+                        return flag_mask.fillna(False).idxmax()
+
+                flag_df = pd.DataFrame().reindex(index=full_df.index)
+                # flag_df = df_like(full_df, fill_value=pd.NA, dtype=str)
+                flag_df['_flagged_index_hash'] = (hash_pandas_index(flag_df.index)
+                                                  .to_numpy())
+                flag_df = flag_df.reset_index().set_index('_flagged_index_hash')
+                sparse_flag_df = self.flag_ds.head_df()
+                reduced_flags = (sparse_flag_df.apply(reduce_flags, axis=1)
+                                 .unstack(1))
+                reduced_flags.columns.name = None
+                flag_df = flag_df.join(reduced_flags).set_index(t_levels)
+                flag_df[full_df.columns.difference(flag_df.columns)] = pd.NA
+                self.cpt_dfs[data_label] = flag_df[full_df.columns]
             else:
                 raise ValueError(data_label)
 
-        if data_label in self.DATA_LABELS:
-            return self.dfs[data_label]
-        else:
-            return self.cpt_dfs[data_label]
+        return self.cpt_dfs[data_label]
 
     def empty_df(self):
         df = pd.DataFrame(columns=DataStore.TRACKING_INDEX_LEVELS)
