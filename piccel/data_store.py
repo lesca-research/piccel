@@ -1527,16 +1527,18 @@ class DataStore:
                 self.notifier.notify('column_added', vlabel)
 
     def invalidate_cached_views(self, dlabel=None):
-        self.logger.debug('invalidate cached views')
+        self.logger.debug('invalidate cached views (%s)', dlabel)
         if dlabel is not None:
-            self.head_dfs[dlabel] = None
+            if dlabel in self.head_dfs:
+                self.head_dfs[dlabel] = None
+                for dlabel in DataStore.CPT_DATA_LABELS:
+                    self.cpt_dfs[dlabel] = None
             if dlabel in self.cpt_dfs:
-                self.cpt_dfs['single_flag_symbols'] = None
+                self.cpt_dfs[dlabel] = None
         else:
             for dlabel in DataStore.DATA_LABELS:
                 self.head_dfs[dlabel] = None
             for dlabel in DataStore.CPT_DATA_LABELS:
-                self.head_dfs[dlabel] = None
                 self.cpt_dfs[dlabel] = None
 
             # should be cached_views['__validity__']:
@@ -1653,6 +1655,8 @@ class DataStore:
                                     flag_label : True})
         self.flag_ds.push_record(records, timestamp=timestamp,
                                  comment=comment)
+        #TODO: inefficient to recompute full flag df for only 1 changing position
+        self.invalidate_cached_views('single_flag_symbols')
 
     def push_note(self, index, variables, text, timestamp=None):
         if isinstance(variables, str):
@@ -2309,13 +2313,14 @@ class TestDataStore(TestCase):
 
         ds.push_flag(tidx, 'age', 'to_check')
 
-        symbols_full_df = ds.full_df('single_flag_symbols')
-        self.assertEqual(symbols_full_df.loc[tidx, 'age'].iat[0],
-                         'triangle_orange')
+        symbols_df = ds.full_df('single_flag_symbols')
+        self.assertEqual(symbols_df.loc[tidx, 'age'].iat[0],
+                         'to_check')
 
-        symbols_head_df = ds.head_df('single_flag_symbols')
-        self.assertEqual(symbols_head_df.loc[tidx, 'age'].iat[0],
-                         'triangle_orange')
+        ds.push_flag(tidx, 'age', 'double_checked')
+        symbols_df = ds.full_df('single_flag_symbols')
+        self.assertEqual(symbols_df.loc[tidx, 'age'].iat[0],
+                         'many')
 
     def test_flag_kept_after_value_update(self):
         ds = DataStore(self.filesystem, 'test_ds')
