@@ -48,6 +48,8 @@ def make_resources():
                             'from .%s import *' % rsrc_module_name)
     except FileNotFoundError:
         print('pyrcc5 command (PyQT5) not found')
+        print('Consider installing package pyqt5-dev-tools and '
+              'reinstall pyqt5-tools with pip')
         sys.exit(1)
 
 make_resources()
