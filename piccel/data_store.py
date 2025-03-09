@@ -1618,7 +1618,9 @@ class DataStore:
 
     def flag_def_head_df(self):
         flag_vars_head_df = self.flag_ds.variables.store.head_df()
-        return flag_vars_head_df[~flag_vars_head_df.index.str.startswith('_')]
+        head_df = flag_vars_head_df[~flag_vars_head_df.index.str.startswith('_')]
+        head_df.index.name = 'flag'
+        return head_df
 
     def push_flag_def(self, flag_label, flag_symbol, flag_position=0):
         if not DataStore.is_valid_flag_label(flag_label):
@@ -1649,13 +1651,13 @@ class DataStore:
             if flag_label not in flag_def.index:
                 raise UndefinedFlagLabel(flag_label)
 
-        if comments is not None:
-            if len(flag_labels) != len(comments):
-                if len(comments) == 1:
-                    comments = comments * len(flag_labels)
-                else:
-                    raise ValueError('flags_labels and comments must '
-                                     'be the same length')
+        comments = if_none(comments, [pd.NA])
+        if len(flag_labels) != len(comments):
+            if len(comments) == 1:
+                comments = comments * len(flag_labels)
+            else:
+                raise ValueError('flags_labels and comments must '
+                                 'be the same length')
         m_conflict = index.get_level_values('__conflict_idx__') != 0
         if m_conflict.any():
             self.logger.warning('Conflicting entries will not be flagged.')
@@ -1795,19 +1797,33 @@ class DataStore:
             raise ValueError('Can only retrieve flags for one index')
         flat_flag_df = self.flag_ds.head_df()
         flag_index = (hash_pandas_index(index).iat[0], var_label)
+        flag_def = self.flag_def_head_df()
+        all_flags = flag_def.index
         if flag_index in flat_flag_df.index:
             flags_entry = flat_flag_df.loc[flag_index]
-            flags = (flags_entry[self.flag_def_head_df().index]
-                     .dropna().index.to_list())
-            # dft = df.reset_index().set_index(DataStore.TRACKING_INDEX_LEVELS)
-            # result = pd.concat([df] + [self.flag_ds.full_df(dlabel)
-            #                            .note.rename(dlabel).loc[df.index]
-            #                            for dlabel in ('user', 'comment',
-            #                                           'timestamp')],
-            #                    axis=1)
-            return flags
+            flags = flags_entry[all_flags].fillna(False).astype('boolean')
+            flags.name = 'used'
+            tracking_index = tuple(flags_entry[DataStore.TRACKING_INDEX_LEVELS])
+            to_concat = [flags, flag_def.flag_symbol[flag_def.index]]
+            for dlabel in ('user', 'comment', 'timestamp'):
+                flat_df = self.flag_ds.head_df(dlabel)
+                data = flat_df.loc[tracking_index][all_flags]
+                data.name = dlabel
+                to_concat.append(data)
+            all_flags_data = pd.concat(to_concat, axis=1)
+            return all_flags_data
         else:
-            return []
+            flags_df = flag_def[['flag_symbol']].copy()
+            flags_df['used'] = False
+            flags_df['user'] = pd.NA
+            flags_df['comment'] = pd.NA
+            flags_df['timestamp'] = pd.NaT
+            return flags_df.astype({
+                'comment' : 'string',
+                'flag_symbol' : 'string',
+                'used' : 'boolean',
+                'user' : 'string'
+            })
 
     def full_df(self, data_label='value'):
         t_levels = DataStore.TRACKING_INDEX_LEVELS
@@ -1938,7 +1954,7 @@ class TestDataStore(TestCase):
     def setUp(self):
         # self.setUpPyfakefs() # Issue with IPython embed
         # from IPython import embed; embed()
-        logger.setLevel(logging.DEBUG)
+        # logger.setLevel(logging.DEBUG)
         self.tmp_dir = tempfile.mkdtemp()
         self.filesystem = LocalFileSystem(self.tmp_dir)
 
@@ -2416,19 +2432,15 @@ class TestDataStore(TestCase):
         ds.push_flag_def('dummy', 'question_mark')
         ds.push_flag_def('double_checked', 'tick_mark_green')
 
-        self.assertRaises(InvalidFlagIndex, ds.flag_index_as_symbol, 3)
-        self.assertRaises(ValueError, ds.push_flag_def, flag_label='dummy',
-                          flag_symbol='triangle_orange')
-
         ds.push_variable('v1', 'string')
-        tidx1 = ds.push_record({'v1' : 'has flags'})
-        
+        tidx1 = ds.push_record({'v1' : 'has flags'})        
         ds.push_flag(tidx1, 'v1', 'to_check')
+
         single_flag_symbols_df = ds.full_df('single_flag_symbols')
         self.assertEqual(single_flag_symbols_df.loc[tidx1, 'v1'].iat[0],
                          'triangle_orange')
 
-        ds.push_flag_def('error', 'cross_red')
+        ds.push_flag_def('to_check', 'cross_red')
         single_flag_symbols_df = ds.full_df('single_flag_symbols')
         self.assertEqual(single_flag_symbols_df.loc[tidx1, 'v1'].iat[0],
                          'cross_red')
@@ -2458,27 +2470,74 @@ class TestDataStore(TestCase):
 
         ts3 = datetime(2019, 1, 2, 10, 14)
         ds.push_flag(tidx[[1]], 'v1', ['dummy', 'to_check'],
-                     comments='I flagged dummy & to_check', timestamp=ts3)
+                     comments='I flagged dummy & to_check',
+                     timestamp=ts3)
+
+        # Check that tidx[[3]] has no flags
         expected_flags = {
-            'flag_label' : [0, 1, 4, 7],
+            'flag' : ['to_check',
+                      'dummy',
+                      'double_checked',
+                      'other'],
+            'used' : [False, False, False, False],
             'flag_symbol' : ['triangle_orange',
                              'question_mark',
                              'tick_mark_green',
                              'square_blue'],
+            'user' : [pd.NA, pd.NA, pd.NA, pd.NA],
+            'comment' : [pd.NA, pd.NA, pd.NA, pd.NA],
+            'timestamp' : [pd.NaT, pd.NaT, pd.NaT, pd.NaT],
+        }
+        expected_flags_df = pd.DataFrame(expected_flags)
+        expected_flags_df = expected_flags_df.astype({
+            'flag' : 'string',
+            'comment' : 'string',
+            'flag_symbol' : 'string',
+            'used' : 'boolean',
+            'user' : 'string'
+        }).set_index('flag')
+        fof = ds.flags_of(tidx[[3]], 'v1').loc[expected_flags_df.index]
+        assert_frame_equal(fof[expected_flags_df.columns], expected_flags_df)
+
+        # Check flag retrieval for tidx[[0]]
+        # -> to_check and other
+        expected_flags = {
+            'flag' : ['to_check',
+                      'dummy',
+                      'double_checked',
+                      'other'],
             'used' : [True, False, False, True],
-            'comment' : ['I flagged here', pd.NA, pd.NA, 'I flagged there'],
+            'flag_symbol' : ['triangle_orange',
+                             'question_mark',
+                             'tick_mark_green',
+                             'square_blue'],
             'user' : ['me', pd.NA, pd.NA, 'me'],
+            'comment' : ['I flagged to_check', pd.NA, pd.NA,
+                         'I flagged other'],
             'timestamp' : [ts1, pd.NaT, pd.NaT, ts2],
         }
         expected_flags_df = pd.DataFrame(expected_flags)
-        expected_flags_df['comment'] = expected_flags_df['comment'].astype('string')
+        expected_flags_df['comment'] = (expected_flags_df['comment']
+                                        .astype('string'))
+        expected_flags_df['flag_symbol'] = (expected_flags_df['flag_symbol']
+                                            .astype('string'))
         expected_flags_df['used'] = expected_flags_df['used'].astype('boolean')
         expected_flags_df['user'] = expected_flags_df['user'].astype('string')
-        assert_frame_equal(ds.flags_of(tidx[[0]], 'v1'), expected_flags_df)
+        expected_flags_df = expected_flags_df.set_index('flag')
+        fof = ds.flags_of(tidx[[0]], 'v1').loc[expected_flags_df.index]
+        assert_frame_equal(fof, expected_flags_df)
 
-        self.assertEqual(ds.flags_of(tidx[[1]], 'v1'), [0, 4])
-        self.assertEqual(ds.flags_of(tidx[[2]], 'v1'), [7])
-        self.assertEqual(ds.flags_of(tidx[[3]], 'v1'), [])
+        flags_of_i1_v1 = ds.flags_of(tidx[[1]], 'v1')['used']
+        self.assertTrue(flags_of_i1_v1.loc[['dummy', 'to_check']].all())
+        self.assertTrue((~flags_of_i1_v1.loc[['double_checked',
+                                              'other']]).all())
+        flags_of_i2_v1 = ds.flags_of(tidx[[2]], 'v1')['used']
+        self.assertTrue(flags_of_i2_v1.loc[['to_check']].all())
+        self.assertTrue((~flags_of_i2_v1.loc[['dummy',
+                                              'double_checked',
+                                              'other']]).all())
+        flags_of_i3_v1 = ds.flags_of(tidx[[3]], 'v1')['used']
+        self.assertTrue((~flags_of_i3_v1.loc['to_check']).all())
 
         single_flag_symbols_df = ds.full_df('single_flag_symbols')
         self.assertEqual(single_flag_symbols_df.loc[tidx, 'v1'].to_list(),
